@@ -598,7 +598,22 @@ struct mmc_host {
 	int			latency_hist_enabled;
 	struct io_latency_state io_lat_s;
 #endif
-
+	struct mmc_trace_buffer trace_buf;
+	enum dev_state dev_status;
+	bool			wakeup_on_idle;
+	struct mmc_cmdq_context_info	cmdq_ctx;
+	int num_cq_slots;
+	int dcmd_cq_slot;
+	u32			cmdq_thist_enabled;
+	/*
+	 * several cmdq supporting host controllers are extensions
+	 * of legacy controllers. This variable can be used to store
+	 * a reference to the cmdq extension of the existing host
+	 * controller.
+	 */
+	void *cmdq_private;
+	struct mmc_request	*err_mrq;
+	bool sdr104_wa;
 	unsigned long		private[0] ____cacheline_aligned;
 };
 
