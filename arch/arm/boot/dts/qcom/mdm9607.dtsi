@@ -1268,15 +1268,7 @@
 		qcom,msm-cpudai-auxpcm-data = <0>, <0>;
 		qcom,msm-cpudai-auxpcm-pcm-clk-rate = <2048000>, <4096000>;	//for pcm 16k, clock rate nede 4096000
 		qcom,msm-auxpcm-interface = "primary";
-		/*pinctrl-names = "default", "idle";
-			pinctrl-0 = <&pri_auxpcm_ws_active
-					&pri_auxpcm_sck_active
-					&pri_auxpcm_dout_active
-					&pri_auxpcm_din_active>;
-			pinctrl-1 = <&pri_auxpcm_ws_sleep
-					&pri_auxpcm_sck_sleep
-					&pri_auxpcm_dout_sleep
-					&sec_auxpcm_din_sleep>;*/
+		qcom,msm-cpudai-afe-clk-ver = <2>;
 	};
 
 	//2016-03-07, add by ju.wu
@@ -1292,15 +1284,7 @@
 		qcom,msm-cpudai-auxpcm-pcm-clk-rate = <2048000>, <4096000>;
 		qcom,msm-cpudai-afe-clk-ver = <2>;
 		qcom,msm-auxpcm-interface = "secondary";
-		pinctrl-names = "default", "idle";
-			pinctrl-0 = <&sec_auxpcm_ws_active
-					&sec_auxpcm_sck_active
-					&sec_auxpcm_dout_active
-					&sec_auxpcm_din_active>;
-			pinctrl-1 = <&sec_auxpcm_ws_sleep
-					&sec_auxpcm_sck_sleep
-					&sec_auxpcm_dout_sleep
-					&sec_auxpcm_din_sleep>;
+		qcom,msm-cpudai-afe-clk-ver = <2>;
 	};
 	//end jun.wu
 
