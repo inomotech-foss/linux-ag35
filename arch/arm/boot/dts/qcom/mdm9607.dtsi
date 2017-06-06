@@ -1396,9 +1396,7 @@
 		qcom,vdd-restriction-temp = <5>;
 		qcom,vdd-restriction-temp-hysteresis = <10>;
 		vdd-dig-supply = <&mdm9607_s3_floor_level>;
-		//add by [asa.wang] 20180207 for add qualcomm CR 2050812 Power [LE925A4-KR] modem crash at the 85'c high temperature start
 		qcom,therm-ddr-lm-info = <2 78 70>;
-		//add by [asa.wang] 20180207 end
 
 		qcom,vdd-dig-rstr{
 			qcom,vdd-rstr-reg = "vdd-dig";
