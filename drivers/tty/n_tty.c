@@ -1657,7 +1657,7 @@ static void __receive_buf(struct tty_struct *tty, const unsigned char *cp,
 	if (ldata->icanon && !L_EXTPROC(tty))
 		return;
 
-	/* publish read_head to consumer */
+	/* publish read head to consumer */
 	smp_store_release(&ldata->commit_head, ldata->read_head);
 
 	if ((read_cnt(ldata) >= ldata->minimum_to_wake) || L_EXTPROC(tty)) {
