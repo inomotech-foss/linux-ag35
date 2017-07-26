@@ -3688,6 +3688,9 @@ static int otg_power_set_property_usb(struct power_supply *psy,
 				motg->chg_type, psy->type);
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
+		if (val->intval > POWER_SUPPLY_HEALTH_HOT)
+			motg->usbin_health = 0;
+		else
 		motg->usbin_health = val->intval;
 		break;
 	default:
