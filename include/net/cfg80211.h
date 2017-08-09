@@ -1626,22 +1626,8 @@ struct cfg80211_bss_select_adjust {
  * @channels: channels to scan
  * @min_rssi_thold: for drivers only supporting a single threshold, this
  *	contains the minimum over all matchsets
- * @mac_addr: MAC address used with randomisation
- * @mac_addr_mask: MAC address mask used with randomisation, bits that
- *	are 0 in the mask should be randomised, bits that are 1 should
- *	be taken from the @mac_addr
  * @owner_nlportid: netlink portid of owner (if this should is a request
  *	owned by a particular socket)
- * @relative_rssi_set: Indicates whether @relative_rssi is set or not.
- * @relative_rssi: Relative RSSI threshold in dB to restrict scan result
- *	reporting in connected state to cases where a matching BSS is determined
- *	to have better or slightly worse RSSI than the current connected BSS.
- *	The relative RSSI threshold values are ignored in disconnected state.
- * @rssi_adjust: delta dB of RSSI preference to be given to the BSSs that belong
- *	to the specified band while deciding whether a better BSS is reported
- *	using @relative_rssi. If delta is a negative number, the BSSs that
- *	belong to the specified band will be penalized by delta dB in relative
- *	comparisions.
  */
 struct cfg80211_sched_scan_request {
 	struct cfg80211_ssid *ssids;
@@ -1666,9 +1652,6 @@ struct cfg80211_sched_scan_request {
 	struct wiphy *wiphy;
 	struct net_device *dev;
 	unsigned long scan_start;
-	struct cfg80211_sched_scan_plan *scan_plans;
-	int n_scan_plans;
-
 	u32 owner_nlportid;
 
 	/* keep last */

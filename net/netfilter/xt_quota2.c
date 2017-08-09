@@ -23,9 +23,6 @@
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/xt_quota2.h>
 
-#define QUOTA2_SYSFS_WORK_MAX_SIZE 64
-#define QUOTA2_SYSFS_NUM_ENVP 3
-
 #ifdef CONFIG_NETFILTER_XT_MATCH_QUOTA2_LOG
 /* For compatibility, these definitions are copied from the
  * deprecated header file <linux/netfilter_ipv4/ipt_ULOG.h> */
