@@ -40,8 +40,6 @@
 #include <linux/async.h>
 #include <scsi/ufs/ioctl.h>
 #include <linux/devfreq.h>
-#include <linux/nls.h>
-#include <linux/of.h>
 #include <linux/blkdev.h>
 
 #include "ufshcd.h"
@@ -2631,22 +2629,6 @@ static int ufshcd_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd)
 		clear_bit_unlock(tag, &hba->lrb_in_use);
 		goto out;
 	}
-	if (ufshcd_is_clkgating_allowed(hba))
-		WARN_ON(hba->clk_gating.state != CLKS_ON);
-
-	err = ufshcd_hibern8_hold(hba, true);
-	if (err) {
-		clear_bit_unlock(tag, &hba->lrb_in_use);
-		err = SCSI_MLQUEUE_HOST_BUSY;
-		ufshcd_release(hba, true);
-		goto out;
-	}
-	if (ufshcd_is_hibern8_on_idle_allowed(hba))
-		WARN_ON(hba->hibern8_on_idle.state != HIBERN8_EXITED);
-
-	/* Vote PM QoS for the request */
-	ufshcd_vops_pm_qos_req_start(hba, cmd->request);
-
 	/* IO svc time latency histogram */
 	if (hba != NULL && cmd->request != NULL) {
 		if (hba->latency_hist_enabled &&
@@ -5099,6 +5081,18 @@ static void __ufshcd_transfer_req_compl(struct ufs_hba *hba,
 	int result;
 	int index;
 	struct request *req;
+
+	/* Resetting interrupt aggregation counters first and reading the
+	 * DOOR_BELL afterward allows us to handle all the completed requests.
+	 * In order to prevent other interrupts starvation the DB is read once
+	 * after reset. The down side of this solution is the possibility of
+	 * false interrupt if device completes another request after resetting
+	 * aggregation and before reading the DB.
+	 */
+	ufshcd_reset_intr_aggr(hba);
+
+	tr_doorbell = ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL);
+	completed_reqs = tr_doorbell ^ hba->outstanding_reqs;
 
 	for_each_set_bit(index, &completed_reqs, hba->nutrs) {
 		lrbp = &hba->lrb[index];
@@ -8626,9 +8620,8 @@ void ufshcd_remove(struct ufs_hba *hba)
 	ufshcd_hba_stop(hba, true);
 
 	ufshcd_exit_clk_gating(hba);
-	ufshcd_exit_hibern8_on_idle(hba);
-	if (ufshcd_is_clkscaling_supported(hba)) {
-		device_remove_file(hba->dev, &hba->clk_scaling.enable_attr);
+	ufshcd_exit_latency_hist(hba);
+	if (ufshcd_is_clkscaling_enabled(hba))
 		devfreq_remove_device(hba->devfreq);
 	}
 	ufshcd_hba_exit(hba);

@@ -30,6 +30,14 @@
 #include <linux/cleancache.h>
 #include "internal.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/android_fs.h>
+
+EXPORT_TRACEPOINT_SYMBOL(android_fs_datawrite_start);
+EXPORT_TRACEPOINT_SYMBOL(android_fs_datawrite_end);
+EXPORT_TRACEPOINT_SYMBOL(android_fs_dataread_start);
+EXPORT_TRACEPOINT_SYMBOL(android_fs_dataread_end);
+
 /*
  * I/O completion handler for multipage BIOs.
  *
@@ -46,6 +54,16 @@ static void mpage_end_io(struct bio *bio, int err)
 {
 	struct bio_vec *bv;
 	int i;
+
+	if (trace_android_fs_dataread_end_enabled() &&
+	    (bio_data_dir(bio) == READ)) {
+		struct page *first_page = bio->bi_io_vec[0].bv_page;
+
+		if (first_page != NULL)
+			trace_android_fs_dataread_end(first_page->mapping->host,
+						      page_offset(first_page),
+						      bio->bi_iter.bi_size);
+	}
 
 	bio_for_each_segment_all(bv, bio, i) {
 		struct page *page = bv->bv_page;
