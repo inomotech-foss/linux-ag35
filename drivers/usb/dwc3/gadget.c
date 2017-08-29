@@ -208,15 +208,15 @@ int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc, struct dwc3_ep *dep)
 	mdwidth >>= 3;
 
 	if (dep->endpoint.ep_type == EP_TYPE_GSI || dep->endpoint.endless)
-			mult = 3;
+		mult = 3;
 
-		if (((dep->endpoint.maxburst > 1) &&
-				usb_endpoint_xfer_bulk(dep->endpoint.desc))
-				|| usb_endpoint_xfer_isoc(dep->endpoint.desc))
-			mult = 3;
+	if (((dep->endpoint.maxburst > 1) &&
+			usb_endpoint_xfer_bulk(dep->endpoint.desc))
+			|| usb_endpoint_xfer_isoc(dep->endpoint.desc))
+		mult = 3;
 
 	tmp = ((max_packet + mdwidth) * mult) + mdwidth;
-		fifo_size = DIV_ROUND_UP(tmp, mdwidth);
+	fifo_size = DIV_ROUND_UP(tmp, mdwidth);
 	dep->fifo_depth = fifo_size;
 	fifo_size |= (dwc->last_fifo_depth << 16);
 	dwc->last_fifo_depth += (fifo_size & 0xffff);
@@ -228,7 +228,7 @@ int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc, struct dwc3_ep *dep)
 	dbg_event(0xFF, "resize_fifo", dep->number);
 	dbg_event(0xFF, "fifo_depth", dep->fifo_depth);
 	/* Check fifo size allocation doesn't exceed available RAM size. */
-		if (dwc->tx_fifo_size &&
+	if (dwc->tx_fifo_size &&
 		((dwc->last_fifo_depth * mdwidth) >= dwc->tx_fifo_size)) {
 		dev_err(dwc->dev, "Fifosize(%d) > RAM size(%d) %s depth:%d\n",
 			(dwc->last_fifo_depth * mdwidth), dwc->tx_fifo_size,
@@ -236,8 +236,8 @@ int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc, struct dwc3_ep *dep)
 		dwc->last_fifo_depth -= (fifo_size & 0xffff);
 		dep->fifo_depth = 0;
 		WARN_ON(1);
-			return -ENOMEM;
-		}
+		return -ENOMEM;
+	}
 
 	dwc3_writel(dwc->regs, DWC3_GTXFIFOSIZ(dep->endpoint.ep_num),
 							fifo_size);
@@ -478,7 +478,7 @@ static int dwc3_gadget_start_config(struct dwc3 *dwc, struct dwc3_ep *dep)
 		return 0;
 
 	memset(&params, 0x00, sizeof(params));
-		cmd = DWC3_DEPCMD_DEPSTARTCFG;
+	cmd = DWC3_DEPCMD_DEPSTARTCFG;
 
 	ret = dwc3_send_gadget_ep_cmd(dwc, 0, cmd, &params);
 	if (ret)
@@ -666,7 +666,9 @@ static void dwc3_remove_requests(struct dwc3 *dwc, struct dwc3_ep *dep)
 
 			dwc3_gadget_giveback(dep, req, -ESHUTDOWN);
 		}
-	} else if (usb_endpoint_xfer_isoc(dep->endpoint.desc)) {
+	/* For isoc endpoints explicitly stop active transfers */
+	} else if (dep->endpoint.desc &&
+		usb_endpoint_xfer_isoc(dep->endpoint.desc)) {
 		dwc3_stop_active_transfer(dwc, dep->number, true);
 	}
 
