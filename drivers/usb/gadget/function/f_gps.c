@@ -229,8 +229,8 @@ static int gps_gport_setup(void)
 		gps_port.port->port_num = base;
 		break;
 	default:
-	res = gsmd_ctrl_setup(GPS_CTRL_CLIENT, 1, &base);
-	gps_port.port->port_num = base;
+		res = gsmd_ctrl_setup(GPS_CTRL_CLIENT, 1, &base);
+		gps_port.port->port_num = base;
 		break;
 	}
 	return res;
@@ -242,7 +242,7 @@ static int gport_ctrl_connect(struct f_gps *dev)
 	case USB_GADGET_XPORT_GLINK:
 		return glink_ctrl_connect(&dev->port, dev->port_num);
 	default:
-	return gsmd_ctrl_connect(&dev->port, dev->port_num);
+		return gsmd_ctrl_connect(&dev->port, dev->port_num);
 	}
 }
 
@@ -253,8 +253,8 @@ static int gport_gps_disconnect(struct f_gps *dev)
 		glink_ctrl_disconnect(&dev->port, dev->port_num);
 		return 0;
 	default:
-	gsmd_ctrl_disconnect(&dev->port, dev->port_num);
-	return 0;
+		gsmd_ctrl_disconnect(&dev->port, dev->port_num);
+		return 0;
 	}
 }
 
@@ -590,7 +590,8 @@ gps_send_cpkt_response(void *gr, void *buf, size_t len)
 	}
 	cpkt = gps_alloc_ctrl_pkt(len, GFP_ATOMIC);
 	if (IS_ERR(cpkt)) {
-		pr_err("%s: Unable to allocate ctrl pkt\n", __func__);
+		pr_err_ratelimited("%s: Unable to allocate ctrl pkt\n",
+					__func__);
 		return -ENOMEM;
 	}
 	memcpy(cpkt->buf, buf, len);
@@ -598,7 +599,7 @@ gps_send_cpkt_response(void *gr, void *buf, size_t len)
 
 	dev = port_to_gps(gr);
 
-	pr_debug("%s: dev:%pK\n", __func__, dev);
+	pr_debug_ratelimited("%s: dev:%pK\n", __func__, dev);
 
 	if (!atomic_read(&dev->online) || !atomic_read(&dev->ctrl_online)) {
 		gps_free_ctrl_pkt(cpkt);
