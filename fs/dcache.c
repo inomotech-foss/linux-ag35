@@ -1340,7 +1340,7 @@ static enum d_walk_ret select_collect(void *_data, struct dentry *dentry)
 		goto out;
 
 	if (dentry->d_flags & DCACHE_SHRINK_LIST) {
-		data->found++;
+		goto out;
 	} else {
 		if (dentry->d_flags & DCACHE_LRU_LIST)
 			d_lru_del(dentry);
@@ -2808,26 +2808,26 @@ struct dentry *d_splice_alias(struct inode *inode, struct dentry *dentry)
 				spin_unlock(&inode->i_lock);
 				dput(new);
 				new = ERR_PTR(-ELOOP);
-					pr_warn_ratelimited(
-						"VFS: Lookup of '%s' in %s %s"
-						" would have caused loop\n",
-						dentry->d_name.name,
-						inode->i_sb->s_type->name,
-						inode->i_sb->s_id);
+				pr_warn_ratelimited(
+					"VFS: Lookup of '%s' in %s %s"
+					" would have caused loop\n",
+					dentry->d_name.name,
+					inode->i_sb->s_type->name,
+					inode->i_sb->s_id);
 			} else if (!IS_ROOT(new)) {
 				int err = __d_unalias(inode, dentry, new);
 				write_sequnlock(&rename_lock);
 				if (err) {
 					dput(new);
 					new = ERR_PTR(err);
-			}
+				}
 			} else {
 				__d_move(new, dentry, false);
 				write_sequnlock(&rename_lock);
-	spin_unlock(&inode->i_lock);
+				spin_unlock(&inode->i_lock);
 				security_d_instantiate(new, inode);
-	}
-	iput(inode);
+			}
+			iput(inode);
 			return new;
 		}
 	}
