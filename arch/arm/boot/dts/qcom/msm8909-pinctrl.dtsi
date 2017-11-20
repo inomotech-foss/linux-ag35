@@ -138,7 +138,7 @@
 		};
 
 		cam_sensor_flash_default: cam_sensor_flash_default {
-			/* FLASH_RESET,FLASH_EN,FLASH_NOW */
+		/* FLASH_RESET,FLASH_EN,FLASH_NOW */
 			mux {
 				pins = "gpio36", "gpio31", "gpio32";
 				function = "gpio";
@@ -970,7 +970,7 @@
 
 			gpio_key_suspend: gpio_key_suspend {
 				mux {
-					pins = "gpio91", "gpio91", "gpio92";
+					pins = "gpio90", "gpio91", "gpio92";
 					function = "gpio";
 				};
 
