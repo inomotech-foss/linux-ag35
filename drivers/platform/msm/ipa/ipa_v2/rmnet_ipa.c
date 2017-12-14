@@ -1117,8 +1117,8 @@ send:
 	ret = NETDEV_TX_OK;
 out:
 	if (atomic_read(&wwan_ptr->outstanding_pkts) == 0)
-	ipa_rm_inactivity_timer_release_resource(
-		IPA_RM_RESOURCE_WWAN_0_PROD);
+		ipa_rm_inactivity_timer_release_resource(
+			IPA_RM_RESOURCE_WWAN_0_PROD);
 	return ret;
 }
 
@@ -1172,8 +1172,8 @@ static void apps_ipa_tx_complete_notify(void *priv,
 	}
 
 	if (atomic_read(&wwan_ptr->outstanding_pkts) == 0)
-	ipa_rm_inactivity_timer_release_resource(
-		IPA_RM_RESOURCE_WWAN_0_PROD);
+		ipa_rm_inactivity_timer_release_resource(
+			IPA_RM_RESOURCE_WWAN_0_PROD);
 	__netif_tx_unlock_bh(netdev_get_tx_queue(dev, 0));
 	dev_kfree_skb_any(skb);
 }
@@ -2561,7 +2561,7 @@ int rmnet_ipa_set_data_quota(struct wan_ioctl_set_data_quota *data)
 	if (index == MAX_NUM_OF_MUX_CHANNEL) {
 		IPAWANERR("%s is an invalid iface name\n",
 			  data->interface_name);
-		return -EFAULT;
+		return -ENODEV;
 	}
 
 	mux_id = mux_channel[index].mux_id;
