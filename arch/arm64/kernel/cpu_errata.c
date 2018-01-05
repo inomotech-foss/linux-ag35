@@ -108,8 +108,8 @@ static void __install_bp_hardening_cb(bp_hardening_cb_t fn,
 #define __psci_hyp_bp_inval_end		NULL
 
 static void __install_bp_hardening_cb(bp_hardening_cb_t fn,
-			  const char *hyp_vecs_start,
-			  const char *hyp_vecs_end)
+				      const char *hyp_vecs_start,
+				      const char *hyp_vecs_end)
 {
 	__this_cpu_write(bp_hardening_data.fn, fn);
 }
@@ -146,6 +146,19 @@ static void enable_psci_bp_hardening(void *data)
 				       __psci_hyp_bp_inval_end);
 
 }
+
+static void __maybe_unused qcom_link_stack_sanitization(void)
+{
+	u64 tmp;
+
+	asm volatile("mov	%0, x30		\n"
+		     ".rept	16		\n"
+		     "bl	. + 4		\n"
+		     ".endr			\n"
+		     "mov	x30, %0		\n"
+		     : "=&r" (tmp));
+}
+
 #endif	/* CONFIG_HARDEN_BRANCH_PREDICTOR */
 
 #define MIDR_RANGE(model, min, max) \
