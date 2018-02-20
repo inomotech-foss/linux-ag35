@@ -90,6 +90,7 @@ struct bg_cdc_priv {
 	struct platform_device *pdev_child;
 	struct work_struct bg_cdc_add_child_devices_work;
 	struct delayed_work bg_cdc_pktzr_init_work;
+	struct delayed_work bg_cdc_cal_init_work;
 	unsigned long status_mask;
 	struct bg_hw_params hw_params;
 	struct notifier_block bg_pm_nb;
@@ -250,23 +251,23 @@ static int bg_cdc_cal(struct bg_cdc_priv *bg_cdc)
 		init_params += sizeof(app_mic_init_params);
 	}
 	if (bg_cdc->bg_spk_connected) {
-	if (bg_cdc->hwdep_spk_cal) {
+		if (bg_cdc->hwdep_spk_cal) {
 			pr_debug("%s: spk cal size %d\n", __func__,
-				bg_cdc->hwdep_spk_cal->size);
-		memcpy(init_params, &bg_cdc->hwdep_spk_cal->size,
-				sizeof(bg_cdc->hwdep_spk_cal->size));
-		init_params += sizeof(bg_cdc->hwdep_spk_cal->size);
-		memcpy(init_params, bg_cdc->hwdep_spk_cal->data,
-				bg_cdc->hwdep_spk_cal->size);
-	} else {
+					bg_cdc->hwdep_spk_cal->size);
+			memcpy(init_params, &bg_cdc->hwdep_spk_cal->size,
+					sizeof(bg_cdc->hwdep_spk_cal->size));
+			init_params += sizeof(bg_cdc->hwdep_spk_cal->size);
+			memcpy(init_params, bg_cdc->hwdep_spk_cal->data,
+					bg_cdc->hwdep_spk_cal->size);
+		} else {
 			pr_debug("%s: default spk cal size %d\n", __func__,
-				spk_blob_size);
-		memcpy(init_params, &spk_blob_size,
-			sizeof(spk_blob_size));
-		init_params += sizeof(spk_blob_size);
-		memcpy(init_params, smart_pa_init_params,
-			sizeof(smart_pa_init_params));
-	}
+					spk_blob_size);
+			memcpy(init_params, &spk_blob_size,
+				sizeof(spk_blob_size));
+			init_params += sizeof(spk_blob_size);
+			memcpy(init_params, smart_pa_init_params,
+				sizeof(smart_pa_init_params));
+		}
 	} else
 		pr_debug("%s: spk not connected ignoring spk cal\n", __func__);
 	rsp.buf_size = sizeof(struct graphite_basic_rsp_result);
@@ -288,6 +289,34 @@ err1:
 	kfree(init_head);
 err2:
 	return ret;
+}
+
+static void bg_cdc_cal_init(struct work_struct *work)
+{
+	struct bg_cdc_priv *bg_cdc;
+	struct delayed_work *dwork;
+	int ret = 0;
+
+	dwork = to_delayed_work(work);
+	bg_cdc = container_of(dwork, struct bg_cdc_priv,
+				bg_cdc_cal_init_work);
+	mutex_lock(&bg_cdc->bg_cdc_lock);
+	if (!bg_cdc->bg_cal_updated) {
+		ret = bg_cdc_enable_regulator(bg_cdc->spkr_vreg, true);
+		if (ret < 0) {
+			pr_err("%s: enable_regulator failed %d\n", __func__,
+				ret);
+		} else {
+			ret =  bg_cdc_cal(bg_cdc);
+			if (ret < 0) {
+				bg_cdc_enable_regulator(bg_cdc->spkr_vreg,
+							false);
+				pr_err("%s: failed to send cal data\n",
+					__func__);
+			}
+		}
+	}
+	mutex_unlock(&bg_cdc->bg_cdc_lock);
 }
 
 static int _bg_codec_hw_params(struct bg_cdc_priv *bg_cdc)
@@ -395,7 +424,7 @@ static int _bg_codec_stop(struct bg_cdc_priv *bg_cdc, int dai_id)
 	if (!rsp.buf)
 		return -ENOMEM;
 	if (bg_cdc->bg_dev_up) {
-	ret = pktzr_cmd_stop(&codec_start, sizeof(codec_start), &rsp);
+		ret = pktzr_cmd_stop(&codec_start, sizeof(codec_start), &rsp);
 	if (ret < 0)
 		pr_err("pktzr cmd stop failed with error %d\n", ret);
 	}
@@ -823,7 +852,7 @@ static struct snd_soc_dai_driver bg_cdc_dai[] = {
 };
 
 static int data_cmd_rsp(void *buf, uint32_t len, void *priv_data,
-			 bool *is_basic_rsp)
+			bool *is_basic_rsp)
 {
 	struct graphite_basic_rsp_result *resp;
 
@@ -874,6 +903,8 @@ static void bg_cdc_pktzr_init(struct work_struct *work)
 
 	if (rsp.buf)
 		kzfree(rsp.buf);
+	schedule_delayed_work(&bg_cdc->bg_cdc_cal_init_work,
+			      msecs_to_jiffies(5000));
 }
 
 static int bg_cdc_bg_device_up(struct bg_cdc_priv *bg_cdc)
@@ -1045,6 +1076,11 @@ static int bg_cdc_codec_remove(struct snd_soc_codec *codec)
 	struct bg_cdc_priv *bg_cdc = dev_get_drvdata(codec->dev);
 	pr_debug("In func %s\n", __func__);
 	pktzr_deinit();
+
+	if (delayed_work_pending(&bg_cdc->bg_cdc_pktzr_init_work))
+		cancel_delayed_work_sync(&bg_cdc->bg_cdc_pktzr_init_work);
+	if (delayed_work_pending(&bg_cdc->bg_cdc_cal_init_work))
+		cancel_delayed_work_sync(&bg_cdc->bg_cdc_cal_init_work);
 	if (adsp_state_notifier)
 		subsys_notif_unregister_notifier(adsp_state_notifier,
 						 &bg_cdc->bg_adsp_nb);
@@ -1226,6 +1262,8 @@ static int bg_cdc_probe(struct platform_device *pdev)
 		  bg_cdc_add_child_devices);
 	INIT_DELAYED_WORK(&bg_cdc->bg_cdc_pktzr_init_work,
 		  bg_cdc_pktzr_init);
+	INIT_DELAYED_WORK(&bg_cdc->bg_cdc_cal_init_work,
+		  bg_cdc_cal_init);
 	schedule_work(&bg_cdc->bg_cdc_add_child_devices_work);
 	mutex_init(&bg_cdc->bg_cdc_lock);
 	bg_cdc->bg_pm_nb.notifier_call = bg_pm_event;
