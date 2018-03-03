@@ -1,4 +1,4 @@
-/* drivers/misc/uid_cputime.c
+/* drivers/misc/uid_sys_stats.c
  *
  * Copyright (C) 2014 - 2015 Google, Inc.
  *
@@ -539,17 +539,17 @@ static int uid_io_show(struct seq_file *m, void *v)
 
 	hash_for_each(hash_table, bkt, uid_entry, hash) {
 		seq_printf(m, "%d %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu\n",
-			uid_entry->uid,
-			uid_entry->io[UID_STATE_FOREGROUND].rchar,
-			uid_entry->io[UID_STATE_FOREGROUND].wchar,
-			uid_entry->io[UID_STATE_FOREGROUND].read_bytes,
-			uid_entry->io[UID_STATE_FOREGROUND].write_bytes,
-			uid_entry->io[UID_STATE_BACKGROUND].rchar,
-			uid_entry->io[UID_STATE_BACKGROUND].wchar,
-			uid_entry->io[UID_STATE_BACKGROUND].read_bytes,
-			uid_entry->io[UID_STATE_BACKGROUND].write_bytes,
-			uid_entry->io[UID_STATE_FOREGROUND].fsync,
-			uid_entry->io[UID_STATE_BACKGROUND].fsync);
+				uid_entry->uid,
+				uid_entry->io[UID_STATE_FOREGROUND].rchar,
+				uid_entry->io[UID_STATE_FOREGROUND].wchar,
+				uid_entry->io[UID_STATE_FOREGROUND].read_bytes,
+				uid_entry->io[UID_STATE_FOREGROUND].write_bytes,
+				uid_entry->io[UID_STATE_BACKGROUND].rchar,
+				uid_entry->io[UID_STATE_BACKGROUND].wchar,
+				uid_entry->io[UID_STATE_BACKGROUND].read_bytes,
+				uid_entry->io[UID_STATE_BACKGROUND].write_bytes,
+				uid_entry->io[UID_STATE_FOREGROUND].fsync,
+				uid_entry->io[UID_STATE_BACKGROUND].fsync);
 
 		show_io_uid_tasks(m, uid_entry);
 	}

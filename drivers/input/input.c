@@ -678,7 +678,7 @@ static void input_dev_release_keys(struct input_dev *dev)
 			input_pass_event(dev, EV_KEY, code, 0);
 			need_sync = true;
 		}
-
+		}
 		if (need_sync)
 			input_pass_event(dev, EV_SYN, SYN_REPORT, 1);
 
