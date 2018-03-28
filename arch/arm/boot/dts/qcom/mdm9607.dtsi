@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1042,7 +1042,9 @@
 				<&tx_capture_tx>, <&tx_playback_rx>,
 				<&afe_pcm_rx>, <&afe_pcm_tx>, <&afe_proxy_rx>,
 				<&afe_proxy_tx>, <&incall_record_rx>,
-				<&incall_record_tx>, <&incall_music_rx>;
+				<&incall_record_tx>, <&incall_music_rx>,
+				<&dai_pri_tdm_rx_0>, <&dai_pri_tdm_tx_0>,
+				<&dai_sec_tdm_rx_0>, <&dai_sec_tdm_tx_0>;
 		asoc-cpu-names = "msm-dai-q6-auxpcm.1", "msm-dai-q6-auxpcm.2",
 				"msm-dai-q6-mi2s.0", "msm-dai-q6-mi2s.1",
 				"msm-dai-stub-dev.4", "msm-dai-stub-dev.5",
@@ -1050,7 +1052,9 @@
 				"msm-dai-stub-dev.8", "msm-dai-q6-dev.224",
 				"msm-dai-q6-dev.225", "msm-dai-q6-dev.241",
 				"msm-dai-q6-dev.240", "msm-dai-q6-dev.32771",
-				"msm-dai-q6-dev.32772", "msm-dai-q6-dev.32773";
+				"msm-dai-q6-dev.32772", "msm-dai-q6-dev.32773",
+				"msm-dai-q6-tdm.36864", "msm-dai-q6-tdm.36865",
+				"msm-dai-q6-tdm.36880", "msm-dai-q6-tdm.36881";
 		asoc-codec = <&stub_codec>;
 		asoc-codec-names = "msm-stub-codec.1";
 	};
@@ -1989,63 +1993,81 @@
 		gpios = <&tlmm_pinmux 53 0>;
 		status = "okay";
 	};
-//2016-01-29,add by jun.wu, for quectel power manager
-	quec,quectel-power-manager{
-		compatible = "quec,quectel-power-manager";	
 
-		//gpios = <&tlmm_pinmux 74  0>,		/* DTR */	
-		//		<&tlmm_pinmux 42 0>,		/* WAKEUP-IN*/
-		//		<&tlmm_pinmux 25 0>;		/* SLEEP-IND*/
-		//quec,gpio-names = "dtr", "wakeup_in", "sleep_ind";	
-
-		/*pinctrl-names = "default";
-		pinctrl-0 = <&quectel_power_wakeup_in
-				&quectel_power_sleep_ind>;*/
-
-		/*
-		pinctrl-names = "default", "idle";
-		pinctrl-0 = <&quec_gpio_sleep_state_active
-					 &quec_gpio_wakeup_active
-					 &quec_gpio_dtr_active>
-		pinctrl-1 = <&quec_gpio_sleep_state_idle
-					 &quec_gpio_wakeup_idle
-					 &quec_gpio_dtr_idle>
-		*/
+	qcom,msm-dai-tdm-pri-rx {
+		compatible = "qcom,msm-dai-tdm";
+		qcom,msm-cpudai-tdm-group-id = <37120>;
+		qcom,msm-cpudai-tdm-group-num-ports = <1>;
+		qcom,msm-cpudai-tdm-group-port-id = <36864>;
+		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
+		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
+		dai_pri_tdm_rx_0: qcom,msm-dai-q6-tdm-pri-rx-0 {
+			compatible = "qcom,msm-dai-q6-tdm";
+			qcom,msm-cpudai-tdm-dev-id = <36864>;
+			qcom,msm-cpudai-tdm-sync-mode = <0>;
+			qcom,msm-cpudai-tdm-sync-src = <1>;
+			qcom,msm-cpudai-tdm-data-out = <0>;
+			qcom,msm-cpudai-tdm-invert-sync = <0>;
+			qcom,msm-cpudai-tdm-data-delay = <1>;
+			qcom,msm-cpudai-tdm-data-align = <0>;
+		};
 	};
 
-	//2017-10-10,add by gale, for quectel low consume, legacy(Not REcommend)
-	quec,quectel-low-consume{
-		compatible = "quec,quectel-low-consume";
-
-		notify_gpio = <&tlmm_pinmux 75 0>;      /* which gpio can be controlled by ioctl to notify mcu */
-
-		wakeup_gpio = <&tlmm_pinmux 25 0>;      /* wakeup pin */
-
-		pinctrl-names = "default", "sleep", "wakeup_default";     /* status pin: module sleep indication gpio42 */
-		pinctrl-0 = <&sleep_ind_active>;
-		pinctrl-1 = <&sleep_ind_sleep>;
-		pinctrl-2 = <&wakeup_in_default>;	/* wakeup pin default state */
-		status = "disabled";			/* disable by default */
+	qcom,msm-dai-tdm-pri-tx {
+		compatible = "qcom,msm-dai-tdm";
+		qcom,msm-cpudai-tdm-group-id = <37121>;
+		qcom,msm-cpudai-tdm-group-num-ports = <1>;
+		qcom,msm-cpudai-tdm-group-port-id = <36865>;
+		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
+		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
+		dai_pri_tdm_tx_0: qcom,msm-dai-q6-tdm-pri-tx-0 {
+			compatible = "qcom,msm-dai-q6-tdm";
+			qcom,msm-cpudai-tdm-dev-id = <36865>;
+			qcom,msm-cpudai-tdm-sync-mode = <0>;
+			qcom,msm-cpudai-tdm-sync-src = <1>;
+			qcom,msm-cpudai-tdm-data-out = <0>;
+			qcom,msm-cpudai-tdm-invert-sync = <0>;
+			qcom,msm-cpudai-tdm-data-delay = <1>;
+			qcom,msm-cpudai-tdm-data-align = <0>;
+		};
 	};
 
-	//2018-5-12,add by gale, for quectel low consume v2(Not Recommend)
-	quec,quectel-low-consume-v2{
-			compatible = "quec,quectel-low-consume-v2";
-			status = "ok";
+	qcom,msm-dai-tdm-sec-rx {
+		compatible = "qcom,msm-dai-tdm";
+		qcom,msm-cpudai-tdm-group-id = <37136>;
+		qcom,msm-cpudai-tdm-group-num-ports = <1>;
+		qcom,msm-cpudai-tdm-group-port-id = <36880>;
+		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
+		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
+		dai_sec_tdm_rx_0: qcom,msm-dai-q6-tdm-sec-rx-0 {
+			compatible = "qcom,msm-dai-q6-tdm";
+			qcom,msm-cpudai-tdm-dev-id = <36880>;
+			qcom,msm-cpudai-tdm-sync-mode = <0>;
+			qcom,msm-cpudai-tdm-sync-src = <1>;
+			qcom,msm-cpudai-tdm-data-out = <0>;
+			qcom,msm-cpudai-tdm-invert-sync = <0>;
+			qcom,msm-cpudai-tdm-data-delay = <1>;
+			qcom,msm-cpudai-tdm-data-align = <0>;
+		};
 	};
 
-	quec,ql_lpm{
-		compatible = "quec,ql_lpm";
-		status = "ok";
-	};
-
-	//end jun.wu
-	//add by max.tang for VBUS detect  //maxcodeflag20160329
-	usb_detect {
-		compatible = "qcom,gpio-usbdetect";
-		interrupt-parent = <&spmi_bus>;
-		interrupts = <0x0 0xA1 0x0>; /* PMD9607 MPP 2 */
-		interrupt-names = "vbus_det_irq";
+	qcom,msm-dai-tdm-sec-tx {
+		compatible = "qcom,msm-dai-tdm";
+		qcom,msm-cpudai-tdm-group-id = <37137>;
+		qcom,msm-cpudai-tdm-group-num-ports = <1>;
+		qcom,msm-cpudai-tdm-group-port-id = <36881>;
+		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
+		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
+		dai_sec_tdm_tx_0: qcom,msm-dai-q6-tdm-sec-tx-0 {
+			compatible = "qcom,msm-dai-q6-tdm";
+			qcom,msm-cpudai-tdm-dev-id = <36881>;
+			qcom,msm-cpudai-tdm-sync-mode = <0>;
+			qcom,msm-cpudai-tdm-sync-src = <1>;
+			qcom,msm-cpudai-tdm-data-out = <0>;
+			qcom,msm-cpudai-tdm-invert-sync = <0>;
+			qcom,msm-cpudai-tdm-data-delay = <1>;
+			qcom,msm-cpudai-tdm-data-align = <0>;
+		};
 	};
 };
 
