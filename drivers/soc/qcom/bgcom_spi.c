@@ -48,7 +48,7 @@
 #define HED_EVENT_SIZE_LEN (0x02)
 #define HED_EVENT_DATA_STRT_LEN (0x05)
 
-#define MAX_RETRY 200
+#define MAX_RETRY 500
 
 enum bgcom_state {
 	/*BGCOM Staus ready*/
@@ -408,8 +408,8 @@ static void send_back_notification(uint32_t slav_status_reg,
 		}
 	}
 
-		event_data.to_slave_fifo_free = slave_fifo_free;
-		send_event(BGCOM_EVENT_TO_SLAVE_FIFO_FREE, &event_data);
+	event_data.to_slave_fifo_free = slave_fifo_free;
+	send_event(BGCOM_EVENT_TO_SLAVE_FIFO_FREE, &event_data);
 }
 
 static void bg_irq_tasklet_hndlr_l(void)
@@ -788,7 +788,6 @@ unlock:
 		bg_soft_reset();
 		return -ETIMEDOUT;
 	}
-	pr_info("BG retries for wake up : %d\n", retry);
 	return 0;
 }
 EXPORT_SYMBOL(bgcom_resume);
