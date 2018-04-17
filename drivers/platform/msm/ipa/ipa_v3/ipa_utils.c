@@ -1246,11 +1246,11 @@ int ipa3_get_clients_from_rm_resource(
 	switch (resource) {
 	case IPA_RM_RESOURCE_USB_CONS:
 		if (ipa3_get_ep_mapping(IPA_CLIENT_USB_CONS) != -1)
-		clients->names[i++] = IPA_CLIENT_USB_CONS;
+			clients->names[i++] = IPA_CLIENT_USB_CONS;
 		break;
 	case IPA_RM_RESOURCE_USB_DPL_CONS:
 		if (ipa3_get_ep_mapping(IPA_CLIENT_USB_DPL_CONS) != -1)
-		clients->names[i++] = IPA_CLIENT_USB_DPL_CONS;
+			clients->names[i++] = IPA_CLIENT_USB_DPL_CONS;
 		break;
 	case IPA_RM_RESOURCE_HSIC_CONS:
 		if (ipa3_get_ep_mapping(IPA_CLIENT_HSIC1_CONS) != -1)
@@ -1278,7 +1278,7 @@ int ipa3_get_clients_from_rm_resource(
 		break;
 	case IPA_RM_RESOURCE_USB_PROD:
 		if (ipa3_get_ep_mapping(IPA_CLIENT_USB_PROD) != -1)
-		clients->names[i++] = IPA_CLIENT_USB_PROD;
+			clients->names[i++] = IPA_CLIENT_USB_PROD;
 		break;
 	case IPA_RM_RESOURCE_HSIC_PROD:
 		if (ipa3_get_ep_mapping(IPA_CLIENT_HSIC1_PROD) != -1)
@@ -6382,7 +6382,7 @@ void ipa3_set_resorce_groups_min_max_limits(void)
 
 static void ipa3_gsi_poll_after_suspend(struct ipa3_ep_context *ep)
 {
-	bool empty;
+	bool empty = 0;
 
 	IPADBG("switch ch %ld to poll\n", ep->gsi_chan_hdl);
 	gsi_config_channel_mode(ep->gsi_chan_hdl, GSI_CHAN_MODE_POLL);
@@ -6894,8 +6894,8 @@ int ipa3_load_fws(const struct firmware *firmware, phys_addr_t gsi_mem_base)
 {
 	const struct elf32_hdr *ehdr;
 	const struct elf32_phdr *phdr;
-	unsigned long gsi_iram_ofst;
-	unsigned long gsi_iram_size;
+	unsigned long gsi_iram_ofst = 0;
+	unsigned long gsi_iram_size = 0;
 	phys_addr_t ipa_reg_mem_base;
 	u32 ipa_reg_ofst;
 	int rc;
