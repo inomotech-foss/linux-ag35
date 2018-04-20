@@ -1081,8 +1081,8 @@ static int mdp3_ctrl_off(struct msm_fb_data_type *mfd)
 		}
 		if (panel && panel->set_backlight) {
 			if (!mdp3_is_twm_en())
-			panel->set_backlight(panel, 0);
-	}
+				panel->set_backlight(panel, 0);
+		}
 	}
 
 	/*
@@ -1090,11 +1090,15 @@ static int mdp3_ctrl_off(struct msm_fb_data_type *mfd)
 	* events need to be sent to the interface so that the
 	* panel can be configured in low power mode
 	*/
-	if (panel->event_handler)
-		rc = panel->event_handler(panel, MDSS_EVENT_BLANK,
-			(void *) (long int)mfd->panel_power_state);
-	if (rc)
-		pr_err("EVENT_BLANK error (%d)\n", rc);
+
+	if (!mdp3_is_twm_en()) {
+		if (panel->event_handler)
+			rc = panel->event_handler(panel, MDSS_EVENT_BLANK,
+				(void *) (long int)mfd->panel_power_state);
+		if (rc)
+			pr_err("EVENT_BLANK error (%d)\n", rc);
+
+	}
 
 	if (intf_stopped) {
 		if (!mdp3_session->clk_on)
@@ -1139,8 +1143,8 @@ static int mdp3_ctrl_off(struct msm_fb_data_type *mfd)
 				}
 			}
 		} else {
-		rc = panel->event_handler(panel, MDSS_EVENT_PANEL_OFF,
-			(void *) (long int)mfd->panel_power_state);
+			rc = panel->event_handler(panel, MDSS_EVENT_PANEL_OFF,
+				(void *) (long int)mfd->panel_power_state);
 		}
 	}
 	if (rc)
