@@ -84,7 +84,7 @@ static int emac_mdio_read(struct mii_bus *bus, int addr, int regnum)
 		emac_dbg(adpt, hw, "EMAC in suspended state\n");
 		return ret;
 	}
-    
+
 	if (phy->external) {
 		ret = emac_phy_mdio_autopoll_disable(hw);
 		if (ret) {

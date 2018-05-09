@@ -215,6 +215,12 @@ static inline struct usb_request *midi_alloc_ep_req(struct usb_ep *ep,
 	return alloc_ep_req(ep, length, length);
 }
 
+static void midi_free_ep_req(struct usb_ep *ep, struct usb_request *req)
+{
+	kfree(req->buf);
+	usb_ep_free_request(ep, req);
+}
+
 static const uint8_t f_midi_cin_length[] = {
 	0, 0, 2, 3, 3, 1, 2, 3, 3, 3, 3, 3, 2, 2, 3, 1
 };
@@ -367,9 +373,7 @@ static int f_midi_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	/* allocate a bunch of read buffers and queue them all at once. */
 	for (i = 0; i < midi->qlen && err == 0; i++) {
 		struct usb_request *req =
-			midi_alloc_ep_req(midi->out_ep,
-				max_t(unsigned, midi->buflen,
-					bulk_out_desc.wMaxPacketSize));
+			midi_alloc_ep_req(midi->out_ep, midi->buflen);
 		if (req == NULL)
 			return -ENOMEM;
 
@@ -997,44 +1001,6 @@ int /* __init */ f_midi_bind_config(struct usb_configuration *c,
 			      struct midi_alsa_config *config)
 {
 	struct f_midi *midi;
-	struct f_midi_opts *opts;
-	int i;
-
-	midi = func_to_midi(f);
-	opts = container_of(f->fi, struct f_midi_opts, func_inst);
-	kfree(midi->id);
-	mutex_lock(&opts->lock);
-	for (i = opts->in_ports - 1; i >= 0; --i)
-		kfree(midi->in_port[i]);
-	kfree(midi);
-	opts->func_inst.f = NULL;
-	--opts->refcnt;
-	mutex_unlock(&opts->lock);
-}
-
-static void f_midi_unbind(struct usb_configuration *c, struct usb_function *f)
-{
-	struct usb_composite_dev *cdev = f->config->cdev;
-	struct f_midi *midi = func_to_midi(f);
-	struct snd_card *card;
-
-	DBG(cdev, "unbind\n");
-
-	/* just to be sure */
-	f_midi_disable(f);
-
-	card = midi->card;
-	midi->card = NULL;
-	if (card)
-		snd_card_free(card);
-
-	usb_free_all_descriptors(f);
-}
-
-static struct usb_function *f_midi_alloc(struct usb_function_instance *fi)
-{
-	struct f_midi *midi;
-	struct f_midi_opts *opts;
 	int status, i;
 
 	if (config) {

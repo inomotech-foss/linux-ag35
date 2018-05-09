@@ -188,7 +188,7 @@ int dpcm_dapm_stream_event(struct snd_soc_pcm_runtime *fe, int dir,
 		    (be->dpcm[dir].users >= 1))
 			continue;
 
-			snd_soc_dapm_stream_event(be, dir, event);
+		snd_soc_dapm_stream_event(be, dir, event);
 	}
 
 	snd_soc_dapm_stream_event(fe, dir, event);

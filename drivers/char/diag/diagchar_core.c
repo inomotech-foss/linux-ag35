@@ -1031,9 +1031,9 @@ static int diag_send_raw_data_remote(int proc, void *buf, int len,
 			/*
 			 * Adding 4 bytes for start (1 byte), version (1 byte)
 			 * and payload (2 bytes)
-		 */
-		memcpy(driver->hdlc_encode_buf, buf + 4, payload);
-		goto send_data;
+			 */
+			memcpy(driver->hdlc_encode_buf, buf + 4, payload);
+			goto send_data;
 		} else {
 			pr_err("diag: In %s, invalid len: %d of non_hdlc pkt",
 			__func__, len);
@@ -1961,7 +1961,7 @@ static int diag_ioctl_hdlc_toggle(unsigned long ioarg)
 				sizeof(uint8_t)))
 		return -EFAULT;
 	mutex_lock(&driver->hdlc_disable_mutex);
-		mutex_lock(&driver->md_session_lock);
+	mutex_lock(&driver->md_session_lock);
 	session_info = diag_md_session_get_pid(current->tgid);
 	if (session_info)
 		session_info->hdlc_disabled = hdlc_support;
@@ -3019,7 +3019,7 @@ static ssize_t diagchar_read(struct file *file, char __user *buf, size_t count,
 			if (ret == -EFAULT) {
 				mutex_unlock(&driver->md_session_lock);
 				goto exit;
-		}
+			}
 		}
 		mutex_unlock(&driver->md_session_lock);
 		driver->data_ready[index] ^= EVENT_MASKS_TYPE;

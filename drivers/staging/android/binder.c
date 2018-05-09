@@ -145,9 +145,6 @@ module_param_named(debug_mask, binder_debug_mask, uint, S_IWUSR | S_IRUGO);
 static char *binder_devices_param = CONFIG_ANDROID_BINDER_DEVICES;
 module_param_named(devices, binder_devices_param, charp, S_IRUGO);
 
-static char *binder_devices_param = CONFIG_ANDROID_BINDER_DEVICES;
-module_param_named(devices, binder_devices_param, charp, S_IRUGO);
-
 static DECLARE_WAIT_QUEUE_HEAD(binder_user_error_wait);
 static int binder_stop_on_user_error;
 
@@ -207,13 +204,7 @@ struct binder_stats {
 	atomic_t obj_deleted[BINDER_STAT_COUNT];
 };
 
-/* These are still global, since it's not always easy to get the context */
-struct binder_obj_stats {
-	atomic_t obj_created[BINDER_STAT_COUNT];
-	atomic_t obj_deleted[BINDER_STAT_COUNT];
-};
-
-static struct binder_obj_stats binder_obj_stats;
+static struct binder_stats binder_stats;
 
 static inline void binder_stats_deleted(enum binder_stat_types type)
 {
@@ -247,6 +238,8 @@ struct binder_transaction_log {
 	bool full;
 	struct binder_transaction_log_entry entry[32];
 };
+static struct binder_transaction_log binder_transaction_log;
+static struct binder_transaction_log binder_transaction_log_failed;
 
 static struct binder_transaction_log_entry *binder_transaction_log_add(
 	struct binder_transaction_log *log)
@@ -4588,7 +4581,7 @@ static unsigned int binder_poll(struct file *filp,
 		poll_wait(filp, &thread->wait, wait);
 
 	if (binder_has_work(thread, wait_for_proc_work))
-			return POLLIN;
+		return POLLIN;
 
 	return 0;
 }
@@ -4734,7 +4727,6 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	int ret;
 	struct binder_proc *proc = filp->private_data;
-	struct binder_context *context = proc->context;
 	struct binder_thread *thread;
 	unsigned int size = _IOC_SIZE(cmd);
 	void __user *ubuf = (void __user *)arg;
@@ -4897,7 +4889,7 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	ret = binder_alloc_mmap_handler(&proc->alloc, vma);
 
-		return ret;
+	return ret;
 
 err_bad_arg:
 	pr_err("binder_mmap: %d %lx-%lx %s failed %d\n",
@@ -5008,7 +5000,6 @@ static int binder_release(struct inode *nodp, struct file *filp)
 static int binder_node_release(struct binder_node *node, int refs)
 {
 	struct binder_ref *ref;
-	struct binder_context *context = node->proc->context;
 	int death = 0;
 	struct binder_proc *proc = node->proc;
 
@@ -5172,7 +5163,7 @@ static void binder_deferred_func(struct work_struct *work)
 			proc = NULL;
 			defer = 0;
 		}
-		mutex_unlock(&context->binder_deferred_lock);
+		mutex_unlock(&binder_deferred_lock);
 
 		if (defer & BINDER_DEFERRED_FLUSH)
 			binder_deferred_flush(proc);
@@ -5181,19 +5172,19 @@ static void binder_deferred_func(struct work_struct *work)
 			binder_deferred_release(proc); /* frees proc */
 	} while (proc);
 }
+static DECLARE_WORK(binder_deferred_work, binder_deferred_func);
 
 static void
 binder_defer_work(struct binder_proc *proc, enum binder_deferred_state defer)
 {
-	mutex_lock(&proc->context->binder_deferred_lock);
+	mutex_lock(&binder_deferred_lock);
 	proc->deferred_work |= defer;
 	if (hlist_unhashed(&proc->deferred_work_node)) {
 		hlist_add_head(&proc->deferred_work_node,
-				&proc->context->binder_deferred_list);
-		queue_work(proc->context->binder_deferred_workqueue,
-			   &proc->context->deferred_work);
+				&binder_deferred_list);
+		queue_work(binder_deferred_workqueue, &binder_deferred_work);
 	}
-	mutex_unlock(&proc->context->binder_deferred_lock);
+	mutex_unlock(&binder_deferred_lock);
 }
 
 static void print_binder_transaction_ilocked(struct seq_file *m,
@@ -5481,20 +5472,8 @@ static const char * const binder_objstat_strings[] = {
 	"transaction_complete"
 };
 
-static void add_binder_stats(struct binder_stats *from, struct binder_stats *to)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(to->bc); i++)
-		to->bc[i] += from->bc[i];
-
-	for (i = 0; i < ARRAY_SIZE(to->br); i++)
-		to->br[i] += from->br[i];
-}
-
 static void print_binder_stats(struct seq_file *m, const char *prefix,
-			       struct binder_stats *stats,
-			       struct binder_obj_stats *obj_stats)
+			       struct binder_stats *stats)
 {
 	int i;
 
@@ -5518,10 +5497,7 @@ static void print_binder_stats(struct seq_file *m, const char *prefix,
 				   binder_return_strings[i], temp);
 	}
 
-	if (!obj_stats)
-		return;
-
-	BUILD_BUG_ON(ARRAY_SIZE(obj_stats->obj_created) !=
+	BUILD_BUG_ON(ARRAY_SIZE(stats->obj_created) !=
 		     ARRAY_SIZE(binder_objstat_strings));
 	BUILD_BUG_ON(ARRAY_SIZE(stats->obj_created) !=
 		     ARRAY_SIZE(stats->obj_deleted));
@@ -5599,14 +5575,12 @@ static void print_binder_proc_stats(struct seq_file *m,
 	binder_inner_proc_unlock(proc);
 	seq_printf(m, "  pending transactions: %d\n", count);
 
-	print_binder_stats(m, "  ", &proc->stats, NULL);
+	print_binder_stats(m, "  ", &proc->stats);
 }
 
 
 static int binder_state_show(struct seq_file *m, void *unused)
 {
-	struct binder_device *device;
-	struct binder_context *context;
 	struct binder_proc *proc;
 	struct binder_node *node;
 	struct binder_node *last_node = NULL;
@@ -5646,17 +5620,11 @@ static int binder_state_show(struct seq_file *m, void *unused)
 
 static int binder_stats_show(struct seq_file *m, void *unused)
 {
-	struct binder_device *device;
-	struct binder_context *context;
 	struct binder_proc *proc;
 
 	seq_puts(m, "binder stats:\n");
-	print_binder_stats(m, "", &total_binder_stats, &binder_obj_stats);
 
-	hlist_for_each_entry(device, &binder_devices, hlist) {
-		context = &device->context;
-		if (do_lock)
-			binder_lock(context, __func__);
+	print_binder_stats(m, "", &binder_stats);
 
 	mutex_lock(&binder_procs_lock);
 	hlist_for_each_entry(proc, &binder_procs, proc_node)
@@ -5668,8 +5636,6 @@ static int binder_stats_show(struct seq_file *m, void *unused)
 
 static int binder_transactions_show(struct seq_file *m, void *unused)
 {
-	struct binder_device *device;
-	struct binder_context *context;
 	struct binder_proc *proc;
 
 	seq_puts(m, "binder transactions:\n");
@@ -5683,8 +5649,6 @@ static int binder_transactions_show(struct seq_file *m, void *unused)
 
 static int binder_proc_show(struct seq_file *m, void *unused)
 {
-	struct binder_device *device;
-	struct binder_context *context;
 	struct binder_proc *itr;
 	int pid = (unsigned long)m->private;
 
@@ -5726,8 +5690,7 @@ static void print_binder_transaction_log_entry(struct seq_file *m,
 			"\n" : " (incomplete)\n");
 }
 
-static int print_binder_transaction_log(struct seq_file *m,
-					struct binder_transaction_log *log)
+static int binder_transaction_log_show(struct seq_file *m, void *unused)
 {
 	struct binder_transaction_log *log = m->private;
 	unsigned int log_cur = atomic_read(&log->cur);
@@ -5748,31 +5711,6 @@ static int print_binder_transaction_log(struct seq_file *m,
 	return 0;
 }
 
-static int binder_transaction_log_show(struct seq_file *m, void *unused)
-{
-	struct binder_device *device;
-	struct binder_context *context;
-
-	hlist_for_each_entry(device, &binder_devices, hlist) {
-		context = &device->context;
-		print_binder_transaction_log(m, &context->transaction_log);
-	}
-	return 0;
-}
-
-static int binder_failed_transaction_log_show(struct seq_file *m, void *unused)
-{
-	struct binder_device *device;
-	struct binder_context *context;
-
-	hlist_for_each_entry(device, &binder_devices, hlist) {
-		context = &device->context;
-		print_binder_transaction_log(m,
-					     &context->transaction_log_failed);
-	}
-	return 0;
-}
-
 static const struct file_operations binder_fops = {
 	.owner = THIS_MODULE,
 	.poll = binder_poll,
@@ -5788,64 +5726,6 @@ BINDER_DEBUG_ENTRY(state);
 BINDER_DEBUG_ENTRY(stats);
 BINDER_DEBUG_ENTRY(transactions);
 BINDER_DEBUG_ENTRY(transaction_log);
-BINDER_DEBUG_ENTRY(failed_transaction_log);
-
-static void __init free_binder_device(struct binder_device *device)
-{
-	if (device->context.binder_deferred_workqueue)
-		destroy_workqueue(device->context.binder_deferred_workqueue);
-	kfree(device);
-}
-
-static int __init init_binder_device(const char *name)
-{
-	int ret;
-	struct binder_device *binder_device;
-	struct binder_context *context;
-
-	binder_device = kzalloc(sizeof(*binder_device), GFP_KERNEL);
-	if (!binder_device)
-		return -ENOMEM;
-
-	binder_device->miscdev.fops = &binder_fops;
-	binder_device->miscdev.minor = MISC_DYNAMIC_MINOR;
-	binder_device->miscdev.name = name;
-
-	context = &binder_device->context;
-	context->binder_context_mgr_uid = INVALID_UID;
-	context->name = name;
-
-	mutex_init(&context->binder_main_lock);
-	mutex_init(&context->binder_deferred_lock);
-	mutex_init(&context->binder_mmap_lock);
-
-	context->binder_deferred_workqueue =
-		create_singlethread_workqueue(name);
-
-	if (!context->binder_deferred_workqueue) {
-		ret = -ENOMEM;
-		goto err_create_singlethread_workqueue_failed;
-	}
-
-	INIT_HLIST_HEAD(&context->binder_procs);
-	INIT_HLIST_HEAD(&context->binder_dead_nodes);
-	INIT_HLIST_HEAD(&context->binder_deferred_list);
-	INIT_WORK(&context->deferred_work, binder_deferred_func);
-
-	ret = misc_register(&binder_device->miscdev);
-	if (ret < 0) {
-		goto err_misc_register_failed;
-	}
-
-	hlist_add_head(&binder_device->hlist, &binder_devices);
-	return ret;
-
-err_create_singlethread_workqueue_failed:
-err_misc_register_failed:
-	free_binder_device(binder_device);
-
-	return ret;
-}
 
 static int __init init_binder_device(const char *name)
 {
@@ -5883,20 +5763,11 @@ static int __init binder_init(void)
 	struct hlist_node *tmp;
 
 	binder_alloc_shrinker_init();
-
 	atomic_set(&binder_transaction_log.cur, ~0U);
 	atomic_set(&binder_transaction_log_failed.cur, ~0U);
 	binder_deferred_workqueue = create_singlethread_workqueue("binder");
 	if (!binder_deferred_workqueue)
 		return -ENOMEM;
-
-	strcpy(device_names, binder_devices_param);
-
-	while ((device_name = strsep(&device_names, ","))) {
-		ret = init_binder_device(device_name);
-		if (ret)
-			goto err_init_binder_device_failed;
-	}
 
 	binder_debugfs_dir_entry_root = debugfs_create_dir("binder", NULL);
 	if (binder_debugfs_dir_entry_root)
@@ -5922,13 +5793,13 @@ static int __init binder_init(void)
 		debugfs_create_file("transaction_log",
 				    S_IRUGO,
 				    binder_debugfs_dir_entry_root,
-				    NULL,
+				    &binder_transaction_log,
 				    &binder_transaction_log_fops);
 		debugfs_create_file("failed_transaction_log",
 				    S_IRUGO,
 				    binder_debugfs_dir_entry_root,
-				    NULL,
-				    &binder_failed_transaction_log_fops);
+				    &binder_transaction_log_failed,
+				    &binder_transaction_log_fops);
 	}
 
 	/*

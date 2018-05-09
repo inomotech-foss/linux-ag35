@@ -357,8 +357,12 @@ rx_submit(struct eth_dev *dev, struct usb_request *req, gfp_t gfp_flags)
 		size = max_t(size_t, size, dev->port_usb->fixed_out_len);
 	spin_unlock_irqrestore(&dev->lock, flags);
 
-	DBG(dev, "%s: size: %zd\n", __func__, size);
-	skb = alloc_skb(size + NET_IP_ALIGN, gfp_flags);
+	if (dev->rx_needed_headroom)
+		reserve_headroom = ALIGN(dev->rx_needed_headroom, 4);
+
+	pr_debug("%s: size: %zu + %d(hr)", __func__, size, reserve_headroom);
+
+	skb = alloc_skb(size + reserve_headroom, gfp_flags);
 	if (skb == NULL) {
 		DBG(dev, "no rx skb\n");
 		goto enomem;
@@ -1273,6 +1277,33 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 
 	req->length = length;
 
+	/* throttle high/super speed IRQ rate back slightly */
+	if (gadget_is_dualspeed(dev->gadget) &&
+			 (dev->gadget->speed == USB_SPEED_HIGH ||
+			  dev->gadget->speed == USB_SPEED_SUPER)) {
+		spin_lock_irqsave(&dev->req_lock, flags);
+		dev->tx_qlen++;
+		if (dev->tx_qlen == MAX_TX_REQ_WITH_NO_INT) {
+			req->no_interrupt = 0;
+			dev->tx_qlen = 0;
+		} else {
+			req->no_interrupt = 1;
+		}
+		spin_unlock_irqrestore(&dev->req_lock, flags);
+	} else {
+		req->no_interrupt = 0;
+	}
+
+	if (skb_timestamp_enable) {
+		skb->tstamp = ktime_get();
+		clone = skb_clone_sk(skb);
+		if (clone) {
+			memset(&hwtstamps, 0,
+					sizeof(struct skb_shared_hwtstamps));
+			skb_complete_tx_timestamp(clone, &hwtstamps);
+		}
+	}
+
 	retval = usb_ep_queue(in, req, GFP_ATOMIC);
 	switch (retval) {
 	default:
@@ -1781,6 +1812,7 @@ struct net_device *gether_setup_name_default(const char *netname)
 	spin_lock_init(&dev->req_lock);
 	INIT_WORK(&dev->work, eth_work);
 	INIT_WORK(&dev->rx_work, process_rx_w);
+	INIT_WORK(&dev->tx_work, process_tx_w);
 	INIT_LIST_HEAD(&dev->tx_reqs);
 	INIT_LIST_HEAD(&dev->rx_reqs);
 	INIT_WORK(&dev->cpu_policy_w, update_cpu_policy_w);
@@ -1795,10 +1827,8 @@ struct net_device *gether_setup_name_default(const char *netname)
 
 	eth_random_addr(dev->dev_mac);
 	pr_warn("using random %s ethernet address\n", "self");
-	if (get_host_ether_addr(host_ethaddr, dev->host_mac))
+	eth_random_addr(dev->host_mac);
 	pr_warn("using random %s ethernet address\n", "host");
-        else
-		pr_warn("using previous %s ethernet address\n", "host");
 
 	net->netdev_ops = &eth_netdev_ops;
 
