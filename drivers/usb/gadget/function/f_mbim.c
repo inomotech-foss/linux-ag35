@@ -764,7 +764,7 @@ static void mbim_do_notify(struct f_mbim *mbim)
 		if (status) {
 			/* ignore if request already queued before bus_resume */
 			if (status != -EBUSY)
-			atomic_dec(&mbim->not_port.notify_count);
+				atomic_dec(&mbim->not_port.notify_count);
 			pr_err("Queue notify request failed, err: %d\n",
 					status);
 		}

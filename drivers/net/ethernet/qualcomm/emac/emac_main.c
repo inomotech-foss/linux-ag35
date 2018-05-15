@@ -2022,11 +2022,13 @@ int emac_mac_up(struct emac_adapter *adpt)
 		emac_refresh_rx_buffer(&adpt->rx_queue[i]);
 
 	if (!adpt->phy.is_ext_phy_connect) {
-	ret = phy_connect_direct(netdev, adpt->phydev, emac_adjust_link,
-				 phy->phy_interface);
-	if (ret) {
-		netdev_err(adpt->netdev, "could not connect phy\n");
-		goto err_request_irq;
+		ret = phy_connect_direct(netdev, adpt->phydev, emac_adjust_link,
+					 phy->phy_interface);
+		if (ret) {
+			netdev_err(adpt->netdev, "could not connect phy\n");
+			goto err_request_irq;
+		}
+		adpt->phy.is_ext_phy_connect = 1;
 	}
 		adpt->phy.is_ext_phy_connect = 1;
 	}
@@ -2097,8 +2099,8 @@ void emac_mac_down(struct emac_adapter *adpt, u32 ctrl)
 	if (((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	     (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
 	     (ATH8035_PHY_ID == adpt->phydev->phy_id)) &&
-	    (adpt->phy.is_ext_phy_connect)) {
-	phy_disconnect(adpt->phydev);
+	   (adpt->phy.is_ext_phy_connect)) {
+		phy_disconnect(adpt->phydev);
 		adpt->phy.is_ext_phy_connect = 0;
 	}
 
@@ -2921,8 +2923,8 @@ static void emac_disable_regulator(struct emac_adapter *adpt, u8 start, u8 end)
 		if (!vreg->enabled)
 			continue;
 
-			regulator_disable(vreg->vreg);
-			vreg->enabled = false;
+		regulator_disable(vreg->vreg);
+		vreg->enabled = false;
 
 		if (adpt->vreg[i].voltage_uv) {
 			emac_set_voltage(adpt, i,
@@ -2978,7 +2980,7 @@ static int emac_pm_suspend(struct device *device, bool wol_enable)
 	phy_suspend(adpt->phydev);
 	flush_delayed_work(&adpt->phydev->state_queue);
 	if (QCA8337_PHY_ID != adpt->phydev->phy_id)
-	emac_hw_config_pow_save(hw, adpt->phydev->speed, !!wufc,
+		emac_hw_config_pow_save(hw, adpt->phydev->speed, !!wufc,
 					!!(wufc & EMAC_WOL_PHY));
 
 	if (!adpt->phydev->link && phy->is_wol_irq_reg) {
@@ -3322,12 +3324,12 @@ err_clk_init:
 	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
-	emac_disable_clks(adpt);
+		emac_disable_clks(adpt);
 err_ldo_init:
 	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
-	emac_disable_regulator(adpt, EMAC_VREG1, EMAC_VREG5);
+		emac_disable_regulator(adpt, EMAC_VREG1, EMAC_VREG5);
 err_get_resource:
 	free_netdev(netdev);
 

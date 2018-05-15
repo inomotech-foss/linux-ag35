@@ -26,8 +26,9 @@
 #include <linux/spinlock.h>
 #include <linux/notifier.h>
 #include <linux/suspend.h>
+#include <linux/slab.h>
 #include <linux/debugfs.h>
-
+#include <linux/debugfs.h>
 
 #define MAX_WAKEUP_REASON_IRQS 32
 static bool suspend_abort;
@@ -548,11 +549,6 @@ void clear_wakeup_reasons(void)
 static int wakeup_reason_pm_event(struct notifier_block *notifier,
 		unsigned long pm_event, void *unused)
 {
-#if IS_ENABLED(CONFIG_SUSPEND_TIME)
-	ktime_t temp;
-	struct timespec suspend_time;
-#endif
-
 	switch (pm_event) {
 	case PM_SUSPEND_PREPARE:
 		spin_lock(&resume_reason_lock);
@@ -570,13 +566,14 @@ static int wakeup_reason_pm_event(struct notifier_block *notifier,
 		/* monotonic time since boot including the time spent in suspend */
 		curr_stime = ktime_get_boottime();
 
-#if IS_ENABLED(CONFIG_SUSPEND_TIME)
-		temp = ktime_sub(ktime_sub(curr_stime, last_stime),
-				ktime_sub(curr_monotime, last_monotime));
-		suspend_time = ktime_to_timespec(temp);
-		time_in_suspend_bins[fls(suspend_time.tv_sec)]++;
-		pr_info("Suspended for %lu.%03lu seconds\n", suspend_time.tv_sec,
-			suspend_time.tv_nsec / NSEC_PER_MSEC);
+#ifdef CONFIG_DEDUCE_WAKEUP_REASONS
+		/* log_wakeups should have been cleared by now. */
+		if (WARN_ON(logging_wakeup_reasons())) {
+			stop_logging_wakeup_reasons();
+			print_wakeup_sources();
+		}
+#else
+		print_wakeup_sources();
 #endif
 		break;
 	default:

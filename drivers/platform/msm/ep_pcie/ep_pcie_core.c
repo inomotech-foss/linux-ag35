@@ -1033,7 +1033,7 @@ static void ep_pcie_enumeration_complete(struct ep_pcie_dev_t *dev)
 		ep_pcie_dev.rev, hw_drv.device_id);
 	ep_pcie_register_drv(&hw_drv);
 	if (!dev->no_notify)
-	ep_pcie_notify_event(dev, EP_PCIE_EVENT_LINKUP);
+		ep_pcie_notify_event(dev, EP_PCIE_EVENT_LINKUP);
 	else
 		EP_PCIE_DBG(dev,
 			"PCIe V%d: do not notify client about linkup.\n",
@@ -1541,7 +1541,7 @@ static irqreturn_t ep_pcie_handle_dstate_change_irq(int irq, void *data)
 		ep_pcie_write_mask(dev->parf + PCIE20_PARF_PM_CTRL, 0, BIT(1));
 
 		if (dev->enumerated)
-		ep_pcie_notify_event(dev, EP_PCIE_EVENT_PM_D3_HOT);
+			ep_pcie_notify_event(dev, EP_PCIE_EVENT_PM_D3_HOT);
 		else
 			EP_PCIE_DBG(dev,
 				"PCIe V%d: do not notify client about this D3 hot event since enumeration by HLOS is not done yet.\n",
@@ -1651,8 +1651,8 @@ static irqreturn_t ep_pcie_handle_perst_irq(int irq, void *data)
 			"PCIe V%d: PCIe is not enumerated yet; PERST is %sasserted.\n",
 			dev->rev, perst ? "de" : "");
 		if (perst) {
-		/* start work for link enumeration with the host side */
-		schedule_work(&dev->handle_perst_work);
+			/* start work for link enumeration with the host side */
+			schedule_work(&dev->handle_perst_work);
 		} else {
 			dev->no_notify = true;
 			/* shutdown the link if the link is already on */
@@ -1677,7 +1677,7 @@ static irqreturn_t ep_pcie_handle_perst_irq(int irq, void *data)
 			dev->rev, dev->perst_ast_counter);
 
 		if (dev->client_ready) {
-		ep_pcie_notify_event(dev, EP_PCIE_EVENT_PM_D3_COLD);
+			ep_pcie_notify_event(dev, EP_PCIE_EVENT_PM_D3_COLD);
 		} else {
 			dev->no_notify = true;
 			EP_PCIE_DBG(dev,

@@ -2068,7 +2068,7 @@ static struct snd_soc_dai_driver msm_dai_q6_afe_lb_tx_dai[] = {
 			.channels_min = 1,
 			.channels_max = 8,
 			.rate_min =     8000,
-			.rate_max =	48000,
+			.rate_max =     48000,
 		},
 		.id = AFE_LOOPBACK_TX,
 		.probe = msm_dai_q6_dai_probe,
@@ -5580,12 +5580,13 @@ static int msm_dai_q6_dai_tdm_remove(struct snd_soc_dai *dai)
 			}
 			if (!(tdm_dai_data->afe_ebit_unsupported &&
 			     !tdm_dai_data->clk_set.clk_freq_in_hz)) {
-			rc = msm_dai_q6_tdm_set_clk(tdm_dai_data,
-				dai->id, false);
-			if (IS_ERR_VALUE(rc)) {
+				rc = msm_dai_q6_tdm_set_clk(tdm_dai_data,
+							    dai->id, false);
+				if (IS_ERR_VALUE(rc)) {
 					dev_err(dai->dev,
 					"%s: fail to disable AFE clk 0x%x\n",
 					__func__, dai->id);
+				}
 			}
 		}
 	}
@@ -6080,13 +6081,14 @@ static int msm_dai_q6_tdm_prepare(struct snd_pcm_substream *substream,
 			DSP will monitor the clk count. */
 			if (!(dai_data->afe_ebit_unsupported &&
 			      !dai_data->clk_set.clk_freq_in_hz)) {
-			rc = msm_dai_q6_tdm_set_clk(dai_data,
-				dai->id, true);
-			if (IS_ERR_VALUE(rc)) {
+				rc = msm_dai_q6_tdm_set_clk(dai_data,
+					dai->id, true);
+				if (IS_ERR_VALUE(rc)) {
 					dev_err(dai->dev,
 						"%s:AFE CLK enable fail 0x%x\n",
-					__func__, dai->id);
-				goto rtn;
+						__func__, dai->id);
+					goto rtn;
+				}
 			}
 			}
 			if (dai_data->num_group_ports > 1) {
@@ -6219,22 +6221,22 @@ static int msm_dai_q6_tdm_prepare(struct snd_pcm_substream *substream,
 						&dai_data->port_cfg,
 						dai_data->rate,
 						dai_data->num_group_ports);
-		if (IS_ERR_VALUE(rc)) {
-			if (atomic_read(group_ref) == 0) {
-				afe_port_group_enable(group_id,
-					NULL, false);
+			if (IS_ERR_VALUE(rc)) {
+				if (atomic_read(group_ref) == 0) {
+					afe_port_group_enable(group_id,
+						NULL, false);
 				if (!(dai_data->afe_ebit_unsupported &&
 				     !dai_data->clk_set.clk_freq_in_hz))
-				msm_dai_q6_tdm_set_clk(dai_data,
-					dai->id, false);
-			}
+					msm_dai_q6_tdm_set_clk(dai_data,
+							       dai->id, false);
+				}
 				dev_err(dai->dev, "%s: fail AFE port 0x%x\n",
 						__func__, sec_port_id);
-		} else {
-			set_bit(STATUS_PORT_STARTED,
-				dai_data->status_mask);
+			} else {
+				set_bit(STATUS_PORT_STARTED,
+					dai_data->status_mask);
 				atomic_inc(sec_group_ref);
-		}
+			}
 		}
 
 		/* TODO: need to monitor PCM/MI2S/TDM HW status */
@@ -6342,14 +6344,14 @@ static void msm_dai_q6_tdm_shutdown(struct snd_pcm_substream *substream,
 			}
 			if (!(dai_data->afe_ebit_unsupported &&
 				!dai_data->clk_set.clk_freq_in_hz)) {
-			rc = msm_dai_q6_tdm_set_clk(dai_data,
-				dai->id, false);
-			if (IS_ERR_VALUE(rc)) {
-				dev_err(dai->dev,
+				rc = msm_dai_q6_tdm_set_clk(dai_data,
+							    dai->id, false);
+				if (IS_ERR_VALUE(rc)) {
+					dev_err(dai->dev,
 					"%s: fail to disable AFE clk 0x%x\n",
 					__func__, dai->id);
+				}
 			}
-		}
 		}
 		if ((dai_data->num_group_ports > 1) &&
 		    (dai_data->sec_port_enable)) {

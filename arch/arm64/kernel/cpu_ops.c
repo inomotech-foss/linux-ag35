@@ -23,12 +23,9 @@
 #include <linux/string.h>
 
 const struct cpu_operations *cpu_ops[NR_CPUS];
-
-static const struct cpu_operations *supported_cpu_ops[] __initconst = {
-	&smp_spin_table_ops,
-	&cpu_psci_ops,
-	NULL,
-};
+extern struct of_cpu_method __cpu_method_of_table[];
+static const struct of_cpu_method __cpu_method_of_table_sentinel
+	__used __section(__cpu_method_of_table_end);
 
 static const struct cpu_operations * __init cpu_get_ops(const char *name)
 {

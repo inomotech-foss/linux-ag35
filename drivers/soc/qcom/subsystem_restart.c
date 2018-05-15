@@ -762,8 +762,8 @@ static int subsystem_powerup(struct subsys_device *dev, void *data)
 				current->comm, current->pid, name);
 		else
 			pr_err("Powerup failure on %s\n", name);
-			return ret;
-		}
+		return ret;
+	}
 	enable_all_irqs(dev);
 
 	ret = wait_for_err_ready(dev);
@@ -1263,7 +1263,7 @@ void subsys_set_error(struct subsys_device *dev, const char *error_msg)
 	if (dev) {
 		snprintf(dev->error_buf, sizeof(dev->error_buf), "%s",
 							   error_msg);
-	sysfs_notify(&dev->dev.kobj, NULL, "error");
+		sysfs_notify(&dev->dev.kobj, NULL, "error");
 	}
 }
 

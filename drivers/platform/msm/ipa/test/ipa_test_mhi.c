@@ -1375,22 +1375,22 @@ static int ipa_mhi_test_q_transfer_re(struct ipa_mem_buffer *mmio,
 			num_of_ed_to_queue - avail_ev);
 
 		next_wp_ofst = (wp_ofst + (num_of_ed_to_queue - avail_ev) *
-		sizeof(struct ipa_mhi_event_ring_element)) %
-		(u32)p_events[event_ring_index].rlen;
+			sizeof(struct ipa_mhi_event_ring_element)) %
+			(u32)p_events[event_ring_index].rlen;
 
-	/* set next WP */
-	p_events[event_ring_index].wp =
-		(u32)p_events[event_ring_index].rbase + next_wp_ofst;
+		/* set next WP */
+		p_events[event_ring_index].wp =
+			(u32)p_events[event_ring_index].rbase + next_wp_ofst;
 
-	/* write value to event ring doorbell */
-	IPA_UT_LOG("DB to event 0x%llx: base %pa ofst 0x%x\n",
-		p_events[event_ring_index].wp,
+		/* write value to event ring doorbell */
+		IPA_UT_LOG("DB to event 0x%llx: base %pa ofst 0x%x\n",
+			p_events[event_ring_index].wp,
 			&(gsi_ctx->per.phys_addr),
 			GSI_EE_n_EV_CH_k_DOORBELL_0_OFFS(
 			event_ring_index + IPA_MHI_GSI_ER_START, 0));
-	iowrite32(p_events[event_ring_index].wp,
-		test_mhi_ctx->gsi_mmio +
-		GSI_EE_n_EV_CH_k_DOORBELL_0_OFFS(
+		iowrite32(p_events[event_ring_index].wp,
+			test_mhi_ctx->gsi_mmio +
+			GSI_EE_n_EV_CH_k_DOORBELL_0_OFFS(
 			event_ring_index + IPA_MHI_GSI_ER_START, 0));
 	}
 

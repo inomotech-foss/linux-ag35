@@ -1546,6 +1546,16 @@
 			qcom,smdtty-port-name = "DATA3";
 		};
 
+		smdtty_data2: qcom,smdtty-data2 {
+			qcom,smdtty-remote = "modem";
+			qcom,smdtty-port-name = "DATA2";
+		};
+
+		smdtty_data3: qcom,smdtty-data3 {
+			qcom,smdtty-remote = "modem";
+			qcom,smdtty-port-name = "DATA3";
+		};
+
 		smdtty_data4: qcom,smdtty-data4 {
 			qcom,smdtty-remote = "modem";
 			qcom,smdtty-port-name = "DATA4";
