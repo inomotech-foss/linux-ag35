@@ -1450,10 +1450,6 @@ static int fanout_add(struct sock *sk, u16 id, u16 type_flags)
 
 	mutex_lock(&fanout_mutex);
 
-	err = -EINVAL;
-	if (!po->running)
-		goto out;
-
 	err = -EALREADY;
 	if (po->fanout)
 		goto out;
@@ -3320,12 +3316,12 @@ packet_setsockopt(struct socket *sock, int level, int optname, char __user *optv
 			if (pkt_sk(sk)->has_vnet_hdr) {
 				ret = -EINVAL;
 			} else {
-		if (copy_from_user(&req_u.req, optval, len))
+				if (copy_from_user(&req_u.req, optval, len))
 					ret = -EFAULT;
 				else
 					ret = packet_set_ring(sk, &req_u, 0,
-			optname == PACKET_TX_RING);
-	}
+							      optname == PACKET_TX_RING);
+			}
 		}
 		release_sock(sk);
 		return ret;
@@ -3401,7 +3397,7 @@ packet_setsockopt(struct socket *sock, int level, int optname, char __user *optv
 		if (po->rx_ring.pg_vec || po->tx_ring.pg_vec) {
 			ret = -EBUSY;
 		} else {
-		po->tp_loss = !!val;
+			po->tp_loss = !!val;
 			ret = 0;
 		}
 		release_sock(sk);
@@ -3450,7 +3446,7 @@ packet_setsockopt(struct socket *sock, int level, int optname, char __user *optv
 		if (po->rx_ring.pg_vec || po->tx_ring.pg_vec) {
 			ret = -EBUSY;
 		} else {
-		po->has_vnet_hdr = !!val;
+			po->has_vnet_hdr = !!val;
 			ret = 0;
 		}
 		release_sock(sk);
@@ -3492,7 +3488,7 @@ packet_setsockopt(struct socket *sock, int level, int optname, char __user *optv
 		if (po->rx_ring.pg_vec || po->tx_ring.pg_vec) {
 			ret = -EBUSY;
 		} else {
-		po->tp_tx_has_off = !!val;
+			po->tp_tx_has_off = !!val;
 			ret = 0;
 		}
 		release_sock(sk);
