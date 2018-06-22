@@ -137,6 +137,7 @@ struct f_mbim {
 
 	atomic_t		error;
 	unsigned int		cpkt_drop_cnt;
+
 	bool			remote_wakeup_enabled;
     struct delayed_work	rwake_work;
 };
@@ -720,7 +721,6 @@ static void mbim_remote_wakeup_work(struct work_struct *w)
 	else
 		pr_info("%s: remote wake-up failed: %d\n", __func__, ret);
 }
-
 
 /*
  * Context: mbim->lock held
@@ -1386,6 +1386,7 @@ static void mbim_disable(struct usb_function *f)
 	struct usb_composite_dev *cdev = mbim->cdev;
 
 	pr_info("SET DEVICE OFFLINE\n");
+
     cancel_delayed_work(&mbim->rwake_work);
 	atomic_set(&mbim->online, 0);
 	mbim->remote_wakeup_enabled = 0;
@@ -1465,6 +1466,7 @@ static void mbim_suspend(struct usb_function *f)
 
 	bam_data_suspend(&mbim->bam_port, mbim->port_num, USB_FUNC_MBIM,
 			 mbim->remote_wakeup_enabled);
+
     if (mbim->remote_wakeup_enabled &&
 			atomic_read(&mbim->not_port.notify_count) > 0) {
 		pr_info("%s: pending notification, wakeup host\n", __func__);
