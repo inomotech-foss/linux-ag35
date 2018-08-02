@@ -338,25 +338,14 @@ static int palm_os_3_probe(struct usb_serial *serial,
 		goto exit;
 	}
 
-	if (retval != sizeof(*connection_info)) {
-		dev_err(dev, "Invalid connection information received from device\n");
-		retval = -ENODEV;
-		goto exit;
-	}
-
-	connection_info = (struct visor_connection_info *)transfer_buffer;
+	if (retval == sizeof(*connection_info)) {
+			connection_info = (struct visor_connection_info *)
+							transfer_buffer;
 
 		num_ports = le16_to_cpu(connection_info->num_ports);
-
-	/* Handle devices that report invalid stuff here. */
-	if (num_ports == 0 || num_ports > 2) {
-		dev_warn(dev, "%s: No valid connect info available\n",
-			serial->type->description);
-		num_ports = 2;
-	}
-
 		for (i = 0; i < num_ports; ++i) {
-		switch (connection_info->connections[i].port_function_id) {
+			switch (
+			   connection_info->connections[i].port_function_id) {
 			case VISOR_FUNCTION_GENERIC:
 				string = "Generic";
 				break;
@@ -380,6 +369,16 @@ static int palm_os_3_probe(struct usb_serial *serial,
 				serial->type->description,
 				connection_info->connections[i].port, string);
 		}
+	}
+	/*
+	* Handle devices that report invalid stuff here.
+	*/
+	if (num_ports == 0 || num_ports > 2) {
+		dev_warn(dev, "%s: No valid connect info available\n",
+			serial->type->description);
+		num_ports = 2;
+	}
+
 	dev_info(dev, "%s: Number of ports: %d\n", serial->type->description,
 		num_ports);
 
