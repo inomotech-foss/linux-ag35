@@ -6107,10 +6107,10 @@ static int msm_dai_q6_tdm_prepare(struct snd_pcm_substream *substream,
 		/*
 		* 8909 HW and 9x50 HW have a dependency where for Rx/Tx to
 		* work in TDM mode
-		 * We need to start a Tx or Rx port in the same group.
-		 * Hence for BG use TDM_TX when a RX session is requested and
-		 * use TDM_RX port when a TX session is requested as these ports
-		 * are unused as of now.
+		* We need to start a Tx or Rx port in the same group.
+		* Hence for BG use TDM_TX when a RX session is requested and
+		* use TDM_RX port when a TX session is requested as these ports
+		* are unused as of now.
 		*/
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 			prim_port_id = dai->id;

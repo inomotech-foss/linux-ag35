@@ -1206,7 +1206,7 @@ int gserial_init_port(int port_num, const char *name,
 	switch (transport) {
 	case USB_GADGET_XPORT_TTY:
 		if (!reuse_transports_for_config2)
-		no_tty_ports++;
+			no_tty_ports++;
 		break;
 	case USB_GADGET_XPORT_SMD:
 		if (reuse_transports_for_config2) {
@@ -1218,7 +1218,7 @@ int gserial_init_port(int port_num, const char *name,
 		gserial_ports[port_num].client_port_num = client_port_num;
 		/* transport port is shared between different configurations */
 		if (!reuse_transports_for_config2)
-		no_smd_ports++;
+			no_smd_ports++;
 		break;
 	case USB_GADGET_XPORT_CHAR_BRIDGE:
 		if (reuse_transports_for_config2) {
@@ -1231,7 +1231,7 @@ int gserial_init_port(int port_num, const char *name,
 		gserial_ports[port_num].client_port_num = client_port_num;
 		/* transport port is shared between different configurations */
 		if (!reuse_transports_for_config2)
-		no_char_bridge_ports++;
+			no_char_bridge_ports++;
 		break;
 	case USB_GADGET_XPORT_HSIC:
 		ghsic_ctrl_set_port_name(port_name, name);
@@ -1239,7 +1239,7 @@ int gserial_init_port(int port_num, const char *name,
 
 		/*client port number will be updated in gport_setup*/
 		if (!reuse_transports_for_config2)
-		no_hsic_sports++;
+			no_hsic_sports++;
 		break;
 	default:
 		pr_err("%s: Un-supported transport transport: %u\n",
@@ -1249,7 +1249,7 @@ int gserial_init_port(int port_num, const char *name,
 
 	/* transport ports are shared between different configurations */
 	if (!reuse_transports_for_config2)
-	nr_ports++;
+		nr_ports++;
 
 	return ret;
 }

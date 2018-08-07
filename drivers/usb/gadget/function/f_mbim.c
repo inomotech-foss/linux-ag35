@@ -139,7 +139,7 @@ struct f_mbim {
 	unsigned int		cpkt_drop_cnt;
 
 	bool			remote_wakeup_enabled;
-    struct delayed_work	rwake_work;
+	struct delayed_work	rwake_work;
 };
 
 struct mbim_ntb_input_size {
@@ -1387,7 +1387,7 @@ static void mbim_disable(struct usb_function *f)
 
 	pr_info("SET DEVICE OFFLINE\n");
 
-    cancel_delayed_work(&mbim->rwake_work);
+	cancel_delayed_work(&mbim->rwake_work);
 	atomic_set(&mbim->online, 0);
 	mbim->remote_wakeup_enabled = 0;
 
@@ -1467,7 +1467,7 @@ static void mbim_suspend(struct usb_function *f)
 	bam_data_suspend(&mbim->bam_port, mbim->port_num, USB_FUNC_MBIM,
 			 mbim->remote_wakeup_enabled);
 
-    if (mbim->remote_wakeup_enabled &&
+	if (mbim->remote_wakeup_enabled &&
 			atomic_read(&mbim->not_port.notify_count) > 0) {
 		pr_info("%s: pending notification, wakeup host\n", __func__);
 		schedule_delayed_work(&mbim->rwake_work,
@@ -1491,9 +1491,9 @@ static void mbim_resume(struct usb_function *f)
 	if ((mbim->cdev->gadget->speed == USB_SPEED_SUPER) &&
 		f->func_is_suspended)
 		return;
-    
-    cancel_delayed_work(&mbim->rwake_work);
-    
+
+	cancel_delayed_work(&mbim->rwake_work);
+
 	/* resume control path by queuing notify req */
 	spin_lock(&mbim->lock);
 	mbim_do_notify(mbim);
@@ -1861,7 +1861,7 @@ int mbim_bind_config(struct usb_configuration *c, unsigned portno,
 
 	INIT_LIST_HEAD(&mbim->cpkt_req_q);
 	INIT_LIST_HEAD(&mbim->cpkt_resp_q);
-    INIT_DELAYED_WORK(&mbim->rwake_work, mbim_remote_wakeup_work);
+	INIT_DELAYED_WORK(&mbim->rwake_work, mbim_remote_wakeup_work);
 
 	status = usb_add_function(c, &mbim->function);
 

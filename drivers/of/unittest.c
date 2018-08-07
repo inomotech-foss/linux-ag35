@@ -491,7 +491,6 @@ static void __init of_selftest_changeset(void)
 	struct device_node *n1, *n2, *n21, *nremove, *parent, *np;
 	struct of_changeset chgset;
 
-	of_changeset_init(&chgset);
 	n1 = __of_node_dup(NULL, "/testcase-data/changeset/n1");
 	selftest(n1, "testcase setup failure\n");
 	n2 = __of_node_dup(NULL, "/testcase-data/changeset/n2");
@@ -528,7 +527,7 @@ static void __init of_selftest_changeset(void)
 	selftest((np = of_find_node_by_path("/testcase-data/changeset/n2/n21")),
 		 "'%s' not added\n", n21->full_name);
 	if (np)
-	of_node_put(np);
+		of_node_put(np);
 
 	mutex_lock(&of_mutex);
 	selftest(!of_changeset_revert(&chgset), "revert failed\n");
