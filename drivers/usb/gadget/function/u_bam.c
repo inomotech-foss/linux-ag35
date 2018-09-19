@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2016, Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2017, Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -33,6 +33,29 @@
 
 #define BAM_N_PORTS	 2
 #define BAM2BAM_N_PORTS	 4
+
+#define QUECTEL_POWER_DOWN
+
+#define QUECTEL_MULTI_IP_PACKAGES
+
+#ifdef QUECTEL_MULTI_IP_PACKAGES
+
+#define QUEC_NET_MSG_SPEC               (0x80)
+
+#define QUEC_NET_MSG_ID_IP_DATA         (0x00)
+
+struct quec_net_package_header {
+        unsigned char msg_spec;
+        unsigned char msg_id;
+        unsigned short payload_len;
+        unsigned char reserve[16];
+} __packed;
+
+unsigned int multi_package_max_len = 1520;
+unsigned int wait_for_package_timeout = 50; //us
+unsigned int package_max_count_in_queue = 5;
+unsigned int multi_package_enabled = 0;
+#endif
 
 static struct workqueue_struct *gbam_wq;
 static int n_bam_ports;
@@ -139,8 +162,13 @@ struct bam_ch_info {
 	struct work_struct	write_tobam_w;
 	struct work_struct	write_tohost_w;
 
+#ifdef QUECTEL_MULTI_IP_PACKAGES
+	struct delayed_work 	write_tohost_delay_work;
+#endif
 	struct usb_request	*rx_req;
 	struct usb_request	*tx_req;
+	bool			tx_req_dequeued;
+	bool			rx_req_dequeued;
 
 	u32			src_pipe_idx;
 	u32			dst_pipe_idx;
@@ -211,6 +239,10 @@ static void gbam_start_endless_tx(struct gbam_port *port);
 static void gbam_notify(void *p, int event, unsigned long data);
 static void gbam_data_write_tobam(struct work_struct *w);
 
+#ifdef QUECTEL_POWER_DOWN
+int quec_system_power_downed(void);
+#endif
+
 /*---------------misc functions---------------- */
 static void gbam_free_requests(struct usb_ep *ep, struct list_head *head)
 {
@@ -277,7 +309,7 @@ static struct sk_buff *gbam_alloc_skb_from_pool(struct gbam_port *port)
 		skb = alloc_skb(bam_mux_rx_req_size + BAM_MUX_HDR, GFP_ATOMIC);
 
 		if (!skb) {
-			pr_err("%s: alloc skb failed\n", __func__);
+			pr_err_ratelimited("%s: alloc skb failed\n", __func__);
 			goto alloc_exit;
 		}
 
@@ -391,6 +423,105 @@ static void gbam_ipa_sys2bam_notify_cb(void *priv, enum ipa_dp_evt_type event,
 /*--------------------------------------------- */
 
 /*------------data_path----------------------------*/
+
+#ifdef QUECTEL_MULTI_IP_PACKAGES
+
+static void gbam_write_data_tohost(struct gbam_port *port);
+
+struct sk_buff* quec_get_multi_skb(struct sk_buff_head *list, int max_len)
+{
+	struct sk_buff* skb;
+	struct sk_buff* skb_tmp;
+	struct quec_net_package_header net_package = {0};
+
+	net_package.msg_spec = QUEC_NET_MSG_SPEC;
+	net_package.msg_id = QUEC_NET_MSG_ID_IP_DATA;
+
+	skb_tmp = __skb_dequeue(list);
+	
+	if (skb_tmp == NULL)
+		return NULL;
+	
+	if (max_len < (skb_tmp->len + sizeof (struct quec_net_package_header)))
+	{
+		max_len = (skb_tmp->len + sizeof (struct quec_net_package_header));
+	}
+
+	skb = alloc_skb(max_len, GFP_ATOMIC);
+
+	if (skb == NULL)
+	{
+		printk("quec_get_multi_skb--------alloc skb failed------\n");
+		return skb_tmp;
+	}
+
+	while (1)
+	{
+		net_package.payload_len = htons(skb_tmp->len);
+		memcpy(skb_put(skb, sizeof(net_package)), &net_package, sizeof(net_package));
+		memcpy(skb_put(skb, skb_tmp->len), skb_tmp->data, skb_tmp->len);
+
+		dev_kfree_skb_any(skb_tmp);
+
+		skb_tmp = skb_peek(list);
+
+		if ((skb_tmp == NULL)
+			|| (skb_tailroom(skb) < (skb_tmp->len + sizeof (struct quec_net_package_header))))
+		{
+			return skb;
+		}
+		skb_tmp = __skb_dequeue(list);
+	}
+
+	return skb;
+}
+
+
+static atomic_t write_data_to_host_delayed = ATOMIC_INIT(0);
+
+static void start_write_to_host_delay_work(struct delayed_work* delay_work)
+{
+	if (atomic_read(&write_data_to_host_delayed) == 0)
+	{
+		atomic_set(&write_data_to_host_delayed, 1);		
+		queue_delayed_work(gbam_wq, delay_work, usecs_to_jiffies(wait_for_package_timeout));
+	}
+}
+
+static void queue_data_len(struct sk_buff_head* queue, int* data_len, int* skb_count)
+{
+	struct sk_buff *skb;
+	*data_len = 0;
+	*skb_count = 0;
+
+	skb_queue_walk(queue, skb) {
+		*data_len += skb->len;
+		*skb_count = (*skb_count) + 1;
+    }
+}
+
+static int enough_data_to_send(struct sk_buff_head* queue, int multi_package_len, int package_count)
+{
+	int data_len,  skb_count;
+	queue_data_len(queue, &data_len, &skb_count);
+	return ((data_len >= multi_package_len) || (skb_count >= package_count));
+}
+
+static void gbam_write_data_tohost_delay_w(struct work_struct *w)
+{
+	struct bam_ch_info	*d;
+	struct gbam_port	*port;
+
+	d = container_of(w, struct bam_ch_info, write_tohost_delay_work.work);
+	port = d->port;
+	
+	atomic_set(&write_data_to_host_delayed, 0);
+	
+	gbam_write_data_tohost(port);
+}
+
+#endif
+
 static void gbam_write_data_tohost(struct gbam_port *port)
 {
 	unsigned long			flags;
@@ -412,7 +543,15 @@ static void gbam_write_data_tohost(struct gbam_port *port)
 	ep = port->port_usb->in;
 
 	while (!list_empty(&d->tx_idle)) {
+#ifndef QUECTEL_MULTI_IP_PACKAGES
 		skb = __skb_dequeue(&d->tx_skb_q);
+#else
+		if (multi_package_enabled) {
+			skb = quec_get_multi_skb(&d->tx_skb_q, multi_package_max_len);
+		} else {
+			skb = __skb_dequeue(&d->tx_skb_q);
+		}
+#endif
 		if (!skb)
 			break;
 
@@ -462,12 +601,20 @@ static void gbam_write_data_tohost(struct gbam_port *port)
 		ret = usb_ep_queue(ep, req, GFP_ATOMIC);
 		spin_lock(&port->port_lock_dl);
 		if (ret) {
-			pr_err("%s: usb epIn failed with %d\n", __func__, ret);
+			pr_err_ratelimited("%s: usb epIn failed with %d\n",
+					 __func__, ret);
 			list_add(&req->list, &d->tx_idle);
 			dev_kfree_skb_any(skb);
 			break;
 		}
 		d->to_host++;
+
+#ifdef QUECTEL_MULTI_IP_PACKAGES
+		if (multi_package_enabled && (!enough_data_to_send(&d->tx_skb_q, multi_package_max_len, package_max_count_in_queue))) {
+			start_write_to_host_delay_work(&d->write_tohost_delay_work);
+			break;
+		}
+#endif
 	}
 	spin_unlock_irqrestore(&port->port_lock_dl, flags);
 }
@@ -515,7 +662,26 @@ void gbam_data_recv_cb(void *p, struct sk_buff *skb)
 	__skb_queue_tail(&d->tx_skb_q, skb);
 	spin_unlock_irqrestore(&port->port_lock_dl, flags);
 
+#ifndef QUECTEL_MULTI_IP_PACKAGES
 	gbam_write_data_tohost(port);
+#else
+	if (!multi_package_enabled) {
+		gbam_write_data_tohost(port);
+		return;
+	}
+
+	spin_lock_irqsave(&port->port_lock_dl, flags);
+	if (!enough_data_to_send(&d->tx_skb_q, multi_package_max_len, package_max_count_in_queue)) {
+		spin_unlock_irqrestore(&port->port_lock_dl, flags);
+		start_write_to_host_delay_work(&d->write_tohost_delay_work);
+		return;
+	} else {
+		spin_unlock_irqrestore(&port->port_lock_dl, flags);
+		gbam_write_data_tohost(port);
+	}
+
+#endif
+
 }
 
 void gbam_data_write_done(void *p, struct sk_buff *skb)
@@ -698,7 +864,24 @@ static void gbam_epin_complete(struct usb_ep *ep, struct usb_request *req)
 	list_add_tail(&req->list, &d->tx_idle);
 	spin_unlock(&port->port_lock_dl);
 
+#ifdef QUECTEL_MULTI_IP_PACKAGES
+	if (!multi_package_enabled) {
 	queue_work(gbam_wq, &d->write_tohost_w);
+	}
+
+	spin_lock(&port->port_lock_dl);
+	if (!enough_data_to_send(&d->tx_skb_q, multi_package_max_len, package_max_count_in_queue)) {
+		spin_unlock(&port->port_lock_dl);
+		start_write_to_host_delay_work(&d->write_tohost_delay_work);
+		return;
+	} else {
+		spin_unlock(&port->port_lock_dl);
+		queue_work(gbam_wq, &d->write_tohost_w);
+	}
+#else
+	queue_work(gbam_wq, &d->write_tohost_w);
+#endif
+
 }
 
 static void
@@ -883,7 +1066,7 @@ static void gbam_start_endless_rx(struct gbam_port *port)
 	unsigned long flags;
 
 	spin_lock_irqsave(&port->port_lock_ul, flags);
-	if (!port->port_usb) {
+	if (!port->port_usb || !d->rx_req) {
 		spin_unlock_irqrestore(&port->port_lock_ul, flags);
 		pr_err("%s: port->port_usb is NULL", __func__);
 		return;
@@ -905,7 +1088,7 @@ static void gbam_start_endless_tx(struct gbam_port *port)
 	unsigned long flags;
 
 	spin_lock_irqsave(&port->port_lock_dl, flags);
-	if (!port->port_usb) {
+	if (!port->port_usb || !d->tx_req) {
 		spin_unlock_irqrestore(&port->port_lock_dl, flags);
 		pr_err("%s: port->port_usb is NULL", __func__);
 		return;
@@ -934,6 +1117,7 @@ static void gbam_stop_endless_rx(struct gbam_port *port)
 	}
 
 	ep = port->port_usb->out;
+	d->rx_req_dequeued = true;
 	spin_unlock_irqrestore(&port->port_lock_ul, flags);
 	pr_debug("%s: dequeue\n", __func__);
 	status = usb_ep_dequeue(ep, d->rx_req);
@@ -956,6 +1140,7 @@ static void gbam_stop_endless_tx(struct gbam_port *port)
 	}
 
 	ep = port->port_usb->in;
+	d->tx_req_dequeued = true;
 	spin_unlock_irqrestore(&port->port_lock_dl, flags);
 	pr_debug("%s: dequeue\n", __func__);
 	status = usb_ep_dequeue(ep, d->tx_req);
@@ -1206,6 +1391,12 @@ static void gbam_disconnect_work(struct work_struct *w)
 			container_of(w, struct gbam_port, disconnect_w);
 	struct bam_ch_info *d = &port->data_ch;
 
+#ifdef QUECTEL_POWER_DOWN
+	if (quec_system_power_downed())	{
+		goto exit;
+	}
+#endif
+
 	if (!test_bit(BAM_CH_OPENED, &d->flags)) {
 		pr_err("%s: Bam channel is not opened\n", __func__);
 		goto exit;
@@ -1319,6 +1510,12 @@ static void gbam2bam_connect_work(struct work_struct *w)
 		return;
 	}
 
+	if (port->is_connected) {
+		pr_debug("%s: Port already connected. Bail out.\n",
+			__func__);
+		spin_unlock_irqrestore(&port->port_lock, flags);
+		return;
+	}
 	port->is_connected = true;
 
 	spin_lock_irqsave(&port->port_lock_ul, flags_ul);
@@ -1351,7 +1548,6 @@ static void gbam2bam_connect_work(struct work_struct *w)
 	*/
 	spin_unlock(&port->port_lock_dl);
 	spin_unlock_irqrestore(&port->port_lock_ul, flags_ul);
-	spin_unlock_irqrestore(&port->port_lock, flags);
 
 	d->ipa_params.usb_connection_speed = gadget->speed;
 
@@ -1366,18 +1562,20 @@ static void gbam2bam_connect_work(struct work_struct *w)
 			&d->src_pipe_type) ||
 		usb_bam_get_pipe_type(d->usb_bam_type, d->ipa_params.dst_idx,
 				&d->dst_pipe_type)) {
+		spin_unlock_irqrestore(&port->port_lock, flags);
 		pr_err("%s:usb_bam_get_pipe_type() failed\n", __func__);
 		return;
 	}
 	if (d->dst_pipe_type != USB_BAM_PIPE_BAM2BAM) {
+		spin_unlock_irqrestore(&port->port_lock, flags);
 		pr_err("%s: no software preparation for DL not using bam2bam\n",
 				__func__);
 		return;
 	}
 
+	spin_unlock_irqrestore(&port->port_lock, flags);
 	usb_bam_alloc_fifos(d->usb_bam_type, d->src_connection_idx);
 	usb_bam_alloc_fifos(d->usb_bam_type, d->dst_connection_idx);
-	gadget->bam2bam_func_enabled = true;
 
 	spin_lock_irqsave(&port->port_lock, flags);
 	/* check if USB cable is disconnected or not */
@@ -1396,7 +1594,7 @@ static void gbam2bam_connect_work(struct work_struct *w)
 								d->src_pipe_idx;
 		d->rx_req->length = 32*1024;
 		d->rx_req->udc_priv = sps_params;
-		msm_ep_config(port->port_usb->out, d->rx_req, GFP_ATOMIC);
+		msm_ep_config(port->port_usb->out, d->rx_req);
 
 		/* Configure for TX */
 		configure_data_fifo(d->usb_bam_type, d->dst_connection_idx,
@@ -1404,26 +1602,33 @@ static void gbam2bam_connect_work(struct work_struct *w)
 		sps_params = MSM_SPS_MODE | MSM_DISABLE_WB | d->dst_pipe_idx;
 		d->tx_req->length = 32*1024;
 		d->tx_req->udc_priv = sps_params;
-		msm_ep_config(port->port_usb->in, d->tx_req, GFP_ATOMIC);
+		msm_ep_config(port->port_usb->in, d->tx_req);
 
 	} else {
 		/* Configure for RX */
+		get_bam2bam_connection_info(d->usb_bam_type,
+				d->src_connection_idx,
+				&d->src_pipe_idx,
+				NULL, NULL, NULL);
 		sps_params = (MSM_SPS_MODE | d->src_pipe_idx |
 				MSM_VENDOR_ID) & ~MSM_IS_FINITE_TRANSFER;
 		d->rx_req->udc_priv = sps_params;
 
 		/* Configure for TX */
+		get_bam2bam_connection_info(d->usb_bam_type,
+				d->dst_connection_idx,
+				&d->dst_pipe_idx,
+				NULL, NULL, NULL);
 		sps_params = (MSM_SPS_MODE | d->dst_pipe_idx |
 				MSM_VENDOR_ID) & ~MSM_IS_FINITE_TRANSFER;
-		d->tx_req->length = 32*1024;
 		d->tx_req->udc_priv = sps_params;
 
 	}
-	spin_unlock_irqrestore(&port->port_lock, flags);
 
 	teth_bridge_params.client = d->ipa_params.src_client;
 	ret = teth_bridge_init(&teth_bridge_params);
 	if (ret) {
+		spin_unlock_irqrestore(&port->port_lock, flags);
 		pr_err("%s:teth_bridge_init() failed\n", __func__);
 		goto ep_unconfig;
 	}
@@ -1450,10 +1655,20 @@ static void gbam2bam_connect_work(struct work_struct *w)
 	d->ipa_params.ipa_ep_cfg.mode.mode = IPA_BASIC;
 	d->ipa_params.skip_ep_cfg = teth_bridge_params.skip_ep_cfg;
 	d->ipa_params.dir = USB_TO_PEER_PERIPHERAL;
+	spin_unlock_irqrestore(&port->port_lock, flags);
 	ret = usb_bam_connect_ipa(d->usb_bam_type, &d->ipa_params);
 	if (ret) {
 		pr_err("%s: usb_bam_connect_ipa failed: err:%d\n",
 			__func__, ret);
+		goto ep_unconfig;
+	}
+
+	spin_lock_irqsave(&port->port_lock, flags);
+	/* check if USB cable is disconnected or not */
+	if (port->last_event ==  U_BAM_DISCONNECT_E) {
+		spin_unlock_irqrestore(&port->port_lock, flags);
+		pr_debug("%s:%d: cable is disconnected.\n",
+						 __func__, __LINE__);
 		goto ep_unconfig;
 	}
 
@@ -1469,6 +1684,7 @@ static void gbam2bam_connect_work(struct work_struct *w)
 	else
 		d->ipa_params.reset_pipe_after_lpm = false;
 	d->ipa_params.dir = PEER_PERIPHERAL_TO_USB;
+	spin_unlock_irqrestore(&port->port_lock, flags);
 	ret = usb_bam_connect_ipa(d->usb_bam_type, &d->ipa_params);
 	if (ret) {
 		pr_err("%s: usb_bam_connect_ipa failed: err:%d\n",
@@ -1476,6 +1692,16 @@ static void gbam2bam_connect_work(struct work_struct *w)
 		goto ep_unconfig;
 	}
 
+	spin_lock_irqsave(&port->port_lock, flags);
+	/* check if USB cable is disconnected or not */
+	if (port->last_event ==  U_BAM_DISCONNECT_E) {
+		spin_unlock_irqrestore(&port->port_lock, flags);
+		pr_debug("%s:%d: cable is disconnected.\n",
+						 __func__, __LINE__);
+		goto ep_unconfig;
+	}
+
+	spin_unlock_irqrestore(&port->port_lock, flags);
 	gqti_ctrl_update_ipa_pipes(port->port_usb, port->port_num,
 					d->ipa_params.ipa_prod_ep_idx ,
 					d->ipa_params.ipa_cons_ep_idx);
@@ -1512,8 +1738,13 @@ static void gbam2bam_connect_work(struct work_struct *w)
 
 ep_unconfig:
 	if (gadget_is_dwc3(gadget)) {
+		spin_lock_irqsave(&port->port_lock, flags);
+		/* check if USB cable is disconnected or not */
+		if (port->port_usb) {
 		msm_ep_unconfig(port->port_usb->in);
 		msm_ep_unconfig(port->port_usb->out);
+	}
+		spin_unlock_irqrestore(&port->port_lock, flags);
 	}
 free_fifos:
 	usb_bam_free_fifos(d->usb_bam_type, d->src_connection_idx);
@@ -1526,6 +1757,8 @@ static int gbam_wake_cb(void *param)
 	struct gbam_port	*port = (struct gbam_port *)param;
 	struct usb_gadget	*gadget;
 	unsigned long flags;
+	struct usb_function *func;
+	int ret;
 
 	spin_lock_irqsave(&port->port_lock, flags);
 	if (!port->port_usb) {
@@ -1536,11 +1769,23 @@ static int gbam_wake_cb(void *param)
 	}
 
 	gadget = port->port_usb->gadget;
+	func = port->port_usb->f;
 	spin_unlock_irqrestore(&port->port_lock, flags);
 
 	pr_debug("%s: woken up by peer\n", __func__);
 
-	return usb_gadget_wakeup(gadget);
+	if ((gadget->speed == USB_SPEED_SUPER) &&
+	    (func->func_is_suspended))
+		ret = usb_func_wakeup(func);
+	else
+		ret = usb_gadget_wakeup(gadget);
+
+	if ((ret == -EBUSY) || (ret == -EAGAIN))
+		pr_debug("Remote wakeup is delayed due to LPM exit\n");
+	else if (ret)
+		pr_err("Failed to wake up the USB core. ret=%d\n", ret);
+
+	return ret;
 }
 
 static void gbam2bam_suspend_work(struct work_struct *w)
@@ -1627,16 +1872,36 @@ static void gbam2bam_resume_work(struct work_struct *w)
 	if (d->trans == USB_GADGET_XPORT_BAM2BAM_IPA) {
 		if (gadget_is_dwc3(gadget) &&
 			msm_dwc3_reset_ep_after_lpm(gadget)) {
-				configure_data_fifo(d->usb_bam_type,
-					d->src_connection_idx,
-					port->port_usb->out, d->src_pipe_type);
+			if (d->tx_req_dequeued) {
+				msm_ep_unconfig(port->port_usb->in);
 				configure_data_fifo(d->usb_bam_type,
 					d->dst_connection_idx,
 					port->port_usb->in, d->dst_pipe_type);
-				spin_unlock_irqrestore(&port->port_lock, flags);
-				msm_dwc3_reset_dbm_ep(port->port_usb->in);
-				spin_lock_irqsave(&port->port_lock, flags);
 		}
+			if (d->rx_req_dequeued) {
+				msm_ep_unconfig(port->port_usb->out);
+				configure_data_fifo(d->usb_bam_type,
+					d->src_connection_idx,
+					port->port_usb->out, d->src_pipe_type);
+			}
+
+			spin_unlock_irqrestore(&port->port_lock, flags);
+			if (d->tx_req_dequeued)
+				msm_dwc3_reset_dbm_ep(port->port_usb->in);
+			if (d->rx_req_dequeued)
+				msm_dwc3_reset_dbm_ep(port->port_usb->out);
+			spin_lock_irqsave(&port->port_lock, flags);
+			if (port->port_usb) {
+				if (d->tx_req_dequeued)
+					msm_ep_config(port->port_usb->in,
+							d->tx_req);
+				if (d->rx_req_dequeued)
+					msm_ep_config(port->port_usb->out,
+							d->rx_req);
+			}
+		}
+		d->tx_req_dequeued = false;
+		d->rx_req_dequeued = false;
 		usb_bam_resume(d->usb_bam_type, &d->ipa_params);
 	}
 
@@ -1773,6 +2038,10 @@ static int gbam_port_alloc(int portno)
 	INIT_LIST_HEAD(&d->rx_idle);
 	INIT_WORK(&d->write_tobam_w, gbam_data_write_tobam);
 	INIT_WORK(&d->write_tohost_w, gbam_write_data_tohost_w);
+
+#ifdef QUECTEL_MULTI_IP_PACKAGES 
+	INIT_DELAYED_WORK(&d->write_tohost_delay_work, gbam_write_data_tohost_delay_w);
+#endif
 	skb_queue_head_init(&d->tx_skb_q);
 	skb_queue_head_init(&d->rx_skb_q);
 	skb_queue_head_init(&d->rx_skb_idle);
@@ -1949,6 +2218,42 @@ const struct file_operations gbam_stats_ops = {
 	.write = gbam_reset_stats,
 };
 
+static ssize_t gbam_rw_write(struct file *file, const char __user *ubuf,
+				size_t count, loff_t *ppos)
+{
+	struct gbam_port	*port = bam2bam_ports[0];
+	struct usb_function	*func;
+	struct usb_gadget	*gadget;
+	unsigned long		flags;
+
+	if (!port)
+		return -ENODEV;
+
+	spin_lock_irqsave(&port->port_lock, flags);
+	if (!port->port_usb) {
+		pr_debug("%s: usb cable is disconnected, exiting\n",
+				__func__);
+		spin_unlock_irqrestore(&port->port_lock, flags);
+		return -ENODEV;
+	}
+
+	gadget = port->port_usb->gadget;
+	func = port->port_usb->f;
+	spin_unlock_irqrestore(&port->port_lock, flags);
+
+	if ((gadget->speed == USB_SPEED_SUPER) && (func->func_is_suspended)) {
+		pr_debug("%s Initiating usb_func rwakeup\n", __func__);
+		usb_func_wakeup(func);
+	}
+
+	return count;
+}
+
+
+const struct file_operations debug_remote_wakeup_fops = {
+	.write = gbam_rw_write,
+};
+
 struct dentry *gbam_dent;
 static void gbam_debugfs_init(void)
 {
@@ -1960,6 +2265,9 @@ static void gbam_debugfs_init(void)
 	gbam_dent = debugfs_create_dir("usb_rmnet", 0);
 	if (!gbam_dent || IS_ERR(gbam_dent))
 		return;
+
+	debugfs_create_file("remote_wakeup", 0444, gbam_dent, 0,
+			&debug_remote_wakeup_fops);
 
 	dfile = debugfs_create_file("status", 0444, gbam_dent, 0,
 			&gbam_stats_ops);
@@ -2050,6 +2358,15 @@ void gbam_disconnect(struct grmnet *gr, u8 port_num, enum transport_type trans)
 	spin_unlock(&port->port_lock_dl);
 	spin_unlock_irqrestore(&port->port_lock_ul, flags_ul);
 
+	usb_ep_disable(gr->in);
+	if (trans == USB_GADGET_XPORT_BAM2BAM_IPA) {
+		spin_lock_irqsave(&port->port_lock_dl, flags_dl);
+		if (d->tx_req) {
+			usb_ep_free_request(gr->in, d->tx_req);
+			d->tx_req = NULL;
+		}
+		spin_unlock_irqrestore(&port->port_lock_dl, flags_dl);
+	}
 	/* disable endpoints */
 	if (gr->out) {
 		usb_ep_disable(gr->out);
@@ -2061,15 +2378,6 @@ void gbam_disconnect(struct grmnet *gr, u8 port_num, enum transport_type trans)
 			}
 			spin_unlock_irqrestore(&port->port_lock_ul, flags_ul);
 		}
-	}
-	usb_ep_disable(gr->in);
-	if (trans == USB_GADGET_XPORT_BAM2BAM_IPA) {
-		spin_lock_irqsave(&port->port_lock_dl, flags_dl);
-		if (d->tx_req) {
-			usb_ep_free_request(gr->in, d->tx_req);
-			d->tx_req = NULL;
-		}
-		spin_unlock_irqrestore(&port->port_lock_dl, flags_dl);
 	}
 
 	/*
@@ -2235,6 +2543,10 @@ int gbam_connect(struct grmnet *gr, u8 port_num,
 			pr_err("%s:usb_bam_get_pipe_type() failed\n",
 				__func__);
 			ret = -EINVAL;
+			usb_ep_free_request(port->port_usb->out, d->rx_req);
+			d->rx_req = NULL;
+			usb_ep_free_request(port->port_usb->in, d->tx_req);
+			d->tx_req = NULL;
 			goto exit;
 		}
 		/*
@@ -2255,6 +2567,15 @@ int gbam_connect(struct grmnet *gr, u8 port_num,
 	if (ret) {
 		pr_err("%s: usb_ep_enable failed eptype:IN ep:%pK",
 			__func__, gr->in);
+		usb_ep_free_request(port->port_usb->out, d->rx_req);
+		d->rx_req = NULL;
+		usb_ep_free_request(port->port_usb->in, d->tx_req);
+		d->tx_req = NULL;
+		if (d->dst_pipe_type == USB_BAM_PIPE_BAM2BAM)
+			port->port_usb->in->endless = false;
+
+		if (d->src_pipe_type == USB_BAM_PIPE_BAM2BAM)
+			port->port_usb->out->endless = false;
 		goto exit;
 	}
 	gr->in->driver_data = port;
@@ -2270,6 +2591,16 @@ int gbam_connect(struct grmnet *gr, u8 port_num,
 			pr_err("%s: usb_ep_enable failed eptype:OUT ep:%pK",
 					__func__, gr->out);
 			gr->in->driver_data = 0;
+			usb_ep_disable(gr->in);
+			usb_ep_free_request(port->port_usb->out, d->rx_req);
+			d->rx_req = NULL;
+			usb_ep_free_request(port->port_usb->in, d->tx_req);
+			d->tx_req = NULL;
+			if (d->dst_pipe_type == USB_BAM_PIPE_BAM2BAM)
+				port->port_usb->in->endless = false;
+
+			if (d->src_pipe_type == USB_BAM_PIPE_BAM2BAM)
+				port->port_usb->out->endless = false;
 			goto exit;
 		}
 		gr->out->driver_data = port;
@@ -2289,6 +2620,12 @@ int gbam_connect(struct grmnet *gr, u8 port_num,
 exit:
 	spin_unlock_irqrestore(&port->port_lock, flags);
 	return ret;
+}
+
+void gbam_data_flush_workqueue(void)
+{
+	pr_debug("%s(): Flushing workqueue\n", __func__);
+	flush_workqueue(gbam_wq);
 }
 
 int gbam_setup(unsigned int no_bam_port)

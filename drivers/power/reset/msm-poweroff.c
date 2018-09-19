@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,8 +45,11 @@
 #define SCM_EDLOAD_MODE			0X01
 #define SCM_DLOAD_CMD			0x10
 
+#define QUECTEL_RESET_SYSTEM
+#define QUECTEL_POWER_DOWN
+
 static int restart_mode;
-static void *restart_reason, *dload_type_addr;
+static void *restart_reason;
 static bool scm_pmic_arbiter_disable_supported;
 static bool scm_deassert_ps_hold_supported;
 /* Download mode master kill-switch */
@@ -54,12 +57,19 @@ static void __iomem *msm_ps_hold;
 static phys_addr_t tcsr_boot_misc_detect;
 static void scm_disable_sdi(void);
 
+#ifdef CONFIG_MSM_DLOAD_MODE
 /* Runtime could be only changed value once.
- * There is no API from TZ to re-enable the registers.
- * So the SDI cannot be re-enabled when it already by-passed.
+* There is no API from TZ to re-enable the registers.
+* So the SDI cannot be re-enabled when it already by-passed.
 */
-static int download_mode;
-static struct kobject dload_kobj;
+#ifdef QUECTEL_RESET_SYSTEM
+static int download_mode = 0;
+#else
+static int download_mode = 1;
+#endif
+#else
+static const int download_mode;
+#endif
 
 #ifdef CONFIG_MSM_DLOAD_MODE
 #define EDL_MODE_PROP "qcom,msm-imem-emergency_download_mode"
@@ -70,6 +80,8 @@ static void *dload_mode_addr;
 static bool dload_mode_enabled;
 static void *emergency_dload_mode_addr;
 static bool scm_dload_supported;
+static struct kobject dload_kobj;
+static void *dload_type_addr;
 
 static int dload_set(const char *val, struct kernel_param *kp);
 /* interface for exporting attributes */
@@ -258,6 +270,14 @@ static void halt_spmi_pmic_arbiter(void)
 	}
 }
 
+#ifdef QUECTEL_RESET_SYSTEM
+void quectel_set_system_reset_mode(int mode)
+{
+	download_mode = mode;
+	set_dload_mode(download_mode);
+}
+#endif
+
 static void msm_restart_prepare(const char *cmd)
 {
 	bool need_warm_reset = false;
@@ -268,11 +288,16 @@ static void msm_restart_prepare(const char *cmd)
 	 * Write download mode flags if restart_mode says so
 	 * Kill download mode if master-kill switch is set
 	 */
-
+#ifndef QUECTEL_RESET_SYSTEM
 	set_dload_mode(download_mode &&
 			(in_panic || restart_mode == RESTART_DLOAD));
+#else
+	set_dload_mode((restart_mode == RESTART_DLOAD) || (in_panic && download_mode));
 #endif
 
+#endif
+
+	
 	if (qpnp_pon_check_hard_reset_stored()) {
 		/* Set warm reset as true when device is in dload mode */
 		if (get_dload_mode() ||
@@ -281,7 +306,8 @@ static void msm_restart_prepare(const char *cmd)
 			need_warm_reset = true;
 	} else {
 		need_warm_reset = (get_dload_mode() ||
-				(cmd != NULL && cmd[0] != '\0'));
+				((cmd != NULL && cmd[0] != '\0') &&
+				strcmp(cmd, "userrequested")));
 	}
 
 	/* Hard reset the PMIC unless memory contents must be maintained. */
@@ -404,6 +430,7 @@ static void do_msm_poweroff(void)
 	return;
 }
 
+#ifdef CONFIG_MSM_DLOAD_MODE
 static ssize_t attr_show(struct kobject *kobj, struct attribute *attr,
 				char *buf)
 {
@@ -473,14 +500,74 @@ static size_t store_emmc_dload(struct kobject *kobj, struct attribute *attr,
 }
 RESET_ATTR(emmc_dload, 0644, show_emmc_dload, store_emmc_dload);
 
+//2016-04-04, add by jun.wu
+#ifdef CONFIG_QUECTEL_POWER_DRIVER
+static size_t store_power_off(struct kobject *kobj, struct attribute *attr,
+				const char *buf, size_t count)
+{
+	uint32_t power_off;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &power_off);
+	if (ret < 0)
+		return ret;
+
+	if (power_off != 1)
+		return -EINVAL;
+
+	do_msm_poweroff();
+
+	return count;
+}
+RESET_ATTR(power_off, 0644, NULL, store_power_off);
+#endif
+//end jun.wu
+
+#ifdef QUECTEL_POWER_DOWN
+static int system_power_downed = 0;
+
+int quec_system_power_downed(void) {
+
+	return system_power_downed;
+}
+
+static ssize_t system_power_downed_show(struct kobject *kobj, struct attribute *attr,
+				char *buf) {
+
+	return snprintf(buf, sizeof(system_power_downed), "%u\n", system_power_downed);
+}
+
+static ssize_t system_power_downed_store(struct device *dev,
+                struct device_attribute *attr, const char *buf, size_t count) {
+
+	sscanf(buf, "%d", &system_power_downed);
+
+    return count;
+}
+
+RESET_ATTR(power_downed, 0644, system_power_downed_show, system_power_downed_store);
+
+#endif
+
 static struct attribute *reset_attrs[] = {
 	&reset_attr_emmc_dload.attr,
+//2016-04-04, add by jun.wu
+#ifdef CONFIG_QUECTEL_POWER_DRIVER
+	&reset_attr_power_off.attr,
+#endif
+//end jun.wu
+
+#ifdef QUECTEL_POWER_DOWN
+	&reset_attr_power_downed.attr,
+#endif
+
 	NULL
 };
 
 static struct attribute_group reset_attr_group = {
 	.attrs = reset_attrs,
 };
+#endif
 
 static int msm_restart_probe(struct platform_device *pdev)
 {
@@ -516,12 +603,12 @@ static int msm_restart_probe(struct platform_device *pdev)
 				"qcom,msm-imem-dload-type");
 	if (!np) {
 		pr_err("unable to find DT imem dload-type node\n");
-		goto skip_sysfs_create;
+		//goto skip_sysfs_create;
 	} else {
 		dload_type_addr = of_iomap(np, 0);
 		if (!dload_type_addr) {
 			pr_err("unable to map imem dload-type offset\n");
-			goto skip_sysfs_create;
+		//	goto skip_sysfs_create;
 		}
 	}
 

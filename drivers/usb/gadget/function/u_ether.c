@@ -29,7 +29,9 @@
 #include <linux/cpufreq.h>
 #include "u_ether.h"
 
-
+#ifndef QUECTEL_ECM_FIX
+#define QUECTEL_ECM_FIX
+#endif
 /*
  * This component encapsulates the Ethernet link glue needed to provide
  * one (!) network link through the USB gadget stack, normally "usb0".
@@ -70,6 +72,11 @@ static unsigned int min_cpu_freq;
 module_param(min_cpu_freq, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(min_cpu_freq,
 	"to set minimum cpu frquency to when ethernet ifc is active");
+
+static unsigned int skb_timestamp_enable;
+module_param(skb_timestamp_enable, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(skb_timestamp_enable,
+	"to enable timestamping for TX and RX packets");
 
 /* this refers to max number sgs per transfer
  * which includes headers/data packets
@@ -549,16 +556,29 @@ static int alloc_requests(struct eth_dev *dev, struct gether *link, unsigned n)
 	int	status;
 
 	spin_lock(&dev->req_lock);
+	/*
+	 * u_ether driver always assumes that it has both in and out endpoints
+	 * and calls alloc_requests on both the endpoints, without checking if
+	 * the endpoint exits or not. In case of DPL, there is only one in_ep
+	 * and hence while trying to allocate meomory for out_ep, there will be
+	 * a NULL pointer exception. So to avoid this, allocate memory only if
+	 * the endpoints exists
+	 */
+	if (link->in_ep) {
 	status = prealloc(&dev->tx_reqs, link->in_ep, n * tx_qmult,
 				dev->sg_enabled,
 				dev->header_len);
 	if (status < 0)
 		goto fail;
+	}
+
+	if (link->out_ep) {
 	status = prealloc(&dev->rx_reqs, link->out_ep, n,
 				dev->sg_enabled,
 				dev->header_len);
 	if (status < 0)
 		goto fail;
+	}
 	goto done;
 fail:
 	DBG(dev, "can't alloc requests\n");
@@ -573,8 +593,16 @@ static void rx_fill(struct eth_dev *dev, gfp_t gfp_flags)
 	unsigned long		flags;
 	int			req_cnt = 0;
 
+	if (!dev)
+		return;
+
 	/* fill unused rxq slots with some skb */
 	spin_lock_irqsave(&dev->req_lock, flags);
+	if (!dev->port_usb) {
+		spin_unlock_irqrestore(&dev->req_lock, flags);
+		return;
+	}
+
 	while (!list_empty(&dev->rx_reqs)) {
 		/* break the nexus of continuous completion and re-submission*/
 		if (++req_cnt > qlen(dev->gadget, dev->qmult))
@@ -588,6 +616,10 @@ static void rx_fill(struct eth_dev *dev, gfp_t gfp_flags)
 		if (rx_submit(dev, req, gfp_flags) < 0) {
 			spin_lock_irqsave(&dev->req_lock, flags);
 			list_add(&req->list, &dev->rx_reqs);
+			if (!dev->port_usb) {
+				spin_unlock_irqrestore(&dev->req_lock, flags);
+				return;
+			}
 			spin_unlock_irqrestore(&dev->req_lock, flags);
 			defer_kevent(dev, WORK_RX_MEMORY);
 			return;
@@ -652,6 +684,8 @@ static void process_rx_w(struct work_struct *work)
 		dev->net->stats.rx_packets++;
 		dev->net->stats.rx_bytes += skb->len;
 
+		if (skb_timestamp_enable)
+			skb->tstamp = ktime_get();
 		status = netif_rx_ni(skb);
 	}
 	set_wake_up_idle(false);
@@ -1039,13 +1073,14 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	int			extra_alloc = 0;
 	int			retval;
 	struct usb_request	*req = NULL;
-	struct sk_buff		*new_skb;
+	struct sk_buff		*new_skb, *clone = NULL;
 	unsigned long		flags;
 	struct usb_ep		*in = NULL;
 	u16			cdc_filter = 0;
 	bool			multi_pkt_xfer = false;
 	u32			fixed_in_len;
 	bool			is_fixed;
+	struct skb_shared_hwtstamps hwtstamps;
 
 	spin_lock_irqsave(&dev->lock, flags);
 	if (dev->port_usb) {
@@ -1259,6 +1294,16 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 		req->no_interrupt = 0;
 	}
 
+	if (skb_timestamp_enable) {
+		skb->tstamp = ktime_get();
+		clone = skb_clone_sk(skb);
+		if (clone) {
+			memset(&hwtstamps, 0,
+					sizeof(struct skb_shared_hwtstamps));
+			skb_complete_tx_timestamp(clone, &hwtstamps);
+		}
+	}
+
 	retval = usb_ep_queue(in, req, GFP_ATOMIC);
 	switch (retval) {
 	default:
@@ -1364,23 +1409,31 @@ static int eth_stop(struct net_device *net)
 		 * their own pace; the network stack can handle old packets.
 		 * For the moment we leave this here, since it works.
 		 */
+		if (link->in_ep) {
 		in = link->in_ep->desc;
-		out = link->out_ep->desc;
 		usb_ep_disable(link->in_ep);
-		usb_ep_disable(link->out_ep);
-		if (netif_carrier_ok(net)) {
-			if (config_ep_by_speed(dev->gadget, &link->func,
-					       link->in_ep) ||
-			    config_ep_by_speed(dev->gadget, &link->func,
-					       link->out_ep)) {
+			if (netif_carrier_ok(net) &&
+				(config_ep_by_speed(dev->gadget, &link->func,
+					link->in_ep))) {
 				link->in_ep->desc = NULL;
+				return -EINVAL;
+			}
+			DBG(dev, "host still using in endpoint\n");
+			link->in_ep->desc = in;
+			usb_ep_enable(link->in_ep);
+		}
+
+		if (link->out_ep) {
+			out = link->out_ep->desc;
+			usb_ep_disable(link->out_ep);
+			if ((netif_carrier_ok(net)) &&
+				(config_ep_by_speed(dev->gadget, &link->func,
+					link->out_ep))) {
 				link->out_ep->desc = NULL;
 				return -EINVAL;
 			}
-			DBG(dev, "host still using in/out endpoints\n");
-			link->in_ep->desc = in;
+			DBG(dev, "host still using out endpoint\n");
 			link->out_ep->desc = out;
-			usb_ep_enable(link->in_ep);
 			usb_ep_enable(link->out_ep);
 		}
 	}
@@ -1957,6 +2010,8 @@ void gether_cleanup(struct eth_dev *dev)
 	uether_debugfs_exit(dev);
 	unregister_netdev(dev->net);
 	flush_work(&dev->work);
+	cancel_work_sync(&dev->rx_work);
+	cancel_work_sync(&dev->tx_work);
 	free_netdev(dev->net);
 }
 EXPORT_SYMBOL_GPL(gether_cleanup);
@@ -2029,6 +2084,13 @@ struct net_device *gether_connect(struct gether *link)
 		}
 	}
 
+	if (!link->in_ep && !link->out_ep) {
+		WARN_ON(1);
+		result = -ENOTSUPP;
+		goto fail0;
+	}
+
+	if (link->in_ep) {
 	link->in_ep->driver_data = dev;
 	result = usb_ep_enable(link->in_ep);
 	if (result != 0) {
@@ -2036,13 +2098,16 @@ struct net_device *gether_connect(struct gether *link)
 			link->in_ep->name, result);
 		goto fail0;
 	}
+	}
 
+	if (link->out_ep) {
 	link->out_ep->driver_data = dev;
 	result = usb_ep_enable(link->out_ep);
 	if (result != 0) {
 		DBG(dev, "enable %s --> %d\n",
 			link->out_ep->name, result);
 		goto fail1;
+	}
 	}
 
 	dev->header_len = link->header_len;
@@ -2086,8 +2151,10 @@ struct net_device *gether_connect(struct gether *link)
 
 	/* on error, disable any endpoints  */
 	} else {
+		if (link->out_ep)
 		(void) usb_ep_disable(link->out_ep);
 fail1:
+		if (link->in_ep)
 		(void) usb_ep_disable(link->in_ep);
 	}
 
@@ -2136,6 +2203,7 @@ void gether_disconnect(struct gether *link)
 	 * of all pending i/o.  then free the request objects
 	 * and forget about the endpoints.
 	 */
+	if (link->in_ep) {
 	usb_ep_disable(link->in_ep);
 	spin_lock(&dev->req_lock);
 	while (!list_empty(&dev->tx_reqs)) {
@@ -2168,7 +2236,9 @@ void gether_disconnect(struct gether *link)
 
 	link->in_ep->driver_data = NULL;
 	link->in_ep->desc = NULL;
+	}
 
+	if (link->out_ep) {
 	usb_ep_disable(link->out_ep);
 	spin_lock(&dev->req_lock);
 	while (!list_empty(&dev->rx_reqs)) {
@@ -2189,6 +2259,7 @@ void gether_disconnect(struct gether *link)
 
 	link->out_ep->driver_data = NULL;
 	link->out_ep->desc = NULL;
+	}
 
 	pr_debug("%s(): tx_throttle count= %lu", __func__,
 					dev->tx_throttle);

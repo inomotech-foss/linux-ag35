@@ -962,6 +962,8 @@ void xhci_free_virt_device(struct xhci_hcd *xhci, int slot_id)
 	if (dev->out_ctx)
 		xhci_free_container_ctx(xhci, dev->out_ctx);
 
+	if (dev->udev && dev->udev->slot_id)
+		dev->udev->slot_id = 0;
 	kfree(xhci->devs[slot_id]);
 	xhci->devs[slot_id] = NULL;
 }
@@ -1477,6 +1479,8 @@ int xhci_endpoint_init(struct xhci_hcd *xhci,
 		}
 		break;
 	case USB_SPEED_FULL:
+		if (usb_endpoint_xfer_bulk(&ep->desc) && max_packet < 8)
+			max_packet = 8;
 	case USB_SPEED_LOW:
 		break;
 	default:
@@ -2468,7 +2472,7 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 	xhci->erst.num_entries = ERST_NUM_SEGS;
 	xhci->erst.erst_dma_addr = dma;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
-			"Set ERST to 0; private num segs = %i, virt addr = %p, dma addr = 0x%llx",
+			"Set ERST to 0; private num segs = %i, virt addr = %pK, dma addr = 0x%llx",
 			xhci->erst.num_entries,
 			xhci->erst.entries,
 			(unsigned long long)xhci->erst.erst_dma_addr);

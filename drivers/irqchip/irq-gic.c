@@ -257,6 +257,7 @@ void gic_show_pending_irq(void)
 	}
 }
 
+char g_wakeup_src[32] = {0};
 static void gic_show_resume_irq(struct gic_chip_data *gic)
 {
 	unsigned int i;
@@ -278,8 +279,8 @@ static void gic_show_resume_irq(struct gic_chip_data *gic)
 	for (i = find_first_bit((unsigned long *)pending, gic->gic_irqs);
 	i < gic->gic_irqs;
 	i = find_next_bit((unsigned long *)pending, gic->gic_irqs, i+1)) {
-//		struct irq_desc *desc = irq_to_desc(i + gic->irq_offset);
-        unsigned int irq = irq_find_mapping(gic->domain,i + gic->irq_offset);
+		unsigned int irq = irq_find_mapping(gic->domain,
+						i + gic->irq_offset);
         struct irq_desc *desc = irq_to_desc(irq);
         const char *name = "null";
 
@@ -288,6 +289,7 @@ static void gic_show_resume_irq(struct gic_chip_data *gic)
 		else if (desc->action && desc->action->name)
 			name = desc->action->name;
 
+                strcpy(g_wakeup_src, name);
 		pr_warning("%s: %d triggered %s\n", __func__,
 					i + gic->irq_offset, name);
 		log_base_wakeup_reason(i + gic->irq_offset);
@@ -454,6 +456,14 @@ static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 			writel_relaxed_no_log(irqstat, cpu_base + GIC_CPU_EOI);
 			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
 #ifdef CONFIG_SMP
+			/*
+			 * Ensure any shared data written by the CPU sending
+			 * the IPI is read after we've read the ACK register
+			 * on the GIC.
+			 *
+			 * Pairs with the write barrier in gic_raise_softirq
+			 */
+			smp_rmb();
 			handle_IPI(irqnr, regs);
 #endif
 			continue;
