@@ -28,6 +28,8 @@
 #define BUF_MGR_NUM_BUF_Q 28
 #define MAX_IOMMU_CTX 2
 
+#define MSM_ISP_INVALID_BUF_INDEX 0xFFFFFFFF
+
 struct msm_isp_buf_mgr;
 
 enum msm_isp_buffer_src_t {
@@ -124,8 +126,9 @@ struct msm_isp_buf_ops {
 	int (*get_buf_src) (struct msm_isp_buf_mgr *buf_mgr,
 		uint32_t bufq_handle, uint32_t *buf_src);
 
-	int (*get_buf) (struct msm_isp_buf_mgr *buf_mgr, uint32_t id,
-		uint32_t bufq_handle, struct msm_isp_buffer **buf_info);
+	int (*get_buf)(struct msm_isp_buf_mgr *buf_mgr, uint32_t id,
+		uint32_t bufq_handle, uint32_t buf_index,
+		struct msm_isp_buffer **buf_info);
 
 	int (*get_buf_by_index) (struct msm_isp_buf_mgr *buf_mgr,
 		uint32_t bufq_handle, uint32_t buf_index,

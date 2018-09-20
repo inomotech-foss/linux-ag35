@@ -107,20 +107,21 @@
  * Report Pressure in multitouch
  * 1:enable(default),0:disable
 */
-#define FTS_REPORT_PRESSURE_EN                  0
+#define FTS_REPORT_PRESSURE_EN                  1
+
+/*
+ * Force touch support
+ * different pressure for multitouch
+ * 1: true pressure for force touch
+ * 0: constant pressure(default)
+ */
+#define FTS_FORCE_TOUCH_EN                      0
 
 /*
  * Gesture function enable
  * default: disable
  */
-#define FTS_GESTURE_EN                          0
-
-/*
- * PLAM mode function enable
- * default: disable
- */
-
-#define FTS_PLAM_EN                            1
+#define FTS_GESTURE_EN                          1
 
 /*
  * ESD check & protection
@@ -167,7 +168,7 @@
  * enable it when customer need control TP power
  * default: disable
  */
-#define FTS_POWER_SOURCE_CUST_EN                0
+#define FTS_POWER_SOURCE_CUST_EN                1
 
 /****************************************************/
 
@@ -193,7 +194,7 @@
  * 0:No check vendor_id (default)
  * 1/2/3: Check vendor_id for vendor compatibility
  */
-#define FTS_GET_VENDOR_ID_NUM                   3
+#define FTS_GET_VENDOR_ID_NUM                   0
 
 /*
  * vendor_id(s) for vendor(s) to be compatible with.
@@ -203,28 +204,35 @@
  * FTS_GET_VENDOR_ID_NUM >= 2, compatible with FTS_VENDOR_2_ID
  * FTS_GET_VENDOR_ID_NUM == 3, compatible with FTS_VENDOR_3_ID
  */
-#define FTS_VENDOR_1_ID                         0x6d
-#define FTS_VENDOR_2_ID                         0x5a
-#define FTS_VENDOR_3_ID                         0x9b
+#define FTS_VENDOR_1_ID                         0x00
+#define FTS_VENDOR_2_ID                         0x00
+#define FTS_VENDOR_3_ID                         0x00
 
 /*
  * FW_APP.i file for auto upgrade, you must replace it with your own
  * define your own fw_app, the sample one to be replaced is invalid
- * NOTE: if FTS_GET_VENDOR_ID_NUM >= 1, it's the fw corresponding with FTS_VENDOR_1_ID
+ * NOTE: if FTS_GET_VENDOR_ID_NUM >= 1,
+ *       it's the fw corresponding with FTS_VENDOR_1_ID
  */
-#define FTS_UPGRADE_FW_APP                      "include/firmware/FT3267_LS_FW_app.i"
+#define FTS_UPGRADE_FW_APP		"include/firmware/FT8716_app_sample.i"
 
 /*
  * if FTS_GET_VENDOR_ID_NUM >= 2, fw corrsponding with FTS_VENDOR_2_ID
  * define your own fw_app, the sample one is invalid
  */
-#define FTS_UPGRADE_FW2_APP                     "include/firmware/FT3267_XL_FW_app.i"
+#define FTS_UPGRADE_FW2_APP		"include/firmware/FT8716_app_sample.i"
 
 /*
  * if FTS_GET_VENDOR_ID_NUM == 3, fw corrsponding with FTS_VENDOR_3_ID
  * define your own fw_app, the sample one is invalid
  */
-#define FTS_UPGRADE_FW3_APP                     "include/firmware/FT3267_JL_FW_app.i"
+#define FTS_UPGRADE_FW3_APP		"include/firmware/FT8716_app_sample.i"
+
+/*
+ * lcd_cfg.i file for lcd cfg upgrade
+ * define your own lcd_cfg.i, the sample one is invalid
+ */
+#define FTS_UPGRADE_LCD_CFG		"include/firmware/lcd_cfg.i"
 
 /*
  * upgrade stress test for debug
@@ -238,4 +246,3 @@
 /*********************************************************/
 
 #endif /* _LINUX_FOCLATECH_CONFIG_H_ */
-

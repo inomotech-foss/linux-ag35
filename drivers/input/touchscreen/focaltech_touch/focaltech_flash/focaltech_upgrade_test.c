@@ -45,13 +45,12 @@
 /*****************************************************************************
 * Global variable or extern global variabls/functions
 *****************************************************************************/
-struct wake_lock ps_lock;
 
-#define FTS_DEBUG_UPGRADE(fmt, args...) do{\
-                                                printk(KERN_ERR "[FTS][UPGRADE]:##############################################################################\n");\
-                                                printk(KERN_ERR "[FTS][UPGRADE]: "fmt"\n", ##args);\
-                                                printk(KERN_ERR "[FTS][UPGRADE]:##############################################################################\n");\
-                                           }while(0)\
+#define FTS_DEBUG_UPGRADE(fmt, args...) do {\
+			pr_err("[FTS][UPGRADE]:################\n");\
+			pr_err("[FTS][UPGRADE]: "fmt"\n", ##args);\
+			pr_err("[FTS][UPGRADE]:################\n");\
+		   } while (0)\
  
 /*****************************************************************************
 * Static function prototypes
@@ -80,15 +79,20 @@ static int fts_ctpm_auto_upgrade_pingpong(struct i2c_client *client)
 		/* fw upgrade */
 		i_ret = fts_ctpm_fw_upgrade(client);
 
-		if (i_ret == 0) { /* upgrade success */
+		if (i_ret == 0) {
+			/* upgrade success */
 			fts_i2c_read_reg(client, FTS_REG_FW_VER, &uc_tp_fm_ver);
-			FTS_DEBUG("[UPGRADE]: upgrade to new version 0x%x", uc_tp_fm_ver);
-		} else { /* upgrade fail */
-			/* if upgrade fail, reset to run ROM. if app in flash is ok. TP will work success */
+			FTS_DEBUG("[UPGRADE]: upgrade to new version 0x%x",
+					uc_tp_fm_ver);
+		} else {
+			/* upgrade fail */
+			/* if upgrade fail, reset to run ROM.
+			 * if app in flash is ok. TP will work success */
 			FTS_INFO("[UPGRADE]: upgrade fail, reset now!!");
 			fts_ctpm_rom_or_pram_reset(client);
 		}
-	} while ((i_ret != 0) && (uc_upgrade_times < 2)); /* if upgrade fail, upgrade again. then return */
+		/* if upgrade fail, upgrade again. then return */
+	} while ((i_ret != 0) && (uc_upgrade_times < 2));
 
 	FTS_FUNC_EXIT();
 	return i_ret;
@@ -112,9 +116,11 @@ void fts_ctpm_display_upgrade_time(bool start_time)
 		do_gettimeofday(&tpstart);
 	} else {
 		do_gettimeofday(&tpend);
-		timeuse = 1000000 * (tpend.tv_sec - tpstart.tv_sec) + tpend.tv_usec - tpstart.tv_usec;
+		timeuse = 1000000 * (tpend.tv_sec-tpstart.tv_sec)
+				+ tpend.tv_usec-tpstart.tv_usec;
 		timeuse /= 1000000;
-		FTS_DEBUG("[UPGRADE]: upgrade success : Use time: %d Seconds!!", timeuse);
+		FTS_DEBUG("[UPGRADE]: upgrade success : Use time: %d Seconds!!",
+							timeuse);
 	}
 #endif
 }
@@ -129,12 +135,12 @@ void fts_ctpm_display_upgrade_time(bool start_time)
 int fts_ctpm_auto_upgrade(struct i2c_client *client)
 {
 	int i_ret = 0;
-	static int uc_ErrorTimes = 0;
-	static int uc_UpgradeTimes = 0;
+	static int uc_ErrorTimes;
+	static int uc_UpgradeTimes;
 
-	wake_lock_init(&ps_lock, WAKE_LOCK_SUSPEND, "tp_wakelock");
 
-	wake_lock(&ps_lock);
+	device_init_wakeup(&client->dev, 1);
+	pm_stay_awake(&client->dev);
 
 	/* (FTS_GET_VENDOR_ID_NUM == 0) */
 	g_fw_file = CTPM_FW;
@@ -144,21 +150,23 @@ int fts_ctpm_auto_upgrade(struct i2c_client *client)
 	do {
 		uc_UpgradeTimes++;
 
-		FTS_DEBUG_UPGRADE("start to upgrade %d times !!", uc_UpgradeTimes);
+		FTS_DEBUG_UPGRADE("start to upgrade %d times !!",
+				uc_UpgradeTimes);
 
 		fts_ctpm_display_upgrade_time(true);
 
 		i_ret = fts_ctpm_auto_upgrade_pingpong(client);
-		if (i_ret == 0) {
+		if (i_ret == 0)
 			fts_ctpm_display_upgrade_time(false);
-		} else {
+		else
 			uc_ErrorTimes++;
-		}
 
-		FTS_DEBUG_UPGRADE("upgrade %d times, error %d times!!", uc_UpgradeTimes, uc_ErrorTimes);
+		FTS_DEBUG_UPGRADE("upgrade %d times, error %d times!!",
+				uc_UpgradeTimes, uc_ErrorTimes);
 	} while (uc_UpgradeTimes < (FTS_UPGRADE_TEST_NUMBER));
 
-	wake_unlock(&ps_lock);
+	pm_relax(&client->dev);
+	device_init_wakeup(&client->dev, 0);
 
 	return 0;
 }

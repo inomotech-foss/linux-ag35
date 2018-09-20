@@ -282,6 +282,9 @@ static int binder_update_page_range(struct binder_alloc *alloc, int allocate,
 			goto err_vm_insert_page_failed;
 		}
 
+		if (index + 1 > alloc->pages_high)
+			alloc->pages_high = index + 1;
+
 		trace_binder_alloc_page_end(alloc, index);
 		/* vm_insert_page does not seem to increment the refcount */
 	}
@@ -855,6 +858,7 @@ void binder_alloc_print_pages(struct seq_file *m,
 	}
 	mutex_unlock(&alloc->mutex);
 	seq_printf(m, "  pages: %d:%d:%d\n", active, lru, free);
+	seq_printf(m, "  pages high watermark: %zu\n", alloc->pages_high);
 }
 
 /**
@@ -960,7 +964,7 @@ enum lru_status binder_alloc_free_page(struct list_head *item,
 	return LRU_REMOVED_RETRY;
 
 err_down_write_mmap_sem_failed:
-	mmput(mm);
+	mmput_async(mm);
 err_mmget:
 err_page_already_freed:
 	mutex_unlock(&alloc->mutex);
@@ -985,7 +989,7 @@ binder_shrink_scan(struct shrinker *shrink, struct shrink_control *sc)
 	return ret;
 }
 
-struct shrinker binder_shrinker = {
+static struct shrinker binder_shrinker = {
 	.count_objects = binder_shrink_count,
 	.scan_objects = binder_shrink_scan,
 	.seeks = DEFAULT_SEEKS,

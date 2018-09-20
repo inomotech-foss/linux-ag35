@@ -89,7 +89,17 @@
 #include <linux/crc32.h>
 #include <linux/err.h>
 #include <linux/slab.h>
+#include <linux/qstart.h>
 #include "ubi.h"
+
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+/******************************************************************************************
+francis-2018/12/29:Description....
+Refer to [Issue-Depot].[IS0000416][Submitter:dawn.yang@quectel.com,Date:2018-12-28]
+<recovery模式下usrdata 的ubi设备号被改为3，导致概率性被擦除，差分包丢失>
+******************************************************************************************/
+extern unsigned int Quectel_Restore(const char * partition_name, int where);
+#endif
 
 static int self_check_not_bad(const struct ubi_device *ubi, int pnum);
 static int self_check_peb_ec_hdr(const struct ubi_device *ubi, int pnum);
@@ -179,6 +189,12 @@ retry:
 			 */
 			ubi_msg(ubi, "fixable bit-flip detected at PEB %d",
 				pnum);
+			if(len != read)
+			{
+				printk("@Ramos UBI Error 999999 set restore UBI =%d,	\r\n", ubi->ubi_num);
+				Quectel_Restore(ubi->mtd->name,9);
+			}
+
 			ubi_assert(len == read);
 			return UBI_IO_BITFLIPS;
 		}
@@ -192,6 +208,26 @@ retry:
 
 		ubi_err(ubi, "error %d%s while reading %d bytes from PEB %d:%d, read %zd bytes",
 			err, errstr, len, pnum, offset, read);
+#if 0 //remove by [francis],20180927,do not need to this check point 
+		printk("@Ramos UBI Error 8888 set restore UBI =%d,	\r\n", ubi->ubi_num);
+		if(1 == ubi->ubi_num)
+		{
+			Quectel_Set_Partition_RestoreFlag("modem",8);
+		}
+
+		if( 0 == ubi->ubi_num)
+		{
+		//按照加载顺序，Linux的system加载时是 ubi 0， 所以这里限制一下，避免modem ubi 加载出现这个错误也会进入这里。
+			if (!get_bootmode(NULL))
+			{
+				printk("@Ramos set restore systemfs flag here 8888\r\n");
+				Quectel_Set_Partition_RestoreFlag("system",8);
+			}else{
+				Quectel_Set_Partition_RestoreFlag("recovery",8);
+			}
+
+		}
+#endif
 		dump_stack();
 
 		/*
@@ -200,10 +236,19 @@ retry:
 		 * this, so we change it to -EIO.
 		 */
 		if (read != len && mtd_is_eccerr(err)) {
+				printk("@Ramos UBI Error 55555  set restore UBI =%d,  \r\n", ubi->ubi_num);
+				Quectel_Restore(ubi->mtd->name,5);
 			ubi_assert(0);
 			err = -EIO;
 		}
 	} else {
+		if(len != read)
+		{
+			printk("@Ramos UBI Error 555551122 set restore UBI =%d,  \r\n", ubi->ubi_num);
+			Quectel_Restore(ubi->mtd->name,5);
+
+			
+		}
 		ubi_assert(len == read);
 
 		if (ubi_dbg_is_bitflip(ubi)) {
@@ -1105,9 +1150,11 @@ int ubi_io_write_vid_hdr(struct ubi_device *ubi, int pnum,
 	 * Re-erase the PEB before using it. This should minimize any issues
 	 * from decay of charge in this block.
 	 */
-	err = ubi_wl_erase_peb(ubi, pnum);
-	if (err)
-		return err;
+	if (ubi->wl_is_inited) {
+		err = ubi_wl_re_erase_peb(ubi, pnum);
+		if (err)
+			return err;
+	}
 
 	err = self_check_peb_ec_hdr(ubi, pnum);
 	if (err)
@@ -1128,8 +1175,10 @@ int ubi_io_write_vid_hdr(struct ubi_device *ubi, int pnum,
 	p = (char *)vid_hdr - ubi->vid_hdr_shift;
 	err = ubi_io_write(ubi, p, pnum, ubi->vid_hdr_aloffset,
 			   ubi->vid_hdr_alsize);
-	if (!err)
+
+	if (!err && ubi->wl_is_inited)
 		ubi_wl_update_peb_sqnum(ubi, pnum, vid_hdr);
+
 	return err;
 }
 

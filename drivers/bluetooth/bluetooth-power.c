@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2010, 2013-2014 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2009-2010, 2013-2017 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -38,20 +38,144 @@
 #define HS_UART_0 0
 
 static struct of_device_id bt_power_match_table[] = {
-	{.compatible = "bcm,bcm4358"},
+	{	.compatible = "qca,ar3002" },
+	{	.compatible = "qca,qca6174" },
+	{	.compatible = "qca,qca9379" },
+	{	.compatible = "qca,wcn3990" },
 	{}
 };
 
 static struct bluetooth_power_platform_data *bt_power_pdata;
 static struct platform_device *btpdev;
 static bool previous;
-static bool is_req;
+
+static int bt_vreg_init(struct bt_power_vreg_data *vreg)
+{
+	int rc = 0;
+	struct device *dev = &btpdev->dev;
+
+	BT_PWR_DBG("vreg_get for : %s", vreg->name);
+
+	/* Get the regulator handle */
+	vreg->reg = regulator_get(dev, vreg->name);
+	if (IS_ERR(vreg->reg)) {
+		rc = PTR_ERR(vreg->reg);
+		pr_err("%s: regulator_get(%s) failed. rc=%d\n",
+			__func__, vreg->name, rc);
+		goto out;
+	}
+
+	if ((regulator_count_voltages(vreg->reg) > 0)
+			&& (vreg->low_vol_level) && (vreg->high_vol_level))
+		vreg->set_voltage_sup = 1;
+
+out:
+	return rc;
+}
+
+static int bt_vreg_enable(struct bt_power_vreg_data *vreg)
+{
+	int rc = 0;
+
+	BT_PWR_DBG("vreg_en for : %s", vreg->name);
+
+	if (!vreg->is_enabled) {
+		if (vreg->set_voltage_sup) {
+			rc = regulator_set_voltage(vreg->reg,
+						vreg->low_vol_level,
+						vreg->high_vol_level);
+			if (rc < 0) {
+				BT_PWR_ERR("vreg_set_vol(%s) failed rc=%d\n",
+						vreg->name, rc);
+				goto out;
+			}
+		}
+
+		if (vreg->load_uA >= 0) {
+			rc = regulator_set_optimum_mode(vreg->reg,
+					vreg->load_uA);
+			if (rc < 0) {
+				BT_PWR_ERR("vreg_set_mode(%s) failed rc=%d\n",
+						vreg->name, rc);
+				goto out;
+			}
+		}
+
+		rc = regulator_enable(vreg->reg);
+		if (rc < 0) {
+			BT_PWR_ERR("regulator_enable(%s) failed. rc=%d\n",
+					vreg->name, rc);
+			goto out;
+		}
+		vreg->is_enabled = true;
+	}
+out:
+	return rc;
+}
+
+static int bt_vreg_disable(struct bt_power_vreg_data *vreg)
+{
+	int rc = 0;
+
+	if (!vreg)
+		return rc;
+
+	BT_PWR_DBG("vreg_disable for : %s", vreg->name);
+
+	if (vreg->is_enabled) {
+		rc = regulator_disable(vreg->reg);
+		if (rc < 0) {
+			BT_PWR_ERR("regulator_disable(%s) failed. rc=%d\n",
+					vreg->name, rc);
+			goto out;
+		}
+		vreg->is_enabled = false;
+
+		if (vreg->set_voltage_sup) {
+			/* Set the min voltage to 0 */
+			rc = regulator_set_voltage(vreg->reg, 0,
+					vreg->high_vol_level);
+			if (rc < 0) {
+				BT_PWR_ERR("vreg_set_vol(%s) failed rc=%d\n",
+						vreg->name, rc);
+				goto out;
+			}
+		}
+		if (vreg->load_uA >= 0) {
+			rc = regulator_set_optimum_mode(vreg->reg, 0);
+			if (rc < 0) {
+				BT_PWR_ERR("vreg_set_mode(%s) failed rc=%d\n",
+						vreg->name, rc);
+			}
+		}
+	}
+out:
+	return rc;
+}
+
+static int bt_configure_vreg(struct bt_power_vreg_data *vreg)
+{
+	int rc = 0;
+
+	BT_PWR_DBG("config %s", vreg->name);
+
+	/* Get the regulator handle for vreg */
+	if (!(vreg->reg)) {
+		rc = bt_vreg_init(vreg);
+		if (rc < 0)
+			return rc;
+	}
+	rc = bt_vreg_enable(vreg);
+
+	return rc;
+}
+
 static int bt_configure_gpios(int on)
 {
 	int rc = 0;
 	int bt_reset_gpio = bt_power_pdata->bt_gpio_sys_rst;
 
-	BT_PWR_DBG("%s  bt_gpio= %d on: %d", __func__, bt_reset_gpio, on);
+	BT_PWR_DBG("bt_gpio= %d on: %d", bt_reset_gpio, on);
 
 	if (on) {
 		if (is_req == false) {
@@ -87,6 +211,48 @@ static int bluetooth_power(int on)
 	BT_PWR_DBG("on: %d", on);
 
 	if (on) {
+		if (bt_power_pdata->bt_vdd_io) {
+			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_io);
+			if (rc < 0) {
+				BT_PWR_ERR("bt_power vddio config failed");
+				goto out;
+			}
+		}
+		if (bt_power_pdata->bt_vdd_xtal) {
+			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_xtal);
+			if (rc < 0) {
+				BT_PWR_ERR("bt_power vddxtal config failed");
+				goto vdd_xtal_fail;
+			}
+		}
+		if (bt_power_pdata->bt_vdd_core) {
+			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_core);
+			if (rc < 0) {
+				BT_PWR_ERR("bt_power vddcore config failed");
+				goto vdd_core_fail;
+			}
+		}
+		if (bt_power_pdata->bt_vdd_pa) {
+			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_pa);
+			if (rc < 0) {
+				BT_PWR_ERR("bt_power vddpa config failed");
+				goto vdd_pa_fail;
+			}
+		}
+		if (bt_power_pdata->bt_vdd_ldo) {
+			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_ldo);
+			if (rc < 0) {
+				BT_PWR_ERR("bt_power vddldo config failed");
+				goto vdd_ldo_fail;
+			}
+		}
+		if (bt_power_pdata->bt_chip_pwd) {
+			rc = bt_configure_vreg(bt_power_pdata->bt_chip_pwd);
+			if (rc < 0) {
+				BT_PWR_ERR("bt_power chippwd config failed");
+				goto chip_pwd_fail;
+			}
+		}
 		if (bt_power_pdata->bt_gpio_sys_rst) {
 			rc = bt_configure_gpios(on);
 			if (rc < 0) {
@@ -122,7 +288,7 @@ static const struct rfkill_ops bluetooth_power_rfkill_ops = {
 	.set_block = bluetooth_toggle_radio,
 };
 
-#ifdef CONFIG_CNSS
+#if defined(CONFIG_CNSS) && defined(CONFIG_CLD_LL_CORE)
 static ssize_t enable_extldo(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
@@ -195,6 +361,63 @@ static void bluetooth_power_rfkill_remove(struct platform_device *pdev)
 		rfkill_unregister(rfkill);
 	rfkill_destroy(rfkill);
 	platform_set_drvdata(pdev, NULL);
+}
+
+#define MAX_PROP_SIZE 32
+static int bt_dt_parse_vreg_info(struct device *dev,
+		struct bt_power_vreg_data **vreg_data, const char *vreg_name)
+{
+	int len, ret = 0;
+	const __be32 *prop;
+	char prop_name[MAX_PROP_SIZE];
+	struct bt_power_vreg_data *vreg;
+	struct device_node *np = dev->of_node;
+
+	BT_PWR_DBG("vreg dev tree parse for %s", vreg_name);
+
+	snprintf(prop_name, MAX_PROP_SIZE, "%s-supply", vreg_name);
+	if (of_parse_phandle(np, prop_name, 0)) {
+		vreg = devm_kzalloc(dev, sizeof(*vreg), GFP_KERNEL);
+		if (!vreg) {
+			dev_err(dev, "No memory for vreg: %s\n", vreg_name);
+			ret = -ENOMEM;
+			goto err;
+		}
+
+		vreg->name = vreg_name;
+
+		/* Parse voltage-level from each node */
+		snprintf(prop_name, MAX_PROP_SIZE,
+				"%s-voltage-level", vreg_name);
+		prop = of_get_property(np, prop_name, &len);
+		if (!prop || (len != (2 * sizeof(__be32)))) {
+			dev_warn(dev, "%s %s property\n",
+				prop ? "invalid format" : "no", prop_name);
+		} else {
+			vreg->low_vol_level = be32_to_cpup(&prop[0]);
+			vreg->high_vol_level = be32_to_cpup(&prop[1]);
+		}
+
+		/* Parse current-level from each node */
+		snprintf(prop_name, MAX_PROP_SIZE,
+				"%s-current-level", vreg_name);
+		ret = of_property_read_u32(np, prop_name, &vreg->load_uA);
+		if (ret < 0) {
+			BT_PWR_DBG("%s property is not valid\n", prop_name);
+			vreg->load_uA = -1;
+			ret = 0;
+		}
+
+		*vreg_data = vreg;
+		BT_PWR_DBG("%s: vol=[%d %d]uV, current=[%d]uA\n",
+			vreg->name, vreg->low_vol_level,
+			vreg->high_vol_level,
+			vreg->load_uA);
+	} else
+		BT_PWR_INFO("%s: is not provided in device tree", vreg_name);
+
+err:
+	return ret;
 }
 
 static int bt_power_populate_dt_pinfo(struct platform_device *pdev)

@@ -43,20 +43,22 @@
 /*****************************************************************************
 * Private constant and macro definitions using #define
 *****************************************************************************/
-#define ESDCHECK_WAIT_TIME              1000    /*ms*/
+#define ESDCHECK_WAIT_TIME              1000    /* ms */
 #define LCD_ESD_PATCH                   0
 
 /*****************************************************************************
 * Private enumerations, structures and unions using typedef
 *****************************************************************************/
 struct fts_esdcheck_st {
-u8      active              :
-	1;    /* 1- esd check active, need check esd 0- no esd check */
+	u8  active              : 1;    /* 1- esd check active, need check esd
+					   0- no esd check */
 	u8      suspend             : 1;
 	u8      proc_debug          : 1;    /* apk or adb is accessing I2C */
 	u8      intr                : 1;    /* 1- Interrupt trigger */
 	u8      unused              : 4;
-	u8      flow_work_hold_cnt;         /* Flow Work Cnt(reg0x91) keep a same value for x times. >=5 times is ESD, need reset */
+	u8  flow_work_hold_cnt;		/* Flow Work Cnt(reg0x91)
+					   keep a same value for x times.
+					   >=5 times is ESD, need reset */
 	u8      flow_work_cnt_last;         /* Save Flow Work Cnt(reg0x91) value */
 	u32     hardware_reset_cnt;
 	u32     i2c_nack_cnt;
@@ -105,14 +107,15 @@ int idc_esdcheck_lcderror(void)
 
 	ret = fts_i2c_read_reg(fts_i2c_client, FTS_REG_ESD_SATURATE, &val);
 	if (ret < 0) {
-		FTS_ERROR("[ESD]: Read ESD_SATURATE(0xED) failed ret=%d!", ret);
+		FTS_ERROR("[ESD]: Read ESD_SATURATE(0xED) failed ret=%d", ret);
 		return -EIO;
 	}
 
 	if (val == 0xAA) {
 		/*
 		* 1. Set flag lcd_need_reset = 1;
-		* 2. LCD driver need reset(recovery) LCD and set lcd_need_reset to 0
+		* 2. LCD driver need reset(recovery) LCD and
+		*	set lcd_need_reset to 0
 		* 3. recover TP state
 		*/
 		FTS_INFO("LCD ESD, Execute LCD reset!");
@@ -162,22 +165,26 @@ static bool get_chip_id(void)
 
 	for (i = 0; i < 3; i++) {
 		reg_addr = FTS_REG_CHIP_ID;
-		err = fts_i2c_read(fts_i2c_client, &reg_addr, 1, &reg_value, 1);
+		err = fts_i2c_read(fts_i2c_client, &reg_addr, 1,
+				&reg_value, 1);
 
 		if (err < 0) {
-			FTS_ERROR("[ESD]: Read Reg 0xA3 failed ret = %d!!", err);
+			FTS_ERROR("[ESD]: Read Reg 0xA3 failed ret = %d!!",
+					err);
 			fts_esdcheck_data.i2c_nack_cnt++;
 		} else {
-			if ((reg_value == chip_types.chip_idh) ||
-			    (reg_value == 0xEF)) /* Upgrade sometimes can't detect */
+			/* Upgrade sometimes can't detect */
+			if ((reg_value == chip_types.chip_idh)
+				|| (reg_value == 0xEF))
 				break;
+
 			fts_esdcheck_data.i2c_dataerror_cnt++;
 		}
 	}
 
 	/* if can't get correct data in 3 times, then need hardware reset */
 	if (i >= 3) {
-		FTS_ERROR("[ESD]: Read Chip id 3 times failed, need execute TP reset!!");
+		FTS_ERROR("[ESD]: Read Chip id failed, need TP reset!!");
 		return 1;
 	}
 
@@ -212,9 +219,10 @@ static bool get_flow_cnt(void)
 		fts_esdcheck_data.flow_work_cnt_last = reg_value;
 	}
 
-	/* if read flow work cnt 5 times and the value are all the same, then need hardware_reset */
+	/* if read flow work cnt 5 times and the value are all the same,
+	 * then need hardware_reset */
 	if (fts_esdcheck_data.flow_work_hold_cnt >= 5) {
-		FTS_DEBUG("[ESD]: Flow Work Cnt(reg0x91) keep a value for 5 times, need execute TP reset!!");
+		FTS_DEBUG("[ESD]: Flow Work Cnt, need execute TP reset!!");
 		return 1;
 	}
 
@@ -237,23 +245,26 @@ static int esdcheck_algorithm(void)
 
 	/* 1. esdcheck is interrupt, then return */
 	if (fts_esdcheck_data.intr == 1) {
-		FTS_INFO("[ESD]: In interrupt state, not check esd, return immediately!!");
+		FTS_INFO("[ESD]: In interrupt state, not check esd, return!!");
 		return 0;
 	}
 
 	/* 2. check power state, if suspend, no need check esd */
 	if (fts_esdcheck_data.suspend == 1) {
-		FTS_INFO("[ESD]: In suspend, not check esd, return immediately!!");
-		/* because in suspend state, adb can be used, when upgrade FW, will active ESD check(active = 1)
-		*  But in suspend, then will don't queue_delayed_work, when resume, don't check ESD again
+		FTS_INFO("[ESD]: In suspend, not check esd, return!!");
+		/* because in suspend state, adb can be used, when upgrade FW,
+		 * will active ESD check(active = 1).
+		 * But in suspend, then will don't queue_delayed_work,
+		 * when resume, don't check ESD again
 		*/
 		fts_esdcheck_data.active = 0;
 		return 0;
 	}
 
-	/* 3. check fts_esdcheck_data.proc_debug state, if 1-proc busy, no need check esd*/
+	/* 3. check fts_esdcheck_data.proc_debug state,
+	 *	if 1-proc busy, no need check esd*/
 	if (fts_esdcheck_data.proc_debug == 1) {
-		FTS_INFO("[ESD]: In apk or adb command mode, not check esd, return immediately!!");
+		FTS_INFO("[ESD]: In cmd mode, not check esd, return!!");
 		return 0;
 	}
 
@@ -263,7 +274,7 @@ static int esdcheck_algorithm(void)
 	if (err < 0) {
 		fts_esdcheck_data.i2c_nack_cnt++;
 	} else if ((reg_value & 0x70) ==  FTS_REG_WORKMODE_FACTORY_VALUE) {
-		FTS_INFO("[ESD]: In factory mode, not check esd, return immediately!!");
+		FTS_INFO("[ESD]: In factory mode, not check esd, return!!");
 		return 0;
 	}
 
@@ -275,7 +286,8 @@ static int esdcheck_algorithm(void)
 	/* 6. Get Chip ID */
 	hardware_reset = get_chip_id();
 
-	/* 7. get Flow work cnt: 0x91 If no change for 5 times, then ESD and reset */
+	/* 7. get Flow work cnt: 0x91 If no change for 5 times,
+	 *	then ESD and reset */
 	if (!hardware_reset)
 		hardware_reset = get_flow_cnt();
 
@@ -284,7 +296,8 @@ static int esdcheck_algorithm(void)
 		fts_esdcheck_tp_reset();
 
 	FTS_INFO("[ESD]: NoACK=%d, Error Data=%d, Hardware Reset=%d\n",
-		 fts_esdcheck_data.i2c_nack_cnt, fts_esdcheck_data.i2c_dataerror_cnt,
+			fts_esdcheck_data.i2c_nack_cnt,
+			fts_esdcheck_data.i2c_dataerror_cnt,
 		 fts_esdcheck_data.hardware_reset_cnt);
 	return 0;
 }
@@ -302,9 +315,11 @@ static void esdcheck_func(struct work_struct *work)
 
 	esdcheck_algorithm();
 
-	if (fts_esdcheck_data.suspend == 0)
-		queue_delayed_work(fts_esdcheck_workqueue, &fts_esdcheck_work,
-				   msecs_to_jiffies(ESDCHECK_WAIT_TIME));
+	if (fts_esdcheck_data.suspend == 0) {
+		queue_delayed_work(fts_esdcheck_workqueue,
+				&fts_esdcheck_work,
+				msecs_to_jiffies(ESDCHECK_WAIT_TIME));
+	}
 
 	FTS_FUNC_EXIT();
 }
@@ -338,8 +353,8 @@ int fts_esdcheck_get_status(void)
 
 /*****************************************************************************
 *  Name: fts_esdcheck_proc_busy
-*  Brief: When APK or ADB command access TP via driver, then need set proc_debug,
-*         then will not check ESD.
+*  Brief: When APK or ADB command access TP via driver, then need
+*		set proc_debug, then will not check ESD.
 *  Input:
 *  Output:
 *  Return:
@@ -365,7 +380,8 @@ int fts_esdcheck_switch(bool enable)
 		if (fts_esdcheck_data.active == 0) {
 			FTS_INFO("[ESD]: ESD check start!!");
 			fts_esdcheck_data.active = 1;
-			queue_delayed_work(fts_esdcheck_workqueue, &fts_esdcheck_work,
+			queue_delayed_work(fts_esdcheck_workqueue,
+					&fts_esdcheck_work,
 					   msecs_to_jiffies(ESDCHECK_WAIT_TIME));
 		}
 	} else {
@@ -438,7 +454,8 @@ int fts_esdcheck_init(void)
 
 /*****************************************************************************
 *  Name: fts_esdcheck_exit
-*  Brief: When FTS TP driver is removed, then call this function to destory work queue
+*  Brief: When FTS TP driver is removed, then call this function
+*		to destroy work queue
 *  Input:
 *  Output:
 *  Return:

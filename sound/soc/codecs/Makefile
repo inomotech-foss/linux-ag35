@@ -113,9 +113,11 @@ snd-soc-twl4030-objs := twl4030.o
 snd-soc-twl6040-objs := twl6040.o
 snd-soc-uda134x-objs := uda134x.o
 snd-soc-uda1380-objs := uda1380.o
+snd-soc-wcd9306-objs := wcd9306.o wcd9306-tables.o
 snd-soc-wcd9320-objs := wcd9320.o wcd9320-tables.o
 snd-soc-wcd9330-objs := wcd9330.o wcd9330-tables.o
 snd-soc-wcd9335-objs := wcd9335.o
+bg-codec-objs := bg_codec.o pktzr.o
 snd-soc-wcd9xxx-objs := wcd9xxx-resmgr.o wcd9xxx-mbhc.o wcd9xxx-common.o
 snd-soc-wcd9xxx-v2-objs := wcd9xxx-common-v2.o wcd9xxx-resmgr-v2.o
 audio-ext-clock-objs := audio-ext-clk.o
@@ -124,6 +126,7 @@ snd-soc-wsa881x-objs := wsa881x.o wsa881x-tables.o wsa881x-regmap.o
 snd-soc-wsa881x-sensor-objs := wsa881x-temp-sensor.o
 snd-soc-wcd-mbhc-objs := wcd-mbhc-v2.o
 snd-soc-msm8952-wcd-objs := msm8x16-wcd.o msm8x16-wcd-tables.o
+snd-soc-msm8909-cdc-objs := msm-digital-cdc.o msm-digital-cdc-regmap.o
 snd-soc-wsa881x-analog-objs := wsa881x-analog.o wsa881x-tables-analog.o
 snd-soc-wsa881x-analog-objs += wsa881x-regmap-analog.o wsa881x-irq.o
 snd-soc-wl1273-objs := wl1273.o
@@ -188,6 +191,15 @@ obj-$(CONFIG_SND_SOC_MSM_HDMI_DBA_CODEC_RX) := msm_hdmi_dba_codec_rx.o
 snd-soc-max9877-objs := max9877.o
 snd-soc-tpa6130a2-objs := tpa6130a2.o
 snd-soc-tas2552-objs := tas2552.o
+
+# 2015-12-05,add by jun.wu for quectel codec
+snd-soc-nau8814-objs := nau8814.o
+snd-soc-alc5616-objs := alc5616.o
+snd-soc-tlv320aic3x-objs := tlv320aic3x.o
+snd-soc-quec-stub-objs := quec_stub.o
+#20171109,add by cullen for codec nau88c10
+snd-soc-nau88c10-objs := nau88c10.o
+snd-soc-max9867-objs := max9867.o
 
 obj-$(CONFIG_SND_SOC_88PM860X)	+= snd-soc-88pm860x.o
 obj-$(CONFIG_SND_SOC_AB8500_CODEC)	+= snd-soc-ab8500-codec.o
@@ -290,6 +302,7 @@ obj-$(CONFIG_SND_SOC_STA350)   += snd-soc-sta350.o
 obj-$(CONFIG_SND_SOC_STA529)   += snd-soc-sta529.o
 obj-$(CONFIG_SND_SOC_STAC9766)	+= snd-soc-stac9766.o
 obj-$(CONFIG_SND_SOC_TAS2552)	+= snd-soc-tas2552.o
+obj-$(CONFIG_SND_SOC_BG_CODEC)	+= bg-codec.o
 obj-$(CONFIG_SND_SOC_TAS5086)	+= snd-soc-tas5086.o
 obj-$(CONFIG_SND_SOC_TLV320AIC23)	+= snd-soc-tlv320aic23.o
 obj-$(CONFIG_SND_SOC_TLV320AIC23_I2C)	+= snd-soc-tlv320aic23-i2c.o
@@ -303,6 +316,7 @@ obj-$(CONFIG_SND_SOC_TWL4030)	+= snd-soc-twl4030.o
 obj-$(CONFIG_SND_SOC_TWL6040)	+= snd-soc-twl6040.o
 obj-$(CONFIG_SND_SOC_UDA134X)	+= snd-soc-uda134x.o
 obj-$(CONFIG_SND_SOC_UDA1380)	+= snd-soc-uda1380.o
+obj-$(CONFIG_SND_SOC_WCD9306)	+= snd-soc-wcd9306.o
 obj-$(CONFIG_SND_SOC_WCD9320)	+= snd-soc-wcd9320.o
 obj-$(CONFIG_SND_SOC_WCD9330)	+= snd-soc-wcd9330.o
 obj-$(CONFIG_SND_SOC_WCD9335)	+= snd-soc-wcd9335.o
@@ -311,6 +325,7 @@ obj-$(CONFIG_AUDIO_EXT_CLK)	+= audio-ext-clock.o
 obj-$(CONFIG_SND_SOC_WCD9XXX)   += snd-soc-wcd9xxx.o
 obj-$(CONFIG_SND_SOC_WCD9XXX_V2) += snd-soc-wcd9xxx-v2.o
 obj-$(CONFIG_SND_SOC_MSM8X16_WCD)	+= snd-soc-msm8952-wcd.o msm8916-wcd-irq.o
+obj-$(CONFIG_SND_SOC_DIGITAL_CDC) += snd-soc-msm8909-cdc.o msm8916-wcd-irq.o
 obj-$(CONFIG_SND_SOC_WCD_CPE)   += snd-soc-wcd-cpe.o
 obj-$(CONFIG_SND_SOC_WCD_MBHC)  += snd-soc-wcd-mbhc.o
 obj-$(CONFIG_SND_SOC_WSA881X)	+= snd-soc-wsa881x.o
@@ -374,3 +389,23 @@ obj-$(CONFIG_SND_SOC_MSM_STUB)  += snd-soc-msm-stub.o
 # Amp
 obj-$(CONFIG_SND_SOC_MAX9877)	+= snd-soc-max9877.o
 obj-$(CONFIG_SND_SOC_TPA6130A2)	+= snd-soc-tpa6130a2.o
+
+# 2015-12-05, add by jun.wu for quectel codec
+#obj-m	+= snd-soc-nau8814.o
+#obj-m	+= snd-soc-alc5616.o
+#obj-m	+= snd-soc-tlv320aic3x.o
+#obj-m 	+= snd-soc-quec-stub.o
+#20171109,add by cullen for codec nau88c10
+#obj-m	+= snd-soc-nau88c10.o
+#obj-m	+= snd-soc-max9867.o
+
+# achang-200180607, update codec driver.
+snd-soc-nau8810-objs := nau8810.o
+snd-soc-rt5616-objs := rt5616.o rl6231.o
+snd-soc-tlv320aic3x_new-objs := tlv320aic3x_new.o
+
+obj-y        += snd-soc-nau8810.o
+obj-y        += snd-soc-rt5616.o
+obj-y        += snd-soc-tlv320aic3x_new.o
+obj-y        += snd-soc-max9867.o
+obj-y        += snd-soc-quec-stub.o

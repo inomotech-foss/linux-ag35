@@ -1303,7 +1303,7 @@ static int src_detect_irq_handler(struct smb23x_chip *chip, u8 rt_sts)
 	if (!chip->apsd_enabled)
 		return 0;
 
-	pr_info("SMB: chip->usb_present = %d, usb_present = %d\n",
+	pr_debug("chip->usb_present = %d, usb_present = %d\n",
 					chip->usb_present, usb_present);
 
 	if (usb_present && !chip->usb_present) {

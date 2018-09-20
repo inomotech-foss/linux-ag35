@@ -52,7 +52,7 @@
 #include <linux/workqueue.h>
 #include <linux/fs.h>
 #include <linux/proc_fs.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/types.h>
 #include <linux/sched.h>
@@ -76,7 +76,7 @@
 
 #define FTS_WORKQUEUE_NAME                  "fts_wq"
 
-#define FTS_MAX_POINTS                      3
+#define FTS_MAX_POINTS                      10
 #define FTS_KEY_WIDTH                       50
 #define FTS_ONE_TCH_LEN                     6
 #define POINT_READ_BUF  (3 + FTS_ONE_TCH_LEN * FTS_MAX_POINTS)
@@ -108,12 +108,10 @@
 
 
 struct fts_ts_platform_data {
-	u32 irq_gpio;
+	int irq_gpio;
 	u32 irq_gpio_flags;
-	u32 reset_gpio;
+	int reset_gpio;
 	u32 reset_gpio_flags;
-	u32 switch_gpio;
-	u32 switch_gpio_flags;
 	bool have_key;
 	u32 key_number;
 	u32 keys[4];
@@ -124,14 +122,18 @@ struct fts_ts_platform_data {
 	u32 x_min;
 	u32 y_min;
 	u32 max_touch_number;
+	bool wakeup_gestures_en;
 };
 
 struct ts_event {
 	u16 au16_x[FTS_MAX_POINTS]; /*x coordinate */
 	u16 au16_y[FTS_MAX_POINTS]; /*y coordinate */
 	u16 pressure[FTS_MAX_POINTS];
-	u8 au8_touch_event[FTS_MAX_POINTS]; /* touch event: 0 -- down; 1-- up; 2 -- contact */
-	u8 au8_finger_id[FTS_MAX_POINTS];   /*touch ID */
+	u8 au8_touch_event[FTS_MAX_POINTS]; /* touch event:
+					       0 -- down;
+					       1-- up;
+					       2 -- contact */
+	u8 au8_finger_id[FTS_MAX_POINTS];   /* touch ID */
 	u8 area[FTS_MAX_POINTS];
 	u8 touch_point;
 	u8 point_num;
@@ -157,8 +159,6 @@ struct fts_ts_data {
 	u8 fw_vendor_id;
 	int touchs;
 	int irq_disable;
-	int panel_power_state;
-	ktime_t last_plam_time;
 
 #if defined(CONFIG_FB)
 	struct notifier_block fb_notif;

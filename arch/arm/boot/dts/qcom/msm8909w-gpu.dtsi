@@ -22,7 +22,8 @@
 
 &msm_gpu {
 
-	/delete-property/qcom,gpu-speed-config;
+	/* To disable GPU wake up on touch event */
+	qcom,disable-wake-on-touch;
 
 	/* To disable GPU wake up on touch event */
 	qcom,disable-wake-on-touch;
@@ -61,7 +62,10 @@
 
 	};
 
-	/delete-node/qcom,gpu-speed-config@0;
+};
+
+&kgsl_msm_iommu {
+		qcom,retention;
 };
 
 &kgsl_msm_iommu {

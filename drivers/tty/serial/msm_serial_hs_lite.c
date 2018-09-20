@@ -2,7 +2,7 @@
  * drivers/serial/msm_serial.c - driver for msm7k serial device and console
  *
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2010-2016, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -554,6 +554,7 @@ static void handle_rx(struct uart_port *port, unsigned int misr)
 	unsigned int vid;
 	unsigned int sr;
 	int count = 0;
+	int copied = 0;
 	struct msm_hsl_port *msm_hsl_port = UART_TO_MSM(port);
 
 	vid = msm_hsl_port->ver_id;
@@ -609,9 +610,9 @@ static void handle_rx(struct uart_port *port, unsigned int misr)
 
 		/* TODO: handle sysrq */
 		/* if (!uart_handle_sysrq_char(port, c)) */
-		tty_insert_flip_string(tty->port, (char *) &c,
+		copied = tty_insert_flip_string(tty->port, (char *) &c,
 				       (count > 4) ? 4 : count);
-		count -= 4;
+		count -= copied;
 	}
 
 	tty_flip_buffer_push(tty->port);
@@ -1891,6 +1892,7 @@ static int msm_serial_hsl_suspend(struct device *dev)
 			enable_irq_wake(port->irq);
 	}
 
+	pinctrl_pm_select_sleep_state(dev); //add bu jun.wu for uart sleep
 	return 0;
 }
 
@@ -1898,6 +1900,9 @@ static int msm_serial_hsl_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct uart_port *port;
+
+	pinctrl_pm_select_default_state(dev);	//add by jun.wu for UART sleep 
+
 	port = get_port_from_line(get_line(pdev));
 
 	if (port) {
@@ -1996,6 +2001,9 @@ static void __exit msm_serial_hsl_exit(void)
 #define MSM_HSL_UART_SR_TXEMT		BIT(3)
 #define MSM_HSL_UART_ISR_TXREADY	BIT(7)
 
+#ifndef CONFIG_DYNAMIC_DEBUG //carl, use this macro indicate mdm9607-perf_config
+#undef CONFIG_SERIAL_MSM_HSL_CONSOLE
+#endif
 #ifdef CONFIG_SERIAL_MSM_HSL_CONSOLE
 static void msm_serial_hsl_early_putc(struct uart_port *port, int ch)
 {
