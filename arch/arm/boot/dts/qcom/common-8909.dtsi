@@ -14,8 +14,8 @@
                 compatible = "android,bcmdhd_wlan";
                 interrupt-parent = <&msm_gpio>;
                 interrupts = <35 0x2008>;
-                wl_reg_on = <&msm_gpio 33 0>;           /* wifi reg_on pin */
-                wl_host_wake = <&msm_gpio 35 0>;        /* wifi oob pin */
+		wl_reg_on = <&msm_gpio 33 0>;/* wifi reg_on pin */
+		wl_host_wake = <&msm_gpio 35 0>;/* wifi oob pin */
         };
 
 	bt_nitrous {
@@ -27,8 +27,10 @@
 		dev-wake-gpio = <&msm_gpio 32 0>;
 		dev-wake-polarity = <0>;
 		pinctrl-names = "default","sleep";
-		pinctrl-0 = <&gpio_bt_reg_on_active &gpio_bt_host_wake_active &gpio_bt_dev_wake_active>;
-		pinctrl-1 = <&gpio_bt_reg_on_sleep &gpio_bt_host_wake_sleep &gpio_bt_dev_wake_sleep>;
+		pinctrl-0 = <&gpio_bt_reg_on_active &gpio_bt_host_wake_active
+				&gpio_bt_dev_wake_active>;
+		pinctrl-1 = <&gpio_bt_reg_on_sleep &gpio_bt_host_wake_sleep
+				&gpio_bt_dev_wake_sleep>;
 	};
 
 	reserved-memory {
@@ -151,8 +153,10 @@
 				spi-cpol;
 				spi-cpha;
 				pinctrl-names = "default","sleep";
-				pinctrl-0 = <&gps_mcu_req_default &gps_mcu_resp_default &gps_host_req_default &gpio_gps_on_active>;
-				pinctrl-1 = <&gps_mcu_req_sleep &gps_mcu_resp_sleep &gps_host_req_sleep &gpio_gps_on_sleep>;
+			pinctrl-0 = <&gps_mcu_req_default &gps_mcu_resp_default
+				&gps_host_req_default &gpio_gps_on_active>;
+			pinctrl-1 = <&gps_mcu_req_sleep &gps_mcu_resp_sleep
+				&gps_host_req_sleep &gpio_gps_on_sleep>;
 				ssp-host-req = <&msm_gpio 94 0x4>;
 				ssp-mcu-req = <&msm_gpio 27 0>;
 				ssp-mcu-resp = <&msm_gpio 28 0>;
@@ -331,37 +335,53 @@
 		"quat_i2s_dmic",
 		"quat_i2s_dmic_pri_i2s";
 	pinctrl-0 = <&cdc_pdm_lines_sus &cross_conn_det_sus
-					&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex &ext_cdc_tlmm_lines_sus>;
+			&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex
+			&ext_cdc_tlmm_lines_sus>;
 	pinctrl-1 = <&cdc_pdm_lines_act &cross_conn_det_sus
-					&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex &ext_cdc_tlmm_lines_sus>;
+			&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex
+			&ext_cdc_tlmm_lines_sus>;
 	pinctrl-2 = <&cdc_pdm_lines_sus &cross_conn_det_act
-					&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex &ext_cdc_tlmm_lines_sus>;
+			&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex
+			&ext_cdc_tlmm_lines_sus>;
 	pinctrl-3 = <&cdc_pdm_lines_act &cross_conn_det_act
-					&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex &ext_cdc_tlmm_lines_sus>;
+			&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex
+			&ext_cdc_tlmm_lines_sus>;
 	pinctrl-4 = <&cdc_pdm_lines_sus &cross_conn_det_sus
-					&cdc_dmic_lines_act &cdc_dmic_lines_act_ex &ext_cdc_tlmm_lines_sus>;
+			&cdc_dmic_lines_act &cdc_dmic_lines_act_ex
+			&ext_cdc_tlmm_lines_sus>;
 	pinctrl-5 = <&cdc_pdm_lines_act &cross_conn_det_sus
-					&cdc_dmic_lines_act &cdc_dmic_lines_act_ex &ext_cdc_tlmm_lines_sus>;
+			&cdc_dmic_lines_act &cdc_dmic_lines_act_ex
+			&ext_cdc_tlmm_lines_sus>;
 	pinctrl-6 = <&cdc_pdm_lines_sus &cross_conn_det_act
-					&cdc_dmic_lines_act &cdc_dmic_lines_act_ex &ext_cdc_tlmm_lines_sus>;
+			&cdc_dmic_lines_act &cdc_dmic_lines_act_ex
+			&ext_cdc_tlmm_lines_sus>;
 	pinctrl-7 = <&cdc_pdm_lines_act &cross_conn_det_act
-					&cdc_dmic_lines_act &cdc_dmic_lines_act_ex &ext_cdc_tlmm_lines_sus>;
+			&cdc_dmic_lines_act &cdc_dmic_lines_act_ex
+			&ext_cdc_tlmm_lines_sus>;
 	pinctrl-8 = <&cdc_pdm_lines_sus &cross_conn_det_sus
-					&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex &ext_cdc_tlmm_lines_act>;
+			&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex
+			&ext_cdc_tlmm_lines_act>;
 	pinctrl-9 = <&cdc_pdm_lines_act &cross_conn_det_sus
-					&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex &ext_cdc_tlmm_lines_act>;
+			&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex
+			&ext_cdc_tlmm_lines_act>;
 	pinctrl-10 = <&cdc_pdm_lines_act &cross_conn_det_act
-					&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex &ext_cdc_tlmm_lines_act>;
+			&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex
+			&ext_cdc_tlmm_lines_act>;
 	pinctrl-11 = <&cdc_pdm_lines_act &cross_conn_det_act
-					&cdc_dmic_lines_act &cdc_dmic_lines_act_ex &ext_cdc_tlmm_lines_act>;
+			&cdc_dmic_lines_act &cdc_dmic_lines_act_ex
+			&ext_cdc_tlmm_lines_act>;
 	pinctrl-12 = <&cdc_pdm_lines_sus &cross_conn_det_act
-					&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex &ext_cdc_tlmm_lines_act>;
+			&cdc_dmic_lines_sus &cdc_dmic_lines_sus_ex
+			&ext_cdc_tlmm_lines_act>;
 	pinctrl-13 = <&cdc_pdm_lines_sus &cross_conn_det_act
-					&cdc_dmic_lines_act &cdc_dmic_lines_act_ex &ext_cdc_tlmm_lines_act>;
+			&cdc_dmic_lines_act &cdc_dmic_lines_act_ex
+			&ext_cdc_tlmm_lines_act>;
 	pinctrl-14 = <&cdc_pdm_lines_sus &cross_conn_det_sus
-					&cdc_dmic_lines_act &cdc_dmic_lines_act_ex &ext_cdc_tlmm_lines_act>;
+			&cdc_dmic_lines_act &cdc_dmic_lines_act_ex
+			&ext_cdc_tlmm_lines_act>;
 	pinctrl-15 = <&cdc_pdm_lines_act &cross_conn_det_sus
-					&cdc_dmic_lines_act &cdc_dmic_lines_act_ex &ext_cdc_tlmm_lines_act>;
+			&cdc_dmic_lines_act &cdc_dmic_lines_act_ex
+			&ext_cdc_tlmm_lines_act>;
 	asoc-codec = <&stub_codec>, <&pm8916_tombak_dig>;
 };
 &dai_mi2s3{
