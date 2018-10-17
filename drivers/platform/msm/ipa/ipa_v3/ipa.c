@@ -499,7 +499,7 @@ struct iommu_domain *ipa3_get_uc_smmu_domain(void)
 	if (smmu_cb[IPA_SMMU_CB_UC].valid)
 		return smmu_cb[IPA_SMMU_CB_UC].mapping->domain;
 
-		IPAERR("CB not valid\n");
+	IPAERR("CB not valid\n");
 
 	return NULL;
 }
@@ -2599,7 +2599,7 @@ static int ipa3_q6_set_ex_path_to_apps(void)
  *
  * This is a mandatory procedure, in case one of the steps fails, the
  * AP needs to restart.
-	 */
+ */
 void ipa3_q6_pre_shutdown_cleanup(void)
 {
 	IPADBG_LOW("ENTER\n");
@@ -2608,6 +2608,9 @@ void ipa3_q6_pre_shutdown_cleanup(void)
 
 	ipa3_q6_pipe_delay(true);
 	ipa3_q6_avoid_holb();
+	if (ipa3_ctx->ipa_config_is_mhi)
+		ipa3_set_reset_client_cons_pipe_sus_holb(true,
+		IPA_CLIENT_MHI_CONS);
 	if (ipa3_q6_clean_q6_tables()) {
 		IPAERR("Failed to clean Q6 tables\n");
 		BUG();
@@ -2620,8 +2623,11 @@ void ipa3_q6_pre_shutdown_cleanup(void)
 	 * on pipe reset procedure
 	 */
 	ipa3_q6_pipe_delay(false);
-
-	ipa3_set_usb_prod_pipe_delay();
+	ipa3_set_reset_client_prod_pipe_delay(true,
+		IPA_CLIENT_USB_PROD);
+	if (ipa3_ctx->ipa_config_is_mhi)
+		ipa3_set_reset_client_prod_pipe_delay(true,
+		IPA_CLIENT_MHI_PROD);
 
 	IPA_ACTIVE_CLIENTS_DEC_SIMPLE();
 	IPADBG_LOW("Exit with success\n");
@@ -2663,7 +2669,7 @@ void ipa3_q6_post_shutdown_cleanup(void)
 					client_idx);
 				BUG();
 				return;
-		}
+			}
 		}
 
 	IPA_ACTIVE_CLIENTS_DEC_SIMPLE();
@@ -3348,14 +3354,14 @@ static int ipa3_setup_apps_pipes(void)
 
 	/* LAN OUT (AP->IPA) */
 	if (!ipa3_ctx->ipa_config_is_mhi) {
-	memset(&sys_in, 0, sizeof(struct ipa_sys_connect_params));
+		memset(&sys_in, 0, sizeof(struct ipa_sys_connect_params));
 		sys_in.client = IPA_CLIENT_APPS_LAN_PROD;
-	sys_in.desc_fifo_sz = IPA_SYS_TX_DATA_DESC_FIFO_SZ;
-	sys_in.ipa_ep_cfg.mode.mode = IPA_BASIC;
+		sys_in.desc_fifo_sz = IPA_SYS_TX_DATA_DESC_FIFO_SZ;
+		sys_in.ipa_ep_cfg.mode.mode = IPA_BASIC;
 		if (ipa3_setup_sys_pipe(&sys_in,
 			&ipa3_ctx->clnt_hdl_data_out)) {
 			IPAERR(":setup sys pipe (LAN_PROD) failed.\n");
-		result = -EPERM;
+			result = -EPERM;
 			goto fail_lan_data_out;
 		}
 	}
@@ -3379,7 +3385,7 @@ fail_ch20_wa:
 static void ipa3_teardown_apps_pipes(void)
 {
 	if (!ipa3_ctx->ipa_config_is_mhi)
-	ipa3_teardown_sys_pipe(ipa3_ctx->clnt_hdl_data_out);
+		ipa3_teardown_sys_pipe(ipa3_ctx->clnt_hdl_data_out);
 	ipa3_teardown_sys_pipe(ipa3_ctx->clnt_hdl_data_in);
 	__ipa3_del_rt_rule(ipa3_ctx->dflt_v6_rt_rule_hdl);
 	__ipa3_del_rt_rule(ipa3_ctx->dflt_v4_rt_rule_hdl);
@@ -4018,7 +4024,7 @@ int ipa3_set_required_perf_profile(enum ipa_voltage_level floor_voltage,
 		IPA_ACTIVE_CLIENTS_DEC_SIMPLE();
 	} else {
 		IPADBG_LOW("clocks are gated, not setting rate\n");
-	ipa3_active_clients_unlock();
+		ipa3_active_clients_unlock();
 	}
 	IPADBG_LOW("Done\n");
 
@@ -4256,11 +4262,11 @@ static void ipa3_freeze_clock_vote_and_notify_modem(void)
 	else
 		ipa3_ctx->smp2p_info.ipa_clk_on = true;
 
-		gpio_set_value(ipa3_ctx->smp2p_info.out_base_id +
+	gpio_set_value(ipa3_ctx->smp2p_info.out_base_id +
 		IPA_GPIO_OUT_CLK_VOTE_IDX,
 		ipa3_ctx->smp2p_info.ipa_clk_on);
-		gpio_set_value(ipa3_ctx->smp2p_info.out_base_id +
-			IPA_GPIO_OUT_CLK_RSP_CMPLT_IDX, 1);
+	gpio_set_value(ipa3_ctx->smp2p_info.out_base_id +
+		IPA_GPIO_OUT_CLK_RSP_CMPLT_IDX, 1);
 
 	ipa3_ctx->smp2p_info.res_sent = true;
 	IPADBG("IPA clocks are %s\n",
@@ -4883,7 +4889,7 @@ static int ipa3_pre_init(const struct ipa3_plat_drv_res *resource_p,
 
 	ipa3_ctx->logbuf = ipc_log_context_create(IPA_IPC_LOG_PAGES, "ipa", 0);
 	if (ipa3_ctx->logbuf == NULL)
-		IPAERR("failed to create IPC log, continue...\n");
+		IPADBG("failed to create IPC log, continue...\n");
 
 	ipa3_ctx->pdev = ipa_dev;
 	ipa3_ctx->uc_pdev = ipa_dev;
@@ -5294,9 +5300,9 @@ static int ipa3_pre_init(const struct ipa3_plat_drv_res *resource_p,
 	}
 
 	result = ipa3_alloc_pkt_init();
-		if (result) {
+	if (result) {
 		IPAERR("Failed to alloc pkt_init payload\n");
-			result = -ENODEV;
+		result = -ENODEV;
 		goto fail_allok_pkt_init;
 	}
 
@@ -5325,13 +5331,13 @@ static int ipa3_pre_init(const struct ipa3_plat_drv_res *resource_p,
 		 * For IPA3.1 (and on), the GSI configuration is done by TZ.
 		 */
 		if (ipa3_ctx->ipa_hw_type == IPA_HW_v3_0) {
-		result = ipa3_gsi_pre_fw_load_init();
-		if (result) {
+			result = ipa3_gsi_pre_fw_load_init();
+			if (result) {
 				IPAERR("gsi pre FW loading config failed\n");
-			result = -ENODEV;
+				result = -ENODEV;
 				goto fail_gsi_pre_fw_load_init;
+			}
 		}
-	}
 	} else {
 		/*
 		 * For BAM (No other mode),
@@ -5420,7 +5426,7 @@ fail_remap:
 fail_init_active_client:
 fail_clk:
 	if (ipa3_ctx->ipa3_hw_mode != IPA_HW_MODE_VIRTUAL)
-	msm_bus_scale_unregister_client(ipa3_ctx->ipa_bus_hdl);
+		msm_bus_scale_unregister_client(ipa3_ctx->ipa_bus_hdl);
 fail_bus_reg:
 	if (ipa3_bus_scale_table) {
 		msm_bus_cl_clear_pdata(ipa3_bus_scale_table);
@@ -5432,7 +5438,7 @@ fail_mem_ctrl:
 	kfree(ipa3_ctx->ipa_tz_unlock_reg);
 fail_tz_unlock_reg:
 	if (ipa3_ctx->logbuf)
-	ipc_log_context_destroy(ipa3_ctx->logbuf);
+		ipc_log_context_destroy(ipa3_ctx->logbuf);
 	kfree(ipa3_ctx);
 	ipa3_ctx = NULL;
 fail_mem_ctx:
@@ -5775,13 +5781,13 @@ static int ipa_smmu_wlan_cb_probe(struct device *dev)
 		}
 		IPADBG("SMMU S1 BYPASS\n");
 	} else {
-	if (iommu_domain_set_attr(cb->iommu,
-				DOMAIN_ATTR_ATOMIC,
-				&atomic_ctx)) {
-		IPAERR("couldn't disable coherent HTW\n");
+		if (iommu_domain_set_attr(cb->iommu,
+					DOMAIN_ATTR_ATOMIC,
+					&atomic_ctx)) {
+			IPAERR("couldn't disable coherent HTW\n");
 			cb->valid = false;
-		return -EIO;
-	}
+			return -EIO;
+		}
 		IPADBG("SMMU ATTR ATOMIC\n");
 
 		if (smmu_info.fast_map) {
@@ -5833,8 +5839,8 @@ static int ipa_smmu_uc_cb_probe(struct device *dev)
 		if (dma_set_mask(dev, DMA_BIT_MASK(64)) ||
 				dma_set_coherent_mask(dev, DMA_BIT_MASK(64))) {
 			IPAERR("DMA set 64bit mask failed\n");
-		return -EOPNOTSUPP;
-	}
+			return -EOPNOTSUPP;
+		}
 	} else {
 		if (dma_set_mask(dev, DMA_BIT_MASK(32)) ||
 				dma_set_coherent_mask(dev, DMA_BIT_MASK(32))) {
@@ -5951,11 +5957,11 @@ static int ipa_smmu_ap_cb_probe(struct device *dev)
 			return -EOPNOTSUPP;
 		}
 	} else {
-	if (dma_set_mask(dev, DMA_BIT_MASK(32)) ||
-		    dma_set_coherent_mask(dev, DMA_BIT_MASK(32))) {
+		if (dma_set_mask(dev, DMA_BIT_MASK(32)) ||
+				dma_set_coherent_mask(dev, DMA_BIT_MASK(32))) {
 			IPAERR("DMA set 32bit mask failed\n");
-		return -EOPNOTSUPP;
-	}
+			return -EOPNOTSUPP;
+		}
 	}
 
 	cb->dev = dev;
@@ -5991,14 +5997,14 @@ static int ipa_smmu_ap_cb_probe(struct device *dev)
 		}
 		IPADBG("SMMU S1 BYPASS\n");
 	} else {
-	if (iommu_domain_set_attr(cb->mapping->domain,
-				  DOMAIN_ATTR_ATOMIC,
-				  &atomic_ctx)) {
-		IPAERR("couldn't set domain as atomic\n");
+		if (iommu_domain_set_attr(cb->mapping->domain,
+				DOMAIN_ATTR_ATOMIC,
+				&atomic_ctx)) {
+			IPAERR("couldn't set domain as atomic\n");
 			arm_iommu_release_mapping(cb->mapping);
 			cb->valid = false;
-		return -EIO;
-	}
+			return -EIO;
+		}
 		IPADBG("SMMU atomic set\n");
 
 		if (iommu_domain_set_attr(cb->mapping->domain,
@@ -6223,23 +6229,23 @@ int ipa3_plat_drv_probe(struct platform_device *pdev_p,
 				return -EOPNOTSUPP;
 			}
 		} else {
-		if (dma_set_mask(&pdev_p->dev, DMA_BIT_MASK(32)) ||
+			if (dma_set_mask(&pdev_p->dev, DMA_BIT_MASK(32)) ||
 			    dma_set_coherent_mask(&pdev_p->dev,
 			    DMA_BIT_MASK(32))) {
 				IPAERR("DMA set 32bit mask failed\n");
-			return -EOPNOTSUPP;
+				return -EOPNOTSUPP;
+			}
 		}
-	}
 
-	if (!ipa3_bus_scale_table)
-		ipa3_bus_scale_table = msm_bus_cl_get_pdata(pdev_p);
+		if (!ipa3_bus_scale_table)
+			ipa3_bus_scale_table = msm_bus_cl_get_pdata(pdev_p);
 
-	/* Proceed to real initialization */
-	result = ipa3_pre_init(&ipa3_res, dev);
-	if (result) {
-		IPAERR("ipa3_init failed\n");
-		return result;
-	}
+		/* Proceed to real initialization */
+		result = ipa3_pre_init(&ipa3_res, dev);
+		if (result) {
+			IPAERR("ipa3_init failed\n");
+			return result;
+		}
 	}
 
 	return result;

@@ -311,10 +311,11 @@ static int stub_probe(struct usb_device *udev)
 {
 	struct stub_device *sdev = NULL;
 	const char *udev_busid = dev_name(&udev->dev);
+	int err = 0;
 	struct bus_id_priv *busid_priv;
-	int rc = 0;
+	int rc;
 
-	dev_dbg(&udev->dev, "Enter probe\n");
+	dev_dbg(&udev->dev, "Enter\n");
 
 	/* check we should claim or not by busid_table */
 	busid_priv = get_busid_priv(udev_busid);
@@ -329,15 +330,13 @@ static int stub_probe(struct usb_device *udev)
 		 * other matched drivers by the driver core.
 		 * See driver_probe_device() in driver/base/dd.c
 		 */
-		rc = -ENODEV;
-		goto call_put_busid_priv;
+		return -ENODEV;
 	}
 
 	if (udev->descriptor.bDeviceClass == USB_CLASS_HUB) {
 		dev_dbg(&udev->dev, "%s is a usb hub device... skip!\n",
 			 udev_busid);
-		rc = -ENODEV;
-		goto call_put_busid_priv;
+		return -ENODEV;
 	}
 
 	if (!strcmp(udev->bus->bus_name, "vhci_hcd")) {
@@ -345,16 +344,13 @@ static int stub_probe(struct usb_device *udev)
 			"%s is attached on vhci_hcd... skip!\n",
 			udev_busid);
 
-		rc = -ENODEV;
-		goto call_put_busid_priv;
+		return -ENODEV;
 	}
 
 	/* ok, this is my device */
 	sdev = stub_device_alloc(udev);
-	if (!sdev) {
-		rc = -ENOMEM;
-		goto call_put_busid_priv;
-	}
+	if (!sdev)
+		return -ENOMEM;
 
 	dev_info(&udev->dev,
 		"usbip-host: register new device (bus %u dev %u)\n",
@@ -376,33 +372,23 @@ static int stub_probe(struct usb_device *udev)
 			(struct usb_dev_state *) udev);
 	if (rc) {
 		dev_dbg(&udev->dev, "unable to claim port\n");
-		goto err_port;
+		return rc;
 	}
 
-	rc = stub_add_files(&udev->dev);
-	if (rc) {
+	err = stub_add_files(&udev->dev);
+	if (err) {
 		dev_err(&udev->dev, "stub_add_files for %s\n", udev_busid);
-		goto err_files;
-	}
-	busid_priv->status = STUB_BUSID_ALLOC;
-
-	rc = 0;
-	goto call_put_busid_priv;
-
-err_files:
-	usb_hub_release_port(udev->parent, udev->portnum,
-			     (struct usb_dev_state *) udev);
-err_port:
 		dev_set_drvdata(&udev->dev, NULL);
 		usb_put_dev(udev);
 		kthread_stop_put(sdev->ud.eh);
 
 		busid_priv->sdev = NULL;
 		stub_device_free(sdev);
+		return err;
+	}
+	busid_priv->status = STUB_BUSID_ALLOC;
 
-call_put_busid_priv:
-	put_busid_priv(busid_priv);
-	return rc;
+	return 0;
 }
 
 static void shutdown_busid(struct bus_id_priv *busid_priv)
@@ -427,7 +413,7 @@ static void stub_disconnect(struct usb_device *udev)
 	struct bus_id_priv *busid_priv;
 	int rc;
 
-	dev_dbg(&udev->dev, "Enter disconnect\n");
+	dev_dbg(&udev->dev, "Enter\n");
 
 	busid_priv = get_busid_priv(udev_busid);
 	if (!busid_priv) {
@@ -440,7 +426,7 @@ static void stub_disconnect(struct usb_device *udev)
 	/* get stub_device */
 	if (!sdev) {
 		dev_err(&udev->dev, "could not get device");
-		goto call_put_busid_priv;
+		return;
 	}
 
 	dev_set_drvdata(&udev->dev, NULL);
@@ -455,12 +441,12 @@ static void stub_disconnect(struct usb_device *udev)
 				  (struct usb_dev_state *) udev);
 	if (rc) {
 		dev_dbg(&udev->dev, "unable to release port\n");
-		goto call_put_busid_priv;
+		return;
 	}
 
 	/* If usb reset is called from event handler */
 	if (busid_priv->sdev->ud.eh == current)
-		goto call_put_busid_priv;
+		return;
 
 	/* shutdown the current connection */
 	shutdown_busid(busid_priv);
@@ -471,11 +457,12 @@ static void stub_disconnect(struct usb_device *udev)
 	busid_priv->sdev = NULL;
 	stub_device_free(sdev);
 
-	if (busid_priv->status == STUB_BUSID_ALLOC)
+	if (busid_priv->status == STUB_BUSID_ALLOC) {
 		busid_priv->status = STUB_BUSID_ADDED;
-
-call_put_busid_priv:
-	put_busid_priv(busid_priv);
+	} else {
+		busid_priv->status = STUB_BUSID_OTHER;
+		del_match_busid((char *)udev_busid);
+	}
 }
 
 #ifdef CONFIG_PM

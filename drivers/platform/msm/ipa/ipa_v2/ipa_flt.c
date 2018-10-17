@@ -1414,7 +1414,7 @@ bail:
 /**
  * ipa2_reset_flt() - Reset the current SW filtering table of specified type
  * (does not commit to HW)
- * @ip:	[in] the family of routing tables
+ * @ip:			[in] the family of routing tables
  * @user_only:	[in] indicate rules deleted by userspace
  *
  * Returns:	0 on success, negative on failure
@@ -1456,17 +1456,17 @@ int ipa2_reset_flt(enum ipa_ip_type ip, bool user_only)
 
 		if (!user_only ||
 				entry->ipacm_installed) {
-		list_del(&entry->link);
-		entry->tbl->rule_cnt--;
-		if (entry->rt_tbl)
-			entry->rt_tbl->ref_cnt--;
-		entry->cookie = 0;
-		id = entry->id;
-		kmem_cache_free(ipa_ctx->flt_rule_cache, entry);
+			list_del(&entry->link);
+			entry->tbl->rule_cnt--;
+			if (entry->rt_tbl)
+				entry->rt_tbl->ref_cnt--;
+			entry->cookie = 0;
+			id = entry->id;
+			kmem_cache_free(ipa_ctx->flt_rule_cache, entry);
 
-		/* remove the handle from the database */
-		ipa_id_remove(id);
-	}
+			/* remove the handle from the database */
+			ipa_id_remove(id);
+		}
 	}
 
 	for (i = 0; i < ipa_ctx->ipa_num_pipes; i++) {
@@ -1481,22 +1481,30 @@ int ipa2_reset_flt(enum ipa_ip_type ip, bool user_only)
 
 			if (!user_only ||
 				entry->ipacm_installed) {
-			list_del(&entry->link);
-			entry->tbl->rule_cnt--;
-			if (entry->rt_tbl)
-				entry->rt_tbl->ref_cnt--;
-			entry->cookie = 0;
-			id = entry->id;
+				list_del(&entry->link);
+				entry->tbl->rule_cnt--;
+				if (entry->rt_tbl)
+					entry->rt_tbl->ref_cnt--;
+				entry->cookie = 0;
+				id = entry->id;
 				kmem_cache_free(ipa_ctx->flt_rule_cache,
 					entry);
 
-			/* remove the handle from the database */
-			ipa_id_remove(id);
+				/* remove the handle from the database */
+				ipa_id_remove(id);
+			}
 		}
 	}
+
+	/* commit the change to IPA-HW */
+	if (ipa_ctx->ctrl->ipa_commit_flt(IPA_IP_v4) ||
+		ipa_ctx->ctrl->ipa_commit_flt(IPA_IP_v6)) {
+		IPAERR_RL("fail to commit flt-rule\n");
+		WARN_ON_RATELIMIT_IPA(1);
+		mutex_unlock(&ipa_ctx->lock);
+		return -EPERM;
 	}
 	mutex_unlock(&ipa_ctx->lock);
-
 	return 0;
 }
 

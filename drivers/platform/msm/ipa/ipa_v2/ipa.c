@@ -418,7 +418,7 @@ struct iommu_domain *ipa2_get_uc_smmu_domain(void)
 	if (smmu_cb[IPA_SMMU_CB_UC].valid)
 		return smmu_cb[IPA_SMMU_CB_UC].mapping->domain;
 
-		IPAERR("CB not valid\n");
+	IPAERR("CB not valid\n");
 
 	return NULL;
 }
@@ -3640,7 +3640,7 @@ int ipa2_set_required_perf_profile(enum ipa_voltage_level floor_voltage,
 		IPA_ACTIVE_CLIENTS_DEC_SIMPLE();
 	} else {
 		IPADBG_LOW("clocks are gated, not setting rate\n");
-	ipa_active_clients_unlock();
+		 ipa_active_clients_unlock();
 	}
 	IPADBG_LOW("Done\n");
 
@@ -3941,7 +3941,7 @@ static int ipa_init(const struct ipa_plat_drv_res *resource_p,
 
 	ipa_ctx->logbuf = ipc_log_context_create(IPA_IPC_LOG_PAGES, "ipa", 0);
 	if (ipa_ctx->logbuf == NULL)
-		IPAERR("failed to create IPC log, continue...\n");
+		IPADBG("failed to create IPC log, continue...\n");
 
 	ipa_ctx->pdev = ipa_dev;
 	ipa_ctx->uc_pdev = ipa_dev;
@@ -4734,13 +4734,13 @@ static int ipa_smmu_wlan_cb_probe(struct device *dev)
 		}
 		IPADBG("SMMU S1 BYPASS\n");
 	} else {
-	if (iommu_domain_set_attr(cb->iommu,
-				DOMAIN_ATTR_ATOMIC,
-				&atomic_ctx)) {
+		if (iommu_domain_set_attr(cb->iommu,
+			DOMAIN_ATTR_ATOMIC,
+			&atomic_ctx)) {
 			IPAERR("couldn't set domain as atomic\n");
 			cb->valid = false;
-		return -EIO;
-	}
+			return -EIO;
+		}
 		IPADBG("SMMU atomic set\n");
 		if (smmu_info.fast_map) {
 			if (iommu_domain_set_attr(cb->iommu,
@@ -4762,19 +4762,19 @@ static int ipa_smmu_wlan_cb_probe(struct device *dev)
 	}
 
 	if (!smmu_info.s1_bypass) {
-	IPAERR("map IPA region to WLAN_CB IOMMU\n");
+		IPAERR("map IPA region to WLAN_CB IOMMU\n");
 		ret = ipa_iommu_map(cb->iommu,
 			rounddown(smmu_info.ipa_base, PAGE_SIZE),
 			rounddown(smmu_info.ipa_base, PAGE_SIZE),
 			roundup(smmu_info.ipa_size, PAGE_SIZE),
 			IOMMU_READ | IOMMU_WRITE | IOMMU_DEVICE);
-	if (ret) {
-		IPAERR("map IPA to WLAN_CB IOMMU failed ret=%d\n",
-			ret);
+		if (ret) {
+			IPAERR("map IPA to WLAN_CB IOMMU failed ret=%d\n",
+				ret);
 			arm_iommu_detach_device(cb->dev);
 			cb->valid = false;
-		return ret;
-	}
+			return ret;
+		}
 	}
 
 	return 0;
@@ -4948,14 +4948,14 @@ static int ipa_smmu_ap_cb_probe(struct device *dev)
 		}
 		IPADBG("SMMU S1 BYPASS\n");
 	} else {
-	if (iommu_domain_set_attr(cb->mapping->domain,
-				  DOMAIN_ATTR_ATOMIC,
-				  &atomic_ctx)) {
-		IPAERR("couldn't set domain as atomic\n");
+		if (iommu_domain_set_attr(cb->mapping->domain,
+			DOMAIN_ATTR_ATOMIC,
+			&atomic_ctx)) {
+			IPAERR("couldn't set domain as atomic\n");
 			arm_iommu_release_mapping(cb->mapping);
 			cb->valid = false;
-		return -EIO;
-	}
+			return -EIO;
+		}
 		IPADBG("SMMU atomic set\n");
 
 		if (iommu_domain_set_attr(cb->mapping->domain,

@@ -1394,20 +1394,20 @@ int ipa2_reset_rt(enum ipa_ip_type ip, bool user_only)
 				continue;
 			if (!user_only ||
 				rule->ipacm_installed) {
-			list_del(&rule->link);
-			tbl->rule_cnt--;
-			if (rule->hdr)
-				__ipa_release_hdr(rule->hdr->id);
-			else if (rule->proc_ctx)
+				list_del(&rule->link);
+				tbl->rule_cnt--;
+				if (rule->hdr)
+					__ipa_release_hdr(rule->hdr->id);
+				else if (rule->proc_ctx)
 					__ipa_release_hdr_proc_ctx(
 						rule->proc_ctx->id);
-			rule->cookie = 0;
-			id = rule->id;
-			kmem_cache_free(ipa_ctx->rt_rule_cache, rule);
+				rule->cookie = 0;
+				id = rule->id;
+				kmem_cache_free(ipa_ctx->rt_rule_cache, rule);
 
-			/* remove the handle from the database */
-			ipa_id_remove(id);
-		}
+				/* remove the handle from the database */
+				ipa_id_remove(id);
+			}
 		}
 
 		if (ipa_id_find(tbl->id) == NULL) {
@@ -1420,28 +1420,37 @@ int ipa2_reset_rt(enum ipa_ip_type ip, bool user_only)
 		/* do not remove the "default" routing tbl which has index 0 */
 		if (tbl->idx != apps_start_idx) {
 			if (!user_only || tbl_user) {
-			if (!tbl->in_sys) {
-				list_del(&tbl->link);
-				set->tbl_cnt--;
-				clear_bit(tbl->idx,
-					  &ipa_ctx->rt_idx_bitmap[ip]);
-				IPADBG("rst rt tbl_idx=%d tbl_cnt=%d\n",
-						tbl->idx, set->tbl_cnt);
+				if (!tbl->in_sys) {
+					list_del(&tbl->link);
+					set->tbl_cnt--;
+					clear_bit(tbl->idx,
+						&ipa_ctx->rt_idx_bitmap[ip]);
+					IPADBG("rst rt tbl_idx=%d tbl_cnt=%d\n",
+							tbl->idx, set->tbl_cnt);
 					kmem_cache_free(ipa_ctx->rt_tbl_cache,
 						tbl);
-			} else {
+				} else {
 					list_move(&tbl->link,
 						&rset->head_rt_tbl_list);
-				clear_bit(tbl->idx,
-					  &ipa_ctx->rt_idx_bitmap[ip]);
-				set->tbl_cnt--;
+					clear_bit(tbl->idx,
+						&ipa_ctx->rt_idx_bitmap[ip]);
+					set->tbl_cnt--;
 					IPADBG("rst tbl_idx=%d cnt=%d\n",
-						tbl->idx, set->tbl_cnt);
+							tbl->idx, set->tbl_cnt);
+				}
+				/* remove the handle from the database */
+				ipa_id_remove(id);
 			}
-			/* remove the handle from the database */
-			ipa_id_remove(id);
 		}
 	}
+
+	/* commit the change to IPA-HW */
+	if (ipa_ctx->ctrl->ipa_commit_rt(IPA_IP_v4) ||
+		ipa_ctx->ctrl->ipa_commit_rt(IPA_IP_v6)) {
+		IPAERR("fail to commit rt-rule\n");
+		WARN_ON_RATELIMIT_IPA(1);
+		mutex_unlock(&ipa_ctx->lock);
+		return -EPERM;
 	}
 	mutex_unlock(&ipa_ctx->lock);
 

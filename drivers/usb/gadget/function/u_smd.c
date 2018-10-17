@@ -415,7 +415,7 @@ static void gsmd_rx_push(struct work_struct *w)
 				packet += n;
 				size -= n;
 			}
-
+            
 #ifdef CONFIG_QUECTEL_ESCAPE_FEATURE
 			if(port->port_num)
             {
@@ -583,6 +583,21 @@ static void gsmd_read_pending(struct gsmd_port *port)
 	return;
 }
 
+static inline bool gsmd_remote_wakeup_allowed(struct usb_function *f)
+{
+	bool remote_wakeup_allowed;
+
+	if (f->config->cdev->gadget->speed == USB_SPEED_SUPER)
+		remote_wakeup_allowed = f->func_wakeup_allowed;
+	else
+		remote_wakeup_allowed = f->config->cdev->gadget->remote_wakeup;
+
+	pr_debug("%s: remote_wakeup_allowed:%s", __func__,
+			remote_wakeup_allowed ? "true" : "false");
+
+	return remote_wakeup_allowed;
+}
+
 static void gsmd_tx_pull(struct work_struct *w)
 {
 	struct gsmd_port *port = container_of(w, struct gsmd_port, pull);
@@ -608,6 +623,13 @@ static void gsmd_tx_pull(struct work_struct *w)
 	in = port->port_usb->in;
 	func = &port->port_usb->func;
 	gadget = func->config->cdev->gadget;
+
+	/* Bail-out is suspended without remote-wakeup enable */
+	if (port->is_suspended && !gsmd_remote_wakeup_allowed(func)) {
+		spin_unlock_irq(&port->port_lock);
+		return;
+	}
+
 	if (port->is_suspended) {
 
 #ifdef QUECTEL_SLEEP_CTRL	
@@ -674,8 +696,8 @@ static void gsmd_tx_pull(struct work_struct *w)
 	}
 
 tx_pull_end:
-	/* TBD: Check how code behaves on USB bus suspend */
-	if (port->port_usb && smd_read_avail(port->pi->ch) && !list_empty(pool))
+	if (port->port_usb && port->pi->ch && smd_read_avail(port->pi->ch) &&
+							!list_empty(pool))
 		queue_work(gsmd_wq, &port->pull);
 
 	spin_unlock_irq(&port->port_lock);
@@ -828,8 +850,8 @@ static void gsmd_stop_io(struct gsmd_port *port)
 		list_move(&req->list, &port->read_pool);
 	}
 
-		port->n_read = 0;
-		port->cbits_to_laptop = 0;
+	port->n_read = 0;
+	port->cbits_to_laptop = 0;
 
 	if (port->port_usb->send_modem_ctrl_bits)
 		port->port_usb->send_modem_ctrl_bits(
@@ -1343,7 +1365,7 @@ int gsmd_setup(struct usb_gadget *g, unsigned count)
 			goto free_smd_ports;
 		}
 	}
-
+    
 #ifdef CONFIG_QUECTEL_ESCAPE_FEATURE
      i = remote_spin_lock_init(&remote_spinlock, SMEM_SPINLOCK_SMEM_ALLOC);
      if (i)

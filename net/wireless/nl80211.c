@@ -6551,7 +6551,7 @@ nl80211_parse_sched_scan(struct wiphy *wiphy, struct wireless_dev *wdev,
 			if (!(wiphy->features & flg)) {
 				err = -EOPNOTSUPP;
 				goto out_free;
-	}
+			}
 
 			if (wdev && wdev->current_bss) {
 				err = -EOPNOTSUPP;
@@ -8447,8 +8447,8 @@ static int nl80211_set_tx_bitrate_mask(struct sk_buff *skb,
 		return -EOPNOTSUPP;
 
 	err = nl80211_parse_tx_bitrate_mask(info, &mask);
-		if (err)
-			return err;
+	if (err)
+		return err;
 
 	return rdev_set_bitrate_mask(rdev, dev, NULL, &mask);
 }
@@ -9873,6 +9873,7 @@ static int nl80211_update_ft_ies(struct sk_buff *skb, struct genl_info *info)
 		return -EOPNOTSUPP;
 
 	if (!info->attrs[NL80211_ATTR_MDID] ||
+	    !info->attrs[NL80211_ATTR_IE] ||
 	    !is_valid_ie_attr(info->attrs[NL80211_ATTR_IE]))
 		return -EINVAL;
 

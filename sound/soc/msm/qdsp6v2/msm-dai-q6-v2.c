@@ -5580,15 +5580,15 @@ static int msm_dai_q6_dai_tdm_remove(struct snd_soc_dai *dai)
 			}
 			if (!(tdm_dai_data->afe_ebit_unsupported &&
 			     !tdm_dai_data->clk_set.clk_freq_in_hz)) {
-			rc = msm_dai_q6_tdm_set_clk(tdm_dai_data,
-				dai->id, false);
-			if (IS_ERR_VALUE(rc)) {
+				rc = msm_dai_q6_tdm_set_clk(tdm_dai_data,
+							    dai->id, false);
+				if (IS_ERR_VALUE(rc)) {
 					dev_err(dai->dev,
 					"%s: fail to disable AFE clk 0x%x\n",
 					__func__, dai->id);
+				}
 			}
 		}
-	}
 	}
 	}
 
@@ -6081,36 +6081,36 @@ static int msm_dai_q6_tdm_prepare(struct snd_pcm_substream *substream,
 			DSP will monitor the clk count. */
 			if (!(dai_data->afe_ebit_unsupported &&
 			      !dai_data->clk_set.clk_freq_in_hz)) {
-			rc = msm_dai_q6_tdm_set_clk(dai_data,
-				dai->id, true);
-			if (IS_ERR_VALUE(rc)) {
+				rc = msm_dai_q6_tdm_set_clk(dai_data,
+					dai->id, true);
+				if (IS_ERR_VALUE(rc)) {
 					dev_err(dai->dev,
 						"%s:AFE CLK enable fail 0x%x\n",
-					__func__, dai->id);
-				goto rtn;
-			}
+						__func__, dai->id);
+					goto rtn;
+				}
 			}
 			}
 			if (dai_data->num_group_ports > 1) {
 				dev_dbg(dai->dev, "%s:enable afe group\n",
 					__func__);
-			rc = afe_port_group_enable(group_id,
-				&dai_data->group_cfg, true);
-			if (IS_ERR_VALUE(rc)) {
+				rc = afe_port_group_enable(group_id,
+					&dai_data->group_cfg, true);
+				if (IS_ERR_VALUE(rc)) {
 					dev_err(dai->dev,
 						"%s:failed to enable grp %x\n",
-					__func__, group_id);
-				goto rtn;
+						__func__, group_id);
+					goto rtn;
+				}
 			}
-		}
 		}
 		/*
 		* 8909 HW and 9x50 HW have a dependency where for Rx/Tx to
 		* work in TDM mode
-		 * We need to start a Tx or Rx port in the same group.
-		 * Hence for BG use TDM_TX when a RX session is requested and
-		 * use TDM_RX port when a TX session is requested as these ports
-		 * are unused as of now.
+		* We need to start a Tx or Rx port in the same group.
+		* Hence for BG use TDM_TX when a RX session is requested and
+		* use TDM_RX port when a TX session is requested as these ports
+		* are unused as of now.
 		*/
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 			prim_port_id = dai->id;
@@ -6206,8 +6206,8 @@ static int msm_dai_q6_tdm_prepare(struct snd_pcm_substream *substream,
 					NULL, false);
 				if (!(dai_data->afe_ebit_unsupported &&
 				      !dai_data->clk_set.clk_freq_in_hz))
-				msm_dai_q6_tdm_set_clk(dai_data,
-					dai->id, false);
+					msm_dai_q6_tdm_set_clk(dai_data,
+						dai->id, false);
 			}
 			dev_err(dai->dev, "%s: open AFE port 0x%x\n",
 				__func__, prim_port_id);
@@ -6365,14 +6365,14 @@ static void msm_dai_q6_tdm_shutdown(struct snd_pcm_substream *substream,
 			}
 			if (!(dai_data->afe_ebit_unsupported &&
 				!dai_data->clk_set.clk_freq_in_hz)) {
-			rc = msm_dai_q6_tdm_set_clk(dai_data,
-				dai->id, false);
-			if (IS_ERR_VALUE(rc)) {
+				rc = msm_dai_q6_tdm_set_clk(dai_data,
+							    dai->id, false);
+				if (IS_ERR_VALUE(rc)) {
 					dev_err(dai->dev,
 					"%s: fail to disable AFE clk 0x%x\n",
 					__func__, dai->id);
+				}
 			}
-		}
 		}
 		if ((dai_data->num_group_ports > 1) &&
 		    (dai_data->sec_port_enable)) {

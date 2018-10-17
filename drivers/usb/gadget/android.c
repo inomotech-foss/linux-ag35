@@ -562,7 +562,7 @@ static int android_enable(struct android_dev *dev)
 
 		/* Userspace UVC driver will trigger connect for video */
 		if (!video_enabled)
-		usb_gadget_connect(cdev->gadget);
+			usb_gadget_connect(cdev->gadget);
 		else
 			pr_debug("defer gadget connect until usersapce opens video device\n");
 	}
@@ -582,13 +582,13 @@ static void android_disable(struct android_dev *dev)
 			do_put = true;
 		}
 		if (gadget_is_dwc3(cdev->gadget)) {
-		/* Cancel pending control requests */
-		usb_ep_dequeue(cdev->gadget->ep0, cdev->req);
+			/* Cancel pending control requests */
+			usb_ep_dequeue(cdev->gadget->ep0, cdev->req);
 
-		list_for_each_entry(conf, &dev->configs, list_item)
-			usb_remove_config(cdev, &conf->usb_config);
-		usb_gadget_disconnect(cdev->gadget);
-		dev->last_disconnect = ktime_get();
+			list_for_each_entry(conf, &dev->configs, list_item)
+				usb_remove_config(cdev, &conf->usb_config);
+			usb_gadget_disconnect(cdev->gadget);
+			dev->last_disconnect = ktime_get();
 		} else {
 			usb_gadget_disconnect(cdev->gadget);
 			dev->last_disconnect = ktime_get();
@@ -769,7 +769,7 @@ static int functionfs_ready_callback(struct ffs_data *ffs)
 	if (config->enabled && dev)
 		android_enable(dev);
 
-		mutex_unlock(&dev->mutex);
+	mutex_unlock(&dev->mutex);
 	return 0;
 }
 
@@ -2249,11 +2249,14 @@ static int serial_function_bind_config(struct android_usb_function *f,
 		goto bind_config;
 
 	if (!transports_initialized) {
-	err = gport_setup(c);
-	if (err) {
-		pr_err("serial: Cannot setup transports");
-		gserial_deinit_port();
-		goto out;
+		err = gport_setup(c);
+		if (err) {
+			pr_err("serial: Cannot setup transports");
+			gserial_deinit_port();
+			goto out;
+		}
+		/* transports are initialized once and shared across configs */
+		transports_initialized = true;
 	}
 		/* transports are initialized once and shared across configs */
 		transports_initialized = true;

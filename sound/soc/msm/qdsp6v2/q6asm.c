@@ -1337,6 +1337,12 @@ int q6asm_audio_client_buf_alloc_contiguous(unsigned int dir,
 		pr_err("%s: buffer already allocated\n", __func__);
 		return 0;
 	}
+
+	if (bufcnt == 0) {
+		pr_err("%s: invalid buffer count\n", __func__);
+		return -EINVAL;
+	}
+
 	mutex_lock(&ac->cmd_lock);
 	buf = kzalloc(((sizeof(struct audio_buffer))*bufcnt),
 			GFP_KERNEL);
@@ -1795,9 +1801,9 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 			} else {
 				if (atomic_read(&ac->cmd_state) &&
 					wakeup_flag) {
-				atomic_set(&ac->cmd_state, 0);
-				wake_up(&ac->cmd_wait);
-			}
+					atomic_set(&ac->cmd_state, 0);
+					wake_up(&ac->cmd_wait);
+				}
 			}
 			if (ac->cb)
 				ac->cb(data->opcode, data->token,
@@ -2602,7 +2608,7 @@ fail_cmd:
 }
 
 static int __q6asm_open_write(struct audio_client *ac, uint32_t format,
-				uint16_t bits_per_sample, uint32_t stream_id,
+			      uint16_t bits_per_sample, uint32_t stream_id,
 			      bool is_gapless_mode,
 			      uint32_t pcm_format_block_ver)
 {
@@ -2750,7 +2756,7 @@ int q6asm_open_write(struct audio_client *ac, uint32_t format)
 }
 
 int q6asm_open_write_v2(struct audio_client *ac, uint32_t format,
-		uint16_t bits_per_sample)
+			uint16_t bits_per_sample)
 {
 	return __q6asm_open_write(ac, format, bits_per_sample,
 				  ac->stream_id, false /*gapless*/,
@@ -2790,8 +2796,8 @@ int q6asm_open_write_v4(struct audio_client *ac, uint32_t format,
 EXPORT_SYMBOL(q6asm_open_write_v4);
 
 int q6asm_stream_open_write_v2(struct audio_client *ac, uint32_t format,
-				uint16_t bits_per_sample, int32_t stream_id,
-				bool is_gapless_mode)
+			       uint16_t bits_per_sample, int32_t stream_id,
+			       bool is_gapless_mode)
 {
 	return __q6asm_open_write(ac, format, bits_per_sample,
 				  stream_id, is_gapless_mode,
@@ -3071,30 +3077,30 @@ int q6asm_open_loopback_v2(struct audio_client *ac, uint16_t bits_per_sample)
 	} else {/*if(ac->perf_mode == LEGACY_PCM_MODE)*/
 		struct asm_stream_cmd_open_loopback_v2 open;
 
-	q6asm_add_hdr(ac, &open.hdr, sizeof(open), TRUE);
-	atomic_set(&ac->cmd_state, -1);
-	open.hdr.opcode = ASM_STREAM_CMD_OPEN_LOOPBACK_V2;
+		q6asm_add_hdr(ac, &open.hdr, sizeof(open), TRUE);
+		atomic_set(&ac->cmd_state, -1);
+		open.hdr.opcode = ASM_STREAM_CMD_OPEN_LOOPBACK_V2;
 
-	open.mode_flags = 0;
-	open.src_endpointype = 0;
-	open.sink_endpointype = 0;
-	/* source endpoint : matrix */
-	open.postprocopo_id = q6asm_get_asm_topology_cal();
+		open.mode_flags = 0;
+		open.src_endpointype = 0;
+		open.sink_endpointype = 0;
+		/* source endpoint : matrix */
+		open.postprocopo_id = q6asm_get_asm_topology_cal();
 
-	ac->app_type = q6asm_get_asm_app_type_cal();
-	ac->topology = open.postprocopo_id;
-	open.bits_per_sample = bits_per_sample;
-	open.reserved = 0;
+		ac->app_type = q6asm_get_asm_app_type_cal();
+		ac->topology = open.postprocopo_id;
+		open.bits_per_sample = bits_per_sample;
+		open.reserved = 0;
 		pr_debug("%s: opening a loopback_v2 with mode_flags =[%d] session[%d]\n",
 				__func__, open.mode_flags, ac->session);
 
-	rc = apr_send_pkt(ac->apr, (uint32_t *) &open);
-	if (rc < 0) {
+		rc = apr_send_pkt(ac->apr, (uint32_t *) &open);
+		if (rc < 0) {
 			pr_err("%s: open failed op[0x%x]rc[%d]\n",
 					__func__, open.hdr.opcode, rc);
-		rc = -EINVAL;
-		goto fail_cmd;
-	}
+			rc = -EINVAL;
+			goto fail_cmd;
+		}
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
 			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
@@ -6445,7 +6451,7 @@ int q6asm_set_multich_gain(struct audio_client *ac, uint32_t channels,
 	if (atomic_read(&ac->cmd_state_pp) > 0) {
 		pr_err("%s: DSP returned error[%d] , set-params paramid[0x%x]\n",
 		       __func__, atomic_read(&ac->cmd_state_pp),
-					multich_gain.data.param_id);
+		       multich_gain.data.param_id);
 		rc = -EINVAL;
 		goto done;
 	}
@@ -7195,7 +7201,7 @@ int q6asm_async_read(struct audio_client *ac,
 			lbuf_phys_addr = param->paddr -
 				 sizeof(struct snd_codec_metadata);
 		else
-		lbuf_phys_addr = param->paddr;
+			lbuf_phys_addr = param->paddr;
 		dir = OUT;
 	}
 
@@ -8075,7 +8081,7 @@ int q6asm_get_asm_topology(int session_id)
 	}
 	if (session[session_id].ac == NULL) {
 		pr_err("%s: session not created for session id = %d\n",
-			__func__, session_id);
+		       __func__, session_id);
 		goto done;
 	}
 	topology = (session[session_id].ac)->topology;
@@ -8093,7 +8099,7 @@ int q6asm_get_asm_app_type(int session_id)
 	}
 	if (session[session_id].ac == NULL) {
 		pr_err("%s: session not created for session id = %d\n",
-			__func__, session_id);
+		       __func__, session_id);
 		goto done;
 	}
 	app_type = (session[session_id].ac)->app_type;

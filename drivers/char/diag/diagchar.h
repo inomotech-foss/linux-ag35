@@ -59,11 +59,11 @@
 #define DIAG_CTRL_MSG_F3_MASK	11
 #define CONTROL_CHAR	0x7E
 
-#define DIAG_CON_APSS (0x0001)	/* Bit mask for APSS */
-#define DIAG_CON_MPSS (0x0002)	/* Bit mask for MPSS */
-#define DIAG_CON_LPASS (0x0004)	/* Bit mask for LPASS */
-#define DIAG_CON_WCNSS (0x0008)	/* Bit mask for WCNSS */
-#define DIAG_CON_SENSORS (0x0010) /* Bit mask for Sensors */
+#define DIAG_CON_APSS		(0x0001)	/* Bit mask for APSS */
+#define DIAG_CON_MPSS		(0x0002)	/* Bit mask for MPSS */
+#define DIAG_CON_LPASS		(0x0004)	/* Bit mask for LPASS */
+#define DIAG_CON_WCNSS		(0x0008)	/* Bit mask for WCNSS */
+#define DIAG_CON_SENSORS	(0x0010)	/* Bit mask for Sensors */
 #define DIAG_CON_NONE		(0x0000)	/* Bit mask for No SS*/
 #define DIAG_CON_ALL		(DIAG_CON_APSS | DIAG_CON_MPSS \
 				| DIAG_CON_LPASS | DIAG_CON_WCNSS \
@@ -411,6 +411,7 @@ struct diag_md_session_t {
 	int pid;
 	int peripheral_mask;
 	uint8_t hdlc_disabled;
+	uint8_t msg_mask_tbl_count;
 	struct timer_list hdlc_reset_timer;
 	struct diag_mask_info *msg_mask;
 	struct diag_mask_info *log_mask;

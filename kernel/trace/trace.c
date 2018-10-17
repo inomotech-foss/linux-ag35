@@ -1030,6 +1030,12 @@ update_max_tr(struct trace_array *tr, struct task_struct *tsk, int cpu)
 
 	arch_spin_lock(&tr->max_lock);
 
+	/* Inherit the recordable setting from trace_buffer */
+	if (ring_buffer_record_is_set_on(tr->trace_buffer.buffer))
+		ring_buffer_record_on(tr->max_buffer.buffer);
+	else
+		ring_buffer_record_off(tr->max_buffer.buffer);
+
 	buf = tr->trace_buffer.buffer;
 	tr->trace_buffer.buffer = tr->max_buffer.buffer;
 	tr->max_buffer.buffer = buf;
@@ -2904,8 +2910,8 @@ void trace_default_header(struct seq_file *m)
 			if (trace_flags & TRACE_ITER_IRQ_INFO)
 				print_func_help_header_irq(iter->trace_buffer,
 								 m);
-				else
-					print_func_help_header(iter->trace_buffer, m);
+			else
+				print_func_help_header(iter->trace_buffer, m);
 		}
 	}
 }
@@ -4820,7 +4826,7 @@ static ssize_t tracing_splice_read_pipe(struct file *filp,
 	spd.nr_pages = i;
 
 	if (i)
-	ret = splice_to_pipe(pipe, &spd);
+		ret = splice_to_pipe(pipe, &spd);
 	else
 		ret = 0;
 out:

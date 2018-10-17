@@ -535,7 +535,7 @@ int mdss_mdp_overlay_setup_scaling(struct mdss_mdp_pipe *pipe)
 	mdata = mdss_mdp_get_mdata();
 	if (pipe->scaler.enable) {
 		if (!test_bit(MDSS_CAPS_QSEED3, mdata->mdss_caps_map))
-		rc = __mdss_mdp_validate_pxl_extn(pipe);
+			rc = __mdss_mdp_validate_pxl_extn(pipe);
 		return rc;
 	}
 
@@ -570,7 +570,7 @@ int mdss_mdp_overlay_setup_scaling(struct mdss_mdp_pipe *pipe)
 	if (test_bit(MDSS_CAPS_QSEED3, mdata->mdss_caps_map))
 		mdss_mdp_pipe_calc_qseed3_cfg(pipe);
 	else
-	mdss_mdp_pipe_calc_pixel_extn(pipe);
+		mdss_mdp_pipe_calc_pixel_extn(pipe);
 
 	return rc;
 }
@@ -1293,10 +1293,10 @@ static void mdss_mdp_overlay_cleanup(struct msm_fb_data_type *mfd,
 			 * track only RECT0, since at any given point there
 			 * can only be RECT0 only or RECT0 + RECT1
 			 */
-		ctl->mixer_left->next_pipe_map &= ~pipe->ndx;
-		if (ctl->mixer_right)
-			ctl->mixer_right->next_pipe_map &= ~pipe->ndx;
-	}
+			ctl->mixer_left->next_pipe_map &= ~pipe->ndx;
+			if (ctl->mixer_right)
+				ctl->mixer_right->next_pipe_map &= ~pipe->ndx;
+		}
 	}
 	mutex_unlock(&mdp5_data->list_lock);
 }
@@ -1363,15 +1363,15 @@ int mdss_mdp_overlay_start(struct msm_fb_data_type *mfd)
 		if (mdp5_data->allow_kickoff) {
 			mdp5_data->allow_kickoff = false;
 		} else {
-		mutex_lock(&mdp5_data->list_lock);
-		rc = list_empty(&mdp5_data->pipes_used);
-		mutex_unlock(&mdp5_data->list_lock);
-		if (rc) {
-			pr_debug("empty kickoff on fb%d during cont splash\n",
+			mutex_lock(&mdp5_data->list_lock);
+			rc = list_empty(&mdp5_data->pipes_used);
+			mutex_unlock(&mdp5_data->list_lock);
+			if (rc) {
+				pr_debug("empty kickoff on fb%d during cont splash\n",
 					mfd->index);
 				return -EPERM;
+			}
 		}
-	}
 	} else if (mdata->handoff_pending) {
 		pr_warn("fb%d: commit while splash handoff pending\n",
 				mfd->index);
@@ -1755,7 +1755,7 @@ end:
 
 int mdss_mode_switch(struct msm_fb_data_type *mfd, u32 mode)
 {
-	struct mdss_rect l_roi, r_roi;
+	struct mdss_rect l_roi  = {0}, r_roi = {0};
 	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
 	struct mdss_mdp_ctl *sctl;
@@ -3002,7 +3002,7 @@ int mdss_mdp_overlay_kickoff(struct msm_fb_data_type *mfd,
 		ret = mdss_mdp_secure_display_ctrl(mdp5_data->mdata, 0);
 		if (!ret)
 			mdp5_data->sd_enabled = 0;
-		}
+	}
 
 	mdss_fb_update_notify_update(mfd);
 commit_fail:
@@ -3768,8 +3768,8 @@ static void dfps_update_panel_params(struct mdss_panel_data *pdata,
 
 		/* update panel info */
 		if (pdata->panel_info.default_fps > new_fps)
-		pdata->panel_info.lcdc.h_front_porch =
-			pdata->panel_info.saved_fporch + add_h_pixels;
+			pdata->panel_info.lcdc.h_front_porch =
+				pdata->panel_info.saved_fporch + add_h_pixels;
 		else
 			pdata->panel_info.lcdc.h_front_porch =
 				pdata->panel_info.saved_fporch - add_h_pixels;
@@ -4974,7 +4974,7 @@ static int mdss_bl_scale_config(struct msm_fb_data_type *mfd,
 
 	/* Update current backlight to use new scaling, if it is not zero */
 	if (curr_bl)
-	mdss_fb_set_backlight(mfd, curr_bl);
+		mdss_fb_set_backlight(mfd, curr_bl);
 
 	mutex_unlock(&mfd->bl_lock);
 	return ret;
@@ -6735,8 +6735,8 @@ int mdss_mdp_overlay_init(struct msm_fb_data_type *mfd)
 	if ((mfd->index == 0) && (mfd->panel_info->type != WRITEBACK_PANEL)) {
 		mdp5_data->cpu_pm_hdl = add_event_timer(mdss_irq->irq,
 				mdss_mdp_ctl_event_timer, (void *)mdp5_data);
-	if (!mdp5_data->cpu_pm_hdl)
-		pr_warn("%s: unable to add event timer\n", __func__);
+		if (!mdp5_data->cpu_pm_hdl)
+			pr_warn("%s: unable to add event timer\n", __func__);
 	}
 
 	if (mfd->panel_info->cont_splash_enabled) {

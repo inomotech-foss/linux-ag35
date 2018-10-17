@@ -234,9 +234,9 @@ static int mdss_mdp_parse_dt_wb(struct platform_device *pdev);
 static int mdss_mdp_parse_dt_ctl(struct platform_device *pdev);
 static int mdss_mdp_parse_dt_video_intf(struct platform_device *pdev);
 static int mdss_mdp_parse_dt_handler(struct platform_device *pdev,
-				      char *prop_name, u32 *offsets, int len);
+				char *prop_name, u32 *offsets, int len);
 static int mdss_mdp_parse_dt_prop_len(struct platform_device *pdev,
-				       char *prop_name);
+				char *prop_name);
 static int mdss_mdp_parse_dt_smp(struct platform_device *pdev);
 static int mdss_mdp_parse_dt_prefill(struct platform_device *pdev);
 static int mdss_mdp_parse_dt_misc(struct platform_device *pdev);
@@ -782,7 +782,7 @@ void mdss_mdp_irq_clear(struct mdss_data_type *mdata,
 
 int mdss_mdp_irq_enable(u32 intr_type, u32 intf_num)
 {
-	int irq_idx, idx;
+	int irq_idx = 0;
 	unsigned long irq_flags;
 	int ret = 0;
 	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
@@ -801,7 +801,7 @@ int mdss_mdp_irq_enable(u32 intr_type, u32 intf_num)
 	spin_lock_irqsave(&mdp_lock, irq_flags);
 	if (mdata->mdp_irq_mask[irq.reg_idx] & irq.irq_mask) {
 		pr_warn("MDSS MDP IRQ-0x%x is already set, mask=%x\n",
-				irq.irq_mask, mdata->mdp_irq_mask[idx]);
+				irq.irq_mask, mdata->mdp_irq_mask[irq.reg_idx]);
 		ret = -EBUSY;
 	} else {
 		pr_debug("MDP IRQ mask old=%x new=%x\n",
@@ -1600,7 +1600,7 @@ static int mdss_mdp_gdsc_notifier_call(struct notifier_block *self,
 		 * hence we don't need to restore sec configuration.
 		 */
 		if (!mdss_mdp_req_init_restore_cfg(mdata))
-		__mdss_restore_sec_cfg(mdata);
+			__mdss_restore_sec_cfg(mdata);
 	} else if (event & REGULATOR_EVENT_PRE_DISABLE) {
 		pr_debug("mdss gdsc is getting disabled\n");
 		/* halt the vbif transactions */
@@ -1719,9 +1719,9 @@ static int mdss_mdp_debug_init(struct platform_device *pdev,
 		"qcom,regs-dump-names-mdp", "qcom,regs-dump-xin-id-mdp");
 
 	if (mdata->vbif_io.base)
-	mdss_debug_register_io("vbif", &mdata->vbif_io, NULL);
+		mdss_debug_register_io("vbif", &mdata->vbif_io, NULL);
 	if (mdata->vbif_nrt_io.base)
-	mdss_debug_register_io("vbif_nrt", &mdata->vbif_nrt_io, NULL);
+		mdss_debug_register_io("vbif_nrt", &mdata->vbif_nrt_io, NULL);
 
 	return 0;
 }
@@ -2251,7 +2251,7 @@ static int mdss_mdp_get_cmdline_config(struct platform_device *pdev)
 	if (rc)
 		pr_warn("unable to parse device tree for pan intf\n");
 
-		pan_cfg->init_done = true;
+	pan_cfg->init_done = true;
 
 	return 0;
 }
@@ -3226,21 +3226,21 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 			&mdata->rgb_pipes, mdata->nrgb_pipes,
 			mdata->nvig_pipes);
 	if (IS_ERR_VALUE(rc))
-			goto parse_fail;
+		goto parse_fail;
 	mdata->nrgb_pipes = rc;
 
 	rc = mdss_mdp_parse_dt_pipe_helper(pdev, MDSS_MDP_PIPE_TYPE_DMA, "dma",
 			&mdata->dma_pipes, mdata->ndma_pipes,
 			mdata->nvig_pipes + mdata->nrgb_pipes);
 	if (IS_ERR_VALUE(rc))
-			goto parse_fail;
+		goto parse_fail;
 	mdata->ndma_pipes = rc;
 
 	rc = mdss_mdp_parse_dt_pipe_helper(pdev, MDSS_MDP_PIPE_TYPE_CURSOR,
 			"cursor", &mdata->cursor_pipes, mdata->ncursor_pipes,
 			0);
 	if (IS_ERR_VALUE(rc))
-			goto parse_fail;
+		goto parse_fail;
 	mdata->ncursor_pipes = rc;
 
 	rc = 0;
@@ -3249,15 +3249,15 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 		&sw_reset_offset, 1);
 	if (sw_reset_offset) {
 		if (mdata->vig_pipes)
-		mdss_mdp_parse_dt_pipe_sw_reset(pdev, sw_reset_offset,
+			mdss_mdp_parse_dt_pipe_sw_reset(pdev, sw_reset_offset,
 				"qcom,mdss-pipe-vig-sw-reset-map",
 				mdata->vig_pipes, mdata->nvig_pipes);
 		if (mdata->rgb_pipes)
-		mdss_mdp_parse_dt_pipe_sw_reset(pdev, sw_reset_offset,
+			mdss_mdp_parse_dt_pipe_sw_reset(pdev, sw_reset_offset,
 				"qcom,mdss-pipe-rgb-sw-reset-map",
 				mdata->rgb_pipes, mdata->nrgb_pipes);
 		if (mdata->dma_pipes)
-		mdss_mdp_parse_dt_pipe_sw_reset(pdev, sw_reset_offset,
+			mdss_mdp_parse_dt_pipe_sw_reset(pdev, sw_reset_offset,
 				"qcom,mdss-pipe-dma-sw-reset-map",
 				mdata->dma_pipes, mdata->ndma_pipes);
 	}
@@ -3266,16 +3266,16 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 		"qcom,mdss-has-panic-ctrl");
 	if (mdata->has_panic_ctrl) {
 		if (mdata->vig_pipes)
-		mdss_mdp_parse_dt_pipe_panic_ctrl(pdev,
-			"qcom,mdss-pipe-vig-panic-ctrl-offsets",
+			mdss_mdp_parse_dt_pipe_panic_ctrl(pdev,
+				"qcom,mdss-pipe-vig-panic-ctrl-offsets",
 				mdata->vig_pipes, mdata->nvig_pipes);
 		if (mdata->rgb_pipes)
-		mdss_mdp_parse_dt_pipe_panic_ctrl(pdev,
-			"qcom,mdss-pipe-rgb-panic-ctrl-offsets",
+			mdss_mdp_parse_dt_pipe_panic_ctrl(pdev,
+				"qcom,mdss-pipe-rgb-panic-ctrl-offsets",
 				mdata->rgb_pipes, mdata->nrgb_pipes);
 		if (mdata->dma_pipes)
-		mdss_mdp_parse_dt_pipe_panic_ctrl(pdev,
-			"qcom,mdss-pipe-dma-panic-ctrl-offsets",
+			mdss_mdp_parse_dt_pipe_panic_ctrl(pdev,
+				"qcom,mdss-pipe-dma-panic-ctrl-offsets",
 				mdata->dma_pipes, mdata->ndma_pipes);
 	}
 
@@ -4259,8 +4259,8 @@ static int mdss_mdp_parse_dt_ppb_off(struct platform_device *pdev)
 
 		for (index = 0; index <  mdata->nppb_cfg; index++)
 			mdata->ppb_cfg[index] = be32_to_cpu(arr[index]);
-		}
-		return 0;
+	}
+	return 0;
 }
 
 #ifdef CONFIG_MSM_BUS_SCALING

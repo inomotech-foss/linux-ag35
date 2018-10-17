@@ -76,13 +76,15 @@ static inline u64 fudge_factor(u64 val, u32 numer, u32 denom)
 	u64 result = val;
 
 	if (val) {
-		u64 temp = -1UL;
+		u64 temp = U64_MAX;
 
 		do_div(temp, val);
 		if (temp > numer) {
 			/* no overflow, so we can do the operation*/
 			result = (val * (u64)numer);
-	do_div(result, denom);
+			do_div(result, denom);
+		} else {
+			pr_warn("Overflow, skip fudge factor\n");
 		}
 	}
 	return result;
@@ -933,7 +935,7 @@ static u32 mdss_mdp_calc_prefill_line_time(struct mdss_mdp_ctl *ctl,
 {
 	u32 prefill_us = 0;
 	u32 prefill_amortized = 0;
-	struct mdss_data_type *mdata;
+	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
 	struct mdss_mdp_mixer *mixer;
 	struct mdss_panel_info *pinfo;
 	u32 fps, v_total;
@@ -1238,7 +1240,7 @@ static void mdss_mdp_perf_calc_mixer(struct mdss_mdp_mixer *mixer,
 	memset(perf, 0, sizeof(*perf));
 
 	if (!mixer->rotator_mode) {
-			pinfo = &mixer->ctl->panel_data->panel_info;
+		pinfo = &mixer->ctl->panel_data->panel_info;
 		if (!pinfo) {
 			pr_err("pinfo is NULL\n");
 			goto exit;
@@ -1258,13 +1260,13 @@ static void mdss_mdp_perf_calc_mixer(struct mdss_mdp_mixer *mixer,
 		}
 
 		/* For writeback panel, mixer type can be other than intf */
-			if (pinfo->type == WRITEBACK_PANEL) {
-				fmt = mdss_mdp_get_format_params(
-					mixer->ctl->dst_format);
-				if (fmt)
-					bpp = fmt->bpp;
-				pinfo = NULL;
-			}
+		if (pinfo->type == WRITEBACK_PANEL) {
+			fmt = mdss_mdp_get_format_params(
+				mixer->ctl->dst_format);
+			if (fmt)
+				bpp = fmt->bpp;
+			pinfo = NULL;
+		}
 
 		perf->mdp_clk_rate = mixer->width * v_total * fps;
 		perf->mdp_clk_rate =
@@ -3515,44 +3517,44 @@ int mdss_mdp_ctl_setup(struct mdss_mdp_ctl *ctl)
 	if (ctl->mfd->split_mode == MDP_DUAL_LM_DUAL_DISPLAY) {
 		pr_debug("dual display detected\n");
 	} else {
-	if (split_fb)
-		width = ctl->mfd->split_fb_right;
+		if (split_fb)
+			width = ctl->mfd->split_fb_right;
 
-	if (width < ctl->width) {
-		if (ctl->mixer_right == NULL) {
-			ctl->mixer_right = mdss_mdp_mixer_alloc(ctl,
+		if (width < ctl->width) {
+			if (ctl->mixer_right == NULL) {
+				ctl->mixer_right = mdss_mdp_mixer_alloc(ctl,
 					MDSS_MDP_MIXER_TYPE_INTF, true, 0);
-			if (!ctl->mixer_right) {
-				pr_err("unable to allocate right mixer\n");
-				if (ctl->mixer_left)
+				if (!ctl->mixer_right) {
+					pr_err("unable to allocate right mixer\n");
+					if (ctl->mixer_left)
 						mdss_mdp_mixer_free(
 							ctl->mixer_left);
-				return -ENOMEM;
+					return -ENOMEM;
+				}
 			}
-		}
-		ctl->mixer_right->is_right_mixer = true;
-		ctl->mixer_right->width = width;
-		ctl->mixer_right->height = height;
-		ctl->mixer_right->roi = (struct mdss_rect)
+			ctl->mixer_right->is_right_mixer = true;
+			ctl->mixer_right->width = width;
+			ctl->mixer_right->height = height;
+			ctl->mixer_right->roi = (struct mdss_rect)
 						{0, 0, width, height};
-		ctl->mixer_right->valid_roi = true;
-		ctl->mixer_right->roi_changed = true;
-	} else if (ctl->mixer_right) {
-		ctl->mixer_right->valid_roi = false;
-		ctl->mixer_right->roi_changed = false;
-		mdss_mdp_mixer_free(ctl->mixer_right);
-		ctl->mixer_right = NULL;
-	}
+			ctl->mixer_right->valid_roi = true;
+			ctl->mixer_right->roi_changed = true;
+		} else if (ctl->mixer_right) {
+			ctl->mixer_right->valid_roi = false;
+			ctl->mixer_right->roi_changed = false;
+			mdss_mdp_mixer_free(ctl->mixer_right);
+			ctl->mixer_right = NULL;
+		}
 
-	if (ctl->mixer_right) {
-		if (!is_dsc_compression(pinfo) ||
-		    (pinfo->dsc_enc_total == 1))
-			ctl->opmode |= MDSS_MDP_CTL_OP_PACK_3D_ENABLE |
+		if (ctl->mixer_right) {
+			if (!is_dsc_compression(pinfo) ||
+				(pinfo->dsc_enc_total == 1))
+				ctl->opmode |= MDSS_MDP_CTL_OP_PACK_3D_ENABLE |
 				       MDSS_MDP_CTL_OP_PACK_3D_H_ROW_INT;
-	} else {
-		ctl->opmode &= ~(MDSS_MDP_CTL_OP_PACK_3D_ENABLE |
+		} else {
+			ctl->opmode &= ~(MDSS_MDP_CTL_OP_PACK_3D_ENABLE |
 				  MDSS_MDP_CTL_OP_PACK_3D_H_ROW_INT);
-	}
+		}
 	}
 
 	rc = mdss_mdp_pp_default_overlay_config(ctl->mfd, ctl->panel_data,
@@ -3645,10 +3647,10 @@ skip_intf_reconfig:
 		 * Handles MDP_SPLIT_MODE_NONE, MDP_DUAL_LM_DUAL_DISPLAY and
 		 * MDP_PINGPONG_SPLIT case.
 		 */
-	if (ctl->mixer_left) {
-		ctl->mixer_left->width = ctl->width;
-		ctl->mixer_left->height = ctl->height;
-	}
+		if (ctl->mixer_left) {
+			ctl->mixer_left->width = ctl->width;
+			ctl->mixer_left->height = ctl->height;
+		}
 	}
 	ctl->roi = (struct mdss_rect) {0, 0, ctl->width, ctl->height};
 
@@ -3992,7 +3994,7 @@ static void mdss_mdp_ctl_restore_sub(struct mdss_mdp_ctl *ctl)
 			 * handled in mdss_mode_switch() function.
 			 */
 			if (ctl->pending_mode_switch != SWITCH_RESOLUTION)
-			mdss_mdp_ctl_dsc_setup(ctl,
+				mdss_mdp_ctl_dsc_setup(ctl,
 					&ctl->panel_data->panel_info);
 		} else if (ctl->panel_data->panel_info.compression_mode ==
 				COMPRESSION_FBC) {
@@ -4125,9 +4127,9 @@ int mdss_mdp_ctl_start(struct mdss_mdp_ctl *ctl, bool handoff)
 	}
 
 	if (mdss_mdp_ctl_is_power_off(ctl)) {
-	ret = mdss_mdp_ctl_setup(ctl);
-	if (ret)
-		return ret;
+		ret = mdss_mdp_ctl_setup(ctl);
+		if (ret)
+			return ret;
 	}
 
 	sctl = mdss_mdp_get_split_ctl(ctl);
@@ -4429,9 +4431,9 @@ void mdss_mdp_set_roi(struct mdss_mdp_ctl *ctl,
 	    !ctl->panel_data->panel_info.partial_update_enabled) {
 
 		if (ctl->mixer_left) {
-		*l_roi = (struct mdss_rect) {0, 0,
-				ctl->mixer_left->width,
-				ctl->mixer_left->height};
+			*l_roi = (struct mdss_rect) {0, 0,
+					ctl->mixer_left->width,
+					ctl->mixer_left->height};
 		}
 
 		if (ctl->mixer_right) {
@@ -5207,7 +5209,7 @@ int mdss_mdp_mixer_pipe_unstage(struct mdss_mdp_pipe *pipe,
 			return 0;
 	}
 
-		mixer->params_changed++;
+	mixer->params_changed++;
 	mixer->stage_pipe[i] = NULL;
 
 	return 0;
@@ -5663,10 +5665,10 @@ int mdss_mdp_display_commit(struct mdss_mdp_ctl *ctl, void *arg,
 	mdss_mdp_ctl_write(ctl, MDSS_MDP_REG_CTL_FLUSH, ctl_flush_bits);
 	if (sctl) {
 		if (sctl_flush_bits) {
-		mdss_mdp_ctl_write(sctl, MDSS_MDP_REG_CTL_FLUSH,
-			sctl_flush_bits);
-		sctl->flush_bits = 0;
-	}
+			mdss_mdp_ctl_write(sctl, MDSS_MDP_REG_CTL_FLUSH,
+				sctl_flush_bits);
+			sctl->flush_bits = 0;
+		}
 		sctl->commit_in_progress = false;
 	}
 	ctl->commit_in_progress = false;

@@ -965,11 +965,11 @@ static void neigh_timer_handler(unsigned long arg)
 			write_unlock(&neigh->lock);
 	} else {
 		if (neigh->nud_state & (NUD_INCOMPLETE | NUD_PROBE)) {
-		neigh_probe(neigh);
-	} else {
+			neigh_probe(neigh);
+		} else {
 out:
-		write_unlock(&neigh->lock);
-	}
+			write_unlock(&neigh->lock);
+		}
 	}
 
 	if (notify)
@@ -1294,8 +1294,8 @@ struct neighbour *neigh_event_ns(struct neigh_table *tbl,
 	struct neighbour *neigh = __neigh_lookup(tbl, saddr, dev,
 						 lladdr || !dev->addr_len);
 	if (neigh) {
-				neigh_update(neigh, lladdr, NUD_STALE,
-					     NEIGH_UPDATE_F_OVERRIDE);
+		neigh_update(neigh, lladdr, NUD_STALE,
+			     NEIGH_UPDATE_F_OVERRIDE);
 		if (neigh_probe_enable) {
 			if (!(neigh->nud_state == NUD_REACHABLE)) {
 				write_lock(&neigh->lock);

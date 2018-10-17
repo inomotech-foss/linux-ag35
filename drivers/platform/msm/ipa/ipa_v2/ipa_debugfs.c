@@ -89,6 +89,7 @@ const char *ipa_event_name[] = {
 	__stringify(IPA_QUOTA_REACH),
 	__stringify(IPA_SSR_BEFORE_SHUTDOWN),
 	__stringify(IPA_SSR_AFTER_POWERUP),
+	__stringify(WLAN_FWR_SSR_BEFORE_SHUTDOWN),
 };
 
 const char *ipa_hdr_l2_type_name[] = {
@@ -856,7 +857,7 @@ static ssize_t ipa_read_flt(struct file *file, char __user *ubuf, size_t count,
 			rt_tbl = ipa_id_find(entry->rule.rt_tbl_hdl);
 			if (rt_tbl == NULL ||
 				rt_tbl->cookie != IPA_RT_TBL_COOKIE)
-				rt_tbl_idx = ~0;
+				rt_tbl_idx =  ~0;
 			else
 				rt_tbl_idx = rt_tbl->idx;
 			bitmap = entry->rule.attrib.attrib_mask;
@@ -906,7 +907,7 @@ static ssize_t ipa_read_flt(struct file *file, char __user *ubuf, size_t count,
 			pr_err("eq:%d ", eq);
 			if (eq) {
 				res = ipa_attrib_dump_eq(
-					&entry->rule.eq_attrib);
+						&entry->rule.eq_attrib);
 				if (res) {
 					IPAERR_RL("failed read attrib eq\n");
 					goto bail;
@@ -1899,7 +1900,7 @@ static ssize_t ipa_enable_ipc_low(struct file *file,
 				ipc_log_context_create(IPA_IPC_LOG_PAGES,
 				"ipa_low", 0);
 			if (ipa_ipc_low_buff == NULL)
-				IPAERR("failed to get logbuf_low\n");
+				IPADBG("failed to get logbuf_low\n");
 		}
 		ipa_ctx->logbuf_low = ipa_ipc_low_buff;
 	} else {

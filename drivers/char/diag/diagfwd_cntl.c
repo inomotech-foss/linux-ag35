@@ -123,7 +123,7 @@ void diag_notify_md_client(uint8_t peripheral, int data)
 	info.si_int = (PERIPHERAL_MASK(peripheral) | data);
 	info.si_signo = SIGCONT;
 	if (driver->md_session_map[peripheral] &&
-	    driver->md_session_map[peripheral]->task) {
+		driver->md_session_map[peripheral]->task) {
 		if (driver->md_session_map[peripheral]->pid ==
 			driver->md_session_map[peripheral]->task->tgid) {
 			DIAG_LOG(DIAG_DEBUG_PERIPHERALS,
@@ -132,11 +132,11 @@ void diag_notify_md_client(uint8_t peripheral, int data)
 				driver->md_session_map[peripheral]->pid,
 				peripheral,
 				driver->md_session_map[peripheral]->task->tgid);
-		stat = send_sig_info(info.si_signo, &info,
-				     driver->md_session_map[peripheral]->task);
-		if (stat)
-			pr_err("diag: Err sending signal to memory device client, signal data: 0x%x, stat: %d\n",
-			       info.si_int, stat);
+			stat = send_sig_info(info.si_signo, &info,
+				driver->md_session_map[peripheral]->task);
+			if (stat)
+				pr_err("diag: Err sending signal to memory device client, signal data: 0x%x, stat: %d\n",
+					info.si_int, stat);
 		} else
 			pr_err("diag: md_session_map[%d] data is corrupted, signal data: 0x%x, stat: %d\n",
 				peripheral, info.si_int, stat);
@@ -519,7 +519,7 @@ static void process_ssid_range_report(uint8_t *buf, uint32_t len,
 		mask_ptr = (struct diag_msg_mask_t *)msg_mask.ptr;
 		found = 0;
 		for (j = 0; j < driver->msg_mask_tbl_count; j++, mask_ptr++) {
-			if (!mask_ptr || !ssid_range) {
+			if (!mask_ptr->ptr || !ssid_range) {
 				found = 1;
 				break;
 			}
@@ -591,7 +591,7 @@ static void diag_build_time_mask_update(uint8_t *buf,
 	num_items = range->ssid_last - range->ssid_first + 1;
 
 	for (i = 0; i < driver->bt_msg_mask_tbl_count; i++, build_mask++) {
-		if (!build_mask) {
+		if (!build_mask->ptr) {
 			found = 1;
 			break;
 		}

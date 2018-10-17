@@ -70,6 +70,7 @@ const char *ipa3_event_name[] = {
 	__stringify(IPA_QUOTA_REACH),
 	__stringify(IPA_SSR_BEFORE_SHUTDOWN),
 	__stringify(IPA_SSR_AFTER_POWERUP),
+	__stringify(WLAN_FWR_SSR_BEFORE_SHUTDOWN),
 };
 
 const char *ipa3_hdr_l2_type_name[] = {
@@ -804,8 +805,8 @@ static ssize_t ipa3_read_rt_hw(struct file *file, char __user *ubuf,
 			if (res) {
 				IPAERR_RL("failed read attrib eq\n");
 				goto bail;
+			}
 		}
-	}
 	}
 
 bail:
@@ -896,7 +897,7 @@ static ssize_t ipa3_read_flt(struct file *file, char __user *ubuf, size_t count,
 				rt_tbl = ipa3_id_find(entry->rule.rt_tbl_hdl);
 				if (rt_tbl == NULL ||
 					rt_tbl->cookie != IPA_RT_TBL_COOKIE)
-					rt_tbl_idx = ~0;
+					rt_tbl_idx =  ~0;
 				else
 					rt_tbl_idx = rt_tbl->idx;
 				bitmap = entry->rule.attrib.attrib_mask;
@@ -985,8 +986,8 @@ static ssize_t ipa3_read_flt_hw(struct file *file, char __user *ubuf,
 			if (res) {
 				IPAERR_RL("failed read attrib eq\n");
 				goto bail;
+			}
 		}
-	}
 	}
 bail:
 	mutex_unlock(&ipa3_ctx->lock);
@@ -1007,49 +1008,49 @@ static ssize_t ipa3_read_stats(struct file *file, char __user *ubuf,
 	for (i = 0; i < ipa3_ctx->ipa_num_pipes; i++)
 		connect |= (ipa3_ctx->ep[i].valid << i);
 
-		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-			"sw_tx=%u\n"
-			"hw_tx=%u\n"
+	nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
+		"sw_tx=%u\n"
+		"hw_tx=%u\n"
 		"tx_non_linear=%u\n"
-			"tx_compl=%u\n"
-			"wan_rx=%u\n"
-			"stat_compl=%u\n"
-			"lan_aggr_close=%u\n"
-			"wan_aggr_close=%u\n"
-			"act_clnt=%u\n"
-			"con_clnt_bmap=0x%x\n"
-			"wan_rx_empty=%u\n"
-			"wan_repl_rx_empty=%u\n"
-			"lan_rx_empty=%u\n"
-			"lan_repl_rx_empty=%u\n"
-			"flow_enable=%u\n"
-			"flow_disable=%u\n",
-			ipa3_ctx->stats.tx_sw_pkts,
-			ipa3_ctx->stats.tx_hw_pkts,
+		"tx_compl=%u\n"
+		"wan_rx=%u\n"
+		"stat_compl=%u\n"
+		"lan_aggr_close=%u\n"
+		"wan_aggr_close=%u\n"
+		"act_clnt=%u\n"
+		"con_clnt_bmap=0x%x\n"
+		"wan_rx_empty=%u\n"
+		"wan_repl_rx_empty=%u\n"
+		"lan_rx_empty=%u\n"
+		"lan_repl_rx_empty=%u\n"
+		"flow_enable=%u\n"
+		"flow_disable=%u\n",
+		ipa3_ctx->stats.tx_sw_pkts,
+		ipa3_ctx->stats.tx_hw_pkts,
 		ipa3_ctx->stats.tx_non_linear,
-			ipa3_ctx->stats.tx_pkts_compl,
-			ipa3_ctx->stats.rx_pkts,
-			ipa3_ctx->stats.stat_compl,
-			ipa3_ctx->stats.aggr_close,
-			ipa3_ctx->stats.wan_aggr_close,
-			ipa3_ctx->ipa3_active_clients.cnt,
-			connect,
-			ipa3_ctx->stats.wan_rx_empty,
-			ipa3_ctx->stats.wan_repl_rx_empty,
-			ipa3_ctx->stats.lan_rx_empty,
-			ipa3_ctx->stats.lan_repl_rx_empty,
-			ipa3_ctx->stats.flow_enable,
-			ipa3_ctx->stats.flow_disable);
-		cnt += nbytes;
+		ipa3_ctx->stats.tx_pkts_compl,
+		ipa3_ctx->stats.rx_pkts,
+		ipa3_ctx->stats.stat_compl,
+		ipa3_ctx->stats.aggr_close,
+		ipa3_ctx->stats.wan_aggr_close,
+		ipa3_ctx->ipa3_active_clients.cnt,
+		connect,
+		ipa3_ctx->stats.wan_rx_empty,
+		ipa3_ctx->stats.wan_repl_rx_empty,
+		ipa3_ctx->stats.lan_rx_empty,
+		ipa3_ctx->stats.lan_repl_rx_empty,
+		ipa3_ctx->stats.flow_enable,
+		ipa3_ctx->stats.flow_disable);
+	cnt += nbytes;
 
 	for (i = 0; i < IPAHAL_PKT_STATUS_EXCEPTION_MAX; i++) {
-			nbytes = scnprintf(dbg_buff + cnt,
-				IPA_MAX_MSG_LEN - cnt,
-				"lan_rx_excp[%u:%20s]=%u\n", i,
+		nbytes = scnprintf(dbg_buff + cnt,
+			IPA_MAX_MSG_LEN - cnt,
+			"lan_rx_excp[%u:%20s]=%u\n", i,
 			ipahal_pkt_status_exception_str(i),
-				ipa3_ctx->stats.rx_excp_pkts[i]);
-			cnt += nbytes;
-		}
+			ipa3_ctx->stats.rx_excp_pkts[i]);
+		cnt += nbytes;
+	}
 
 	return simple_read_from_buffer(ubuf, count, ppos, dbg_buff, cnt);
 }
@@ -1795,7 +1796,7 @@ static ssize_t ipa3_enable_ipc_low(struct file *file,
 					"ipa_low", 0);
 		}
 			if (ipa_ipc_low_buff == NULL)
-				IPAERR("failed to get logbuf_low\n");
+				IPADBG("failed to get logbuf_low\n");
 		ipa3_ctx->logbuf_low = ipa_ipc_low_buff;
 	} else {
 		ipa3_ctx->logbuf_low = NULL;

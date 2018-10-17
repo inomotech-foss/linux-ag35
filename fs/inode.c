@@ -1434,7 +1434,7 @@ void iput(struct inode *inode)
 {
 	if (!inode)
 		return;
-		BUG_ON(inode->i_state & I_CLEAR);
+	BUG_ON(inode->i_state & I_CLEAR);
 retry:
 	if (atomic_dec_and_lock(&inode->i_count, &inode->i_lock)) {
 		if (inode->i_nlink && (inode->i_state & I_DIRTY_TIME)) {
@@ -1445,7 +1445,7 @@ retry:
 			mark_inode_dirty_sync(inode);
 			goto retry;
 		}
-			iput_final(inode);
+		iput_final(inode);
 	}
 }
 EXPORT_SYMBOL(iput);
@@ -1845,8 +1845,14 @@ void inode_init_owner(struct inode *inode, const struct inode *dir,
 	inode->i_uid = current_fsuid();
 	if (dir && dir->i_mode & S_ISGID) {
 		inode->i_gid = dir->i_gid;
+
+		/* Directories are special, and always inherit S_ISGID */
 		if (S_ISDIR(mode))
 			mode |= S_ISGID;
+		else if ((mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP) &&
+			 !in_group_p(inode->i_gid) &&
+			 !capable_wrt_inode_uidgid(dir, CAP_FSETID))
+			mode &= ~S_ISGID;
 	} else
 		inode->i_gid = current_fsgid();
 	inode->i_mode = mode;

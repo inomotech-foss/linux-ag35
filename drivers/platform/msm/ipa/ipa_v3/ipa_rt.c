@@ -1084,6 +1084,20 @@ static int __ipa_del_rt_tbl(struct ipa3_rt_tbl *entry)
 	return 0;
 }
 
+static int __ipa_rt_validate_rule_id(u16 rule_id)
+{
+	if (!rule_id)
+		return 0;
+
+	if ((rule_id < IPA_RULE_ID_MIN) ||
+		(rule_id >= IPA_RULE_ID_MAX)) {
+		IPAERR_RL("Invalid rule_id provided 0x%x\n",
+			rule_id);
+		return -EPERM;
+	}
+
+	return 0;
+}
 static int __ipa_rt_validate_hndls(const struct ipa_rt_rule *rule,
 				struct ipa3_hdr_entry **hdr,
 				struct ipa3_hdr_proc_ctx_entry **proc_ctx)
@@ -1135,12 +1149,12 @@ static int __ipa_create_rt_entry(struct ipa3_rt_entry **entry,
 		id = rule_id;
 		(*(entry))->rule_id_valid = 1;
 	} else {
-	id = ipa3_alloc_rule_id(&tbl->rule_ids);
-	if (id < 0) {
+		id = ipa3_alloc_rule_id(&tbl->rule_ids);
+		if (id < 0) {
 			IPAERR_RL("failed to allocate rule id\n");
 			WARN_ON_RATELIMIT_IPA(1);
-		goto alloc_rule_id_fail;
-	}
+			goto alloc_rule_id_fail;
+		}
 	}
 	(*(entry))->rule_id = id;
 	(*(entry))->ipacm_installed = user;
@@ -1199,6 +1213,8 @@ static int __ipa_add_rt_rule(enum ipa_ip_type ip, const char *name,
 	if (__ipa_rt_validate_hndls(rule, &hdr, &proc_ctx))
 		goto error;
 
+	if (__ipa_rt_validate_rule_id(rule_id))
+		goto error;
 
 	tbl = __ipa_add_rt_tbl(ip, name);
 	if (tbl == NULL || (tbl->cookie != IPA_RT_TBL_COOKIE)) {
@@ -1538,7 +1554,7 @@ int __ipa3_del_rt_rule(u32 rule_hdl)
 		entry->rule_id, entry->tbl->ref_cnt);
 		/* if rule id was allocated from idr, remove it */
 	if (!entry->rule_id_valid)
-	idr_remove(&entry->tbl->rule_ids, entry->rule_id);
+		idr_remove(&entry->tbl->rule_ids, entry->rule_id);
 	if (entry->tbl->rule_cnt == 0 && entry->tbl->ref_cnt == 0) {
 		if (__ipa_del_rt_tbl(entry->tbl))
 			IPAERR_RL("fail to del RT tbl\n");
@@ -1701,21 +1717,21 @@ int ipa3_reset_rt(enum ipa_ip_type ip, bool user_only)
 
 			if (!user_only ||
 				rule->ipacm_installed) {
-			list_del(&rule->link);
-			tbl->rule_cnt--;
-			if (rule->hdr)
-				__ipa3_release_hdr(rule->hdr->id);
-			else if (rule->proc_ctx)
+				list_del(&rule->link);
+				tbl->rule_cnt--;
+				if (rule->hdr)
+					__ipa3_release_hdr(rule->hdr->id);
+				else if (rule->proc_ctx)
 					__ipa3_release_hdr_proc_ctx(
 						rule->proc_ctx->id);
-			rule->cookie = 0;
-			idr_remove(&tbl->rule_ids, rule->rule_id);
-			id = rule->id;
-			kmem_cache_free(ipa3_ctx->rt_rule_cache, rule);
+				rule->cookie = 0;
+				idr_remove(&tbl->rule_ids, rule->rule_id);
+				id = rule->id;
+				kmem_cache_free(ipa3_ctx->rt_rule_cache, rule);
 
-			/* remove the handle from the database */
-			ipa3_id_remove(id);
-		}
+				/* remove the handle from the database */
+				ipa3_id_remove(id);
+			}
 		}
 
 		if (ipa3_id_find(tbl->id) == NULL) {
@@ -1728,30 +1744,39 @@ int ipa3_reset_rt(enum ipa_ip_type ip, bool user_only)
 		/* do not remove the "default" routing tbl which has index 0 */
 		if (tbl->idx != apps_start_idx) {
 			if (!user_only || tbl_user) {
-			idr_destroy(&tbl->rule_ids);
-			if (tbl->in_sys[IPA_RULE_HASHABLE] ||
-				tbl->in_sys[IPA_RULE_NON_HASHABLE]) {
+				idr_destroy(&tbl->rule_ids);
+				if (tbl->in_sys[IPA_RULE_HASHABLE] ||
+					tbl->in_sys[IPA_RULE_NON_HASHABLE]) {
 					list_move(&tbl->link,
 						&rset->head_rt_tbl_list);
-				clear_bit(tbl->idx,
+					clear_bit(tbl->idx,
 					  &ipa3_ctx->rt_idx_bitmap[ip]);
-				set->tbl_cnt--;
+					set->tbl_cnt--;
 					IPADBG("rst tbl_idx=%d cnt=%d\n",
 						tbl->idx, set->tbl_cnt);
-			} else {
-				list_del(&tbl->link);
-				set->tbl_cnt--;
-				clear_bit(tbl->idx,
+				} else {
+					list_del(&tbl->link);
+					set->tbl_cnt--;
+					clear_bit(tbl->idx,
 					  &ipa3_ctx->rt_idx_bitmap[ip]);
-				IPADBG("rst rt tbl_idx=%d tbl_cnt=%d\n",
+					IPADBG("rst rt tbl_idx=%d tbl_cnt=%d\n",
 						tbl->idx, set->tbl_cnt);
 					kmem_cache_free(ipa3_ctx->rt_tbl_cache,
 						tbl);
+				}
+				/* remove the handle from the database */
+				ipa3_id_remove(id);
 			}
-			/* remove the handle from the database */
-			ipa3_id_remove(id);
 		}
 	}
+
+	/* commit the change to IPA-HW */
+	if (ipa3_ctx->ctrl->ipa3_commit_rt(IPA_IP_v4) ||
+		ipa3_ctx->ctrl->ipa3_commit_rt(IPA_IP_v6)) {
+		IPAERR("fail to commit rt-rule\n");
+		WARN_ON_RATELIMIT_IPA(1);
+		mutex_unlock(&ipa3_ctx->lock);
+		return -EPERM;
 	}
 	mutex_unlock(&ipa3_ctx->lock);
 

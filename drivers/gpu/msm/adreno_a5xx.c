@@ -1601,36 +1601,36 @@ static void a540_lm_init(struct adreno_device *adreno_dev)
 			AGC_LM_CONFIG_ENABLE_GPMU_ADAPTIVE |
 			AGC_THROTTLE_SEL_DCS;
 
-	kgsl_regread(device, A5XX_GPMU_TEMP_SENSOR_CONFIG, &r);
+		kgsl_regread(device, A5XX_GPMU_TEMP_SENSOR_CONFIG, &r);
 		if (!(r & GPMU_BCL_ENABLED))
 			agc_lm_config |= AGC_BCL_DISABLED;
 
-	if (r & GPMU_LLM_ENABLED)
-		agc_lm_config |= AGC_LLM_ENABLED;
+		if (r & GPMU_LLM_ENABLED)
+			agc_lm_config |= AGC_LLM_ENABLED;
 
-	if ((r & GPMU_ISENSE_STATUS) == GPMU_ISENSE_END_POINT_CAL_ERR) {
+		if ((r & GPMU_ISENSE_STATUS) == GPMU_ISENSE_END_POINT_CAL_ERR) {
 			KGSL_CORE_ERR(
 				"GPMU: ISENSE end point calibration failure\n");
-		agc_lm_config |= AGC_LM_CONFIG_ENABLE_ERROR;
-		goto start_agc;
-	}
-
-	if (!isense_enable(adreno_dev)) {
-		agc_lm_config |= AGC_LM_CONFIG_ENABLE_ERROR;
-		goto start_agc;
-	}
-
-		for (i = 0; i < AMP_CALIBRATION_RETRY_CNT; i++) {
-		if (isense_cot(adreno_dev))
-			cpu_relax();
-		else
-			break;
+			agc_lm_config |= AGC_LM_CONFIG_ENABLE_ERROR;
+			goto start_agc;
 		}
 
-	if (i == AMP_CALIBRATION_RETRY_CNT) {
-		KGSL_CORE_ERR("GPMU: ISENSE cold trimming failure\n");
-		agc_lm_config |= AGC_LM_CONFIG_ENABLE_ERROR;
-	}
+		if (!isense_enable(adreno_dev)) {
+			agc_lm_config |= AGC_LM_CONFIG_ENABLE_ERROR;
+			goto start_agc;
+		}
+
+		for (i = 0; i < AMP_CALIBRATION_RETRY_CNT; i++) {
+			if (isense_cot(adreno_dev))
+				cpu_relax();
+			else
+				break;
+		}
+
+		if (i == AMP_CALIBRATION_RETRY_CNT) {
+			KGSL_CORE_ERR("GPMU: ISENSE cold trimming failure\n");
+			agc_lm_config |= AGC_LM_CONFIG_ENABLE_ERROR;
+		}
 	}
 
 start_agc:
@@ -1656,7 +1656,7 @@ start_agc:
 		VOLTAGE_INTR_EN);
 
 	if (lm_on(adreno_dev))
-	wake_llm(adreno_dev);
+		wake_llm(adreno_dev);
 }
 
 
@@ -2032,11 +2032,11 @@ static void a5xx_start(struct adreno_device *adreno_dev)
 	/* Disable All flat shading optimization */
 	kgsl_regrmw(device, A5XX_VPC_DBG_ECO_CNTL, 0, 0x1 << 10);
 
-		/*
+	/*
 	 * VPC corner case with local memory load kill leads to corrupt
 	 * internal state. Normal Disable does not work for all a5x chips.
 	 * So do the following setting to disable it.
-		 */
+	 */
 	if (ADRENO_QUIRK(adreno_dev, ADRENO_QUIRK_DISABLE_LMLOADKILL)) {
 		kgsl_regrmw(device, A5XX_VPC_DBG_ECO_CNTL, 0, 0x1 << 23);
 		kgsl_regrmw(device, A5XX_HLSQ_DBG_ECO_CNTL, 0x1 << 18, 0);
@@ -2131,7 +2131,7 @@ static int a5xx_post_start(struct adreno_device *adreno_dev)
 		spin_idle_debug(KGSL_DEVICE(adreno_dev),
 				"hw initialization failed to idle\n");
 
-		return ret;
+	return ret;
 }
 
 static int a5xx_gpmu_init(struct adreno_device *adreno_dev)
@@ -2216,7 +2216,7 @@ static int a5xx_microcode_load(struct adreno_device *adreno_dev)
 		desc.args[1] = 13;
 		desc.arginfo = SCM_ARGS(2);
 
-		ret = scm_call2(SCM_SIP_FNID(SCM_SVC_BOOT, 0xA), &desc);
+		ret = scm_call2_atomic(SCM_SIP_FNID(SCM_SVC_BOOT, 0xA), &desc);
 		if (ret) {
 			pr_err("SCM resume call failed with error %d\n", ret);
 			return ret;
@@ -2519,23 +2519,23 @@ static int a5xx_microcode_read(struct adreno_device *adreno_dev)
 	int ret;
 
 	if (adreno_dev->pm4.hostptr == NULL) {
-	ret = _load_firmware(KGSL_DEVICE(adreno_dev),
+		ret = _load_firmware(KGSL_DEVICE(adreno_dev),
 				 adreno_dev->gpucore->pm4fw_name,
 				 &adreno_dev->pm4,
 				 &adreno_dev->pm4_fw_size,
 				 &adreno_dev->pm4_fw_version);
-	if (ret)
-		return ret;
+		if (ret)
+			return ret;
 	}
 
 	if (adreno_dev->pfp.hostptr == NULL) {
-	ret = _load_firmware(KGSL_DEVICE(adreno_dev),
+		ret = _load_firmware(KGSL_DEVICE(adreno_dev),
 				 adreno_dev->gpucore->pfpfw_name,
 				 &adreno_dev->pfp,
 				 &adreno_dev->pfp_fw_size,
 				 &adreno_dev->pfp_fw_version);
-	if (ret)
-		return ret;
+		if (ret)
+			return ret;
 	}
 
 	ret = _load_gpmu_firmware(adreno_dev);
@@ -3648,7 +3648,7 @@ struct adreno_gpudev adreno_a5xx_gpudev = {
 	.preemption_yield_enable =
 				a5xx_preemption_yield_enable,
 	.preemption_post_ibsubmit =
-				a5xx_preemption_post_ibsubmit,
+			a5xx_preemption_post_ibsubmit,
 	.preemption_init = a5xx_preemption_init,
 	.preemption_schedule = a5xx_preemption_schedule,
 	.enable_64bit = a5xx_enable_64bit,

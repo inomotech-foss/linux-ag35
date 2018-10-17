@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1385,7 +1385,7 @@ static struct msm_vidc_ctrl msm_venc_ctrls[] = {
 		.name = "Set Color space transfer characterstics",
 		.type = V4L2_CTRL_TYPE_INTEGER,
 		.minimum = MSM_VIDC_TRANSFER_BT709_5,
-		.maximum = MSM_VIDC_TRANSFER_BT_2020_12,
+		.maximum = MSM_VIDC_TRANSFER_HLG,
 		.default_value = MSM_VIDC_TRANSFER_601_6_625,
 		.step = 1,
 		.qmenu = NULL,
@@ -2439,16 +2439,16 @@ static int try_set_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 			num_b = ctrl->val;
 
 		max_num_b_frames = num_b ? MAX_NUM_B_FRAMES : 0;
-			property_id = HAL_PARAM_VENC_MAX_NUM_B_FRAMES;
-			pdata = &max_num_b_frames;
-			rc = call_hfi_op(hdev, session_set_property,
-				(void *)inst->session, property_id, pdata);
-			if (rc) {
-				dprintk(VIDC_ERR,
-					"Failed : Setprop MAX_NUM_B_FRAMES %d\n",
-					rc);
-				break;
-			}
+		property_id = HAL_PARAM_VENC_MAX_NUM_B_FRAMES;
+		pdata = &max_num_b_frames;
+		rc = call_hfi_op(hdev, session_set_property,
+			(void *)inst->session, property_id, pdata);
+		if (rc) {
+			dprintk(VIDC_ERR,
+				"Failed : Setprop MAX_NUM_B_FRAMES %d\n",
+				rc);
+			break;
+		}
 
 		property_id = HAL_CONFIG_VENC_INTRA_PERIOD;
 		intra_period.pframes = num_p;
@@ -2531,10 +2531,10 @@ static int try_set_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 	}
 	case V4L2_CID_MPEG_VIDEO_BITRATE:
 	{
-			property_id = HAL_CONFIG_VENC_TARGET_BITRATE;
-			bitrate.bit_rate = ctrl->val;
-			bitrate.layer_id = 0;
-			pdata = &bitrate;
+		property_id = HAL_CONFIG_VENC_TARGET_BITRATE;
+		bitrate.bit_rate = ctrl->val;
+		bitrate.layer_id = 0;
+		pdata = &bitrate;
 		break;
 	}
 	case V4L2_CID_MPEG_VIDEO_BITRATE_PEAK:
@@ -3317,7 +3317,7 @@ static int try_set_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 		switch (ctrl->val) {
 		case V4L2_CID_MPEG_VIDC_PERF_LEVEL_NOMINAL:
 			if (inst->flags & VIDC_TURBO) {
-			inst->flags &= ~VIDC_TURBO;
+				inst->flags &= ~VIDC_TURBO;
 				msm_dcvs_init_load(inst);
 			}
 			break;
