@@ -159,6 +159,9 @@ struct fts_ts_data {
 	u8 fw_vendor_id;
 	int touchs;
 	int irq_disable;
+	int panel_power_state;
+	ktime_t last_plam_time;
+	bool inputdev_opened;
 
 #if defined(CONFIG_FB)
 	struct notifier_block fb_notif;
