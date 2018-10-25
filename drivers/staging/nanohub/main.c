@@ -2243,6 +2243,9 @@ struct iio_dev *nanohub_probe(struct device *dev, struct iio_dev *iio_dev)
 
 	return iio_dev;
 
+	if (data->irq3)
+		enable_irq(data->irq3);
+
 fail_dev:
 	iio_device_unregister(iio_dev);
 fail_irq:
