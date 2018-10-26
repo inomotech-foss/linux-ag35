@@ -418,6 +418,17 @@
 	/delete-node/ si_auo_400p_cmd;
 };
 
+&vendor_fstab{
+	fsmgr_flags = "wait";
+};
+&system_fstab{
+	fsmgr_flags = "wait";
+};
+
+&soc {
+	/delete-node/ qcom,msm-ssc-sensors;
+};
+
 &mdss_dsi0 {
 	qcom,dsi-pref-prim-pan = <&dsi_rm67162_wqvga_cmd>;
 	/delete-property/ qcom,platform-bklight-en-gpio;
