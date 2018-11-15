@@ -785,13 +785,10 @@
 
 	cnss_sdio: qcom,cnss-sdio {
 		compatible = "qcom,cnss_sdio";
-		reg = <0x82a00000 0x200000>;
-		reg-names = "ramdump";
 		subsys-name = "AR6320";
-		/* To enable PIN PM_ENABLE_WIFI dynamicly in dbgfs /sys/kernel/debug/regulator/rome_vreg, gale 2018-04-01 */
-		/*vdd-wlan-supply = <&rome_vreg>;*/
-		/* Disable sdcard_ext_vreg, refer to quectel STATUS pin, gale 2018-04-01*/
-		/*vdd-wlan-dsrc-supply = <&sdcard_ext_vreg>;*/
+		qcom,wlan-ramdump-dynamic = <0x200000>;
+		vdd-wlan-supply = <&rome_vreg>;
+		vdd-wlan-dsrc-supply = <&sdcard_ext_vreg>;
 		vdd-wlan-io-supply = <&mdm9607_l11>;
 		vdd-wlan-xtal-supply = <&mdm9607_l2>;
 	};
