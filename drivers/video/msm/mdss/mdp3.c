@@ -1867,7 +1867,7 @@ int mdp3_put_img(struct mdp3_img_data *data, int client)
 				ion_free(iclient, data->srcp_ihdl);
 				data->srcp_ihdl = NULL;
 			} else
-			mdss_smmu_unmap_dma_buf(data->srcp_table,
+				mdss_smmu_unmap_dma_buf(data->srcp_table,
 					dom, dir, data->srcp_dma_buf);
 			data->mapped = false;
 		}
@@ -1935,7 +1935,7 @@ err_unmap:
 			mdss_smmu_dma_data_direction(DMA_BIDIRECTIONAL));
 	dma_buf_detach(data->srcp_dma_buf, data->srcp_attachment);
 	dma_buf_put(data->srcp_dma_buf);
-
+	data->skip_detach = true;
 	if (client ==  MDP3_CLIENT_PPP || client == MDP3_CLIENT_DMA_P) {
 		vfree(data->tab_clone->sgl);
 		kfree(data->tab_clone);
@@ -1979,7 +1979,7 @@ int mdp3_get_img(struct msmfb_data *img, struct mdp3_img_data *data, int client)
 		if (!ret)
 			goto done;
 	} else if (iclient) {
-		data->srcp_dma_buf = dma_buf_get(img->memory_id);
+			data->srcp_dma_buf = dma_buf_get(img->memory_id);
 			if (IS_ERR(data->srcp_dma_buf)) {
 				pr_err("DMA : error on ion_import_fd\n");
 				ret = PTR_ERR(data->srcp_dma_buf);
@@ -2048,7 +2048,7 @@ int mdp3_get_img(struct msmfb_data *img, struct mdp3_img_data *data, int client)
 					data->len -= img->offset;
 					return 0;
 			}
-			}
+		}
 
 done:
 	if (!ret && (img->offset < data->len)) {
@@ -2345,7 +2345,7 @@ static int mdp3_is_display_on(struct mdss_panel_data *pdata)
 	}
 
 	mdp3_res->splash_mem_addr = MDP3_REG_READ(MDP3_REG_DMA_P_IBUF_ADDR);
-	
+
 	if (mdp3_clk_enable(0, 0))
 		pr_err("fail to turn off MDP core clks\n");
 	return rc;
@@ -2379,7 +2379,7 @@ static int mdp3_continuous_splash_on(struct mdss_panel_data *pdata)
 	if (panel_info->type == SPI_PANEL)
 		rc = mdp3_bus_scale_set_quota(MDP3_CLIENT_DMA_P, 0, 0);
 	else
-	rc = mdp3_bus_scale_set_quota(MDP3_CLIENT_DMA_P, ab, ib);
+		rc = mdp3_bus_scale_set_quota(MDP3_CLIENT_DMA_P, ab, ib);
 	bus_handle->restore_ab[MDP3_CLIENT_DMA_P] = ab;
 	bus_handle->restore_ib[MDP3_CLIENT_DMA_P] = ib;
 
