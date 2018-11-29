@@ -1788,7 +1788,7 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 	struct msm_nand_chip *chip = &info->nand_chip;
 	struct flash_identification *flash_dev = &info->flash_dev;
 	uint32_t cwperpage = (mtd->writesize >> 9);
-	int err, pageerr = 0, rawerr = 0, submitted_num_desc = 0;
+	int err, pageerr = 0, rawerr = 0, submitted_num_desc = 0, count = 0;
 	uint32_t n = 0, pages_read = 0;
 	uint32_t ecc_errors = 0, total_ecc_errors = 0, ecc_capability;
 	struct msm_nand_rw_params rw_params;
@@ -2038,10 +2038,7 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 			 * and this will only handle about 64 pages being read
 			 * at a time i.e. one erase block worth of pages.
 			 */
-			/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start (fixed 2)*/
-			//fix_data_in_pages |= BIT(rw_params.page_count);
-			fix_data_in_pages |= BIT(fix_page_count);
-			/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
+			fix_data_in_pages |= BIT(pages_read);
 		}
 		/* check for correctable errors */
 		if (!rawerr) {
@@ -2116,9 +2113,7 @@ free_dma:
 	/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 	while (fix_data_in_pages) {
 		int temp_page = 0, oobsize = rw_params.cwperpage << 2;
-		/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start(fixed 5)*/
 		int offset = 0;
-		/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 
 		temp_page = fix_data_in_pages & BIT_MASK(0);
 		fix_data_in_pages = fix_data_in_pages >> 1;
