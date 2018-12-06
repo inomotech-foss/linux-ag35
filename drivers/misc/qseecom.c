@@ -1010,7 +1010,7 @@ static int qseecom_scm_call2(uint32_t svc_id, uint32_t tz_cmd_id,
 				smc_id =
 				TZ_OS_CONTINUE_BLOCKED_REQUEST_SMCINVOKE_ID;
 			else
-			smc_id = TZ_OS_CONTINUE_BLOCKED_REQUEST_ID;
+				smc_id = TZ_OS_CONTINUE_BLOCKED_REQUEST_ID;
 			desc.arginfo =
 				TZ_OS_CONTINUE_BLOCKED_REQUEST_ID_PARAM_ID;
 			desc.args[0] = req->app_or_session_id;
@@ -1802,7 +1802,7 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 		if (ptr_svc) {
 			ret = msm_ion_do_cache_op(qseecom.ion_clnt,
 					ptr_svc->ihandle,
-                                        ptr_svc->sb_virt, ptr_svc->sb_length,
+					ptr_svc->sb_virt, ptr_svc->sb_length,
 					ION_IOC_CLEAN_INV_CACHES);
 			if (ret) {
 				pr_err("cache operation failed %d\n", ret);
@@ -2076,7 +2076,7 @@ static int __qseecom_reentrancy_process_incomplete_cmd(
 		if (ptr_svc) {
 			ret = msm_ion_do_cache_op(qseecom.ion_clnt,
 					ptr_svc->ihandle,
-                                        ptr_svc->sb_virt, ptr_svc->sb_length,
+					ptr_svc->sb_virt, ptr_svc->sb_length,
 					ION_IOC_CLEAN_INV_CACHES);
 			if (ret) {
 				pr_err("cache operation failed %d\n", ret);
@@ -7019,10 +7019,10 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 		/* Only one client allowed here at a time */
 		mutex_lock(&app_access_lock);
 		ret = __qseecom_bus_scaling_enable(data, &perf_enabled);
-			if (ret) {
-				mutex_unlock(&app_access_lock);
-				break;
-			}
+		if (ret) {
+			mutex_unlock(&app_access_lock);
+			break;
+		}
 		atomic_inc(&data->ioctl_count);
 		ret = qseecom_send_cmd(data, argp);
 		__qseecom_bus_scaling_disable(data, perf_enabled);
@@ -7045,10 +7045,10 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 		/* Only one client allowed here at a time */
 		mutex_lock(&app_access_lock);
 		ret = __qseecom_bus_scaling_enable(data, &perf_enabled);
-			if (ret) {
-				mutex_unlock(&app_access_lock);
-				break;
-			}
+		if (ret) {
+			mutex_unlock(&app_access_lock);
+			break;
+		}
 		atomic_inc(&data->ioctl_count);
 		if (cmd == QSEECOM_IOCTL_SEND_MODFD_CMD_REQ)
 			ret = qseecom_send_modfd_cmd(data, argp);
@@ -8730,11 +8730,11 @@ static int qseecom_remove(struct platform_device *pdev)
 		&qseecom.registered_kclient_list_head, list) {
 
 		/* Break the loop if client handle is NULL */
-		if (!kclient->handle)
-			goto exit_free_kclient;
-
-		if (list_empty(&kclient->list))
-			goto exit_free_kc_handle;
+		if (!kclient->handle) {
+			list_del(&kclient->list);
+			kzfree(kclient);
+			break;
+		}
 
 		list_del(&kclient->list);
 		mutex_lock(&app_access_lock);
@@ -8746,11 +8746,6 @@ static int qseecom_remove(struct platform_device *pdev)
 			kzfree(kclient);
 		}
 	}
-
-exit_free_kc_handle:
-	kzfree(kclient->handle);
-exit_free_kclient:
-	kzfree(kclient);
 
 	spin_unlock_irqrestore(&qseecom.registered_kclient_list_lock, flags);
 
