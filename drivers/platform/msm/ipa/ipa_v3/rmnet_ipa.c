@@ -1148,7 +1148,7 @@ send:
 out:
 	if (atomic_read(&wwan_ptr->outstanding_pkts) == 0)
 		ipa_rm_inactivity_timer_release_resource(
-		IPA_RM_RESOURCE_WWAN_0_PROD);
+			IPA_RM_RESOURCE_WWAN_0_PROD);
 	return ret;
 }
 
@@ -1939,7 +1939,7 @@ void ipa3_q6_deinitialize_rm(void)
 			IPA_RM_RESOURCE_Q6_PROD, ret);
 
 	if (rmnet_ipa3_ctx->rm_q6_wq)
-	destroy_workqueue(rmnet_ipa3_ctx->rm_q6_wq);
+		destroy_workqueue(rmnet_ipa3_ctx->rm_q6_wq);
 }
 
 static void ipa3_wake_tx_queue(struct work_struct *work)
@@ -2255,7 +2255,7 @@ timer_init_err:
 create_rsrc_err:
 
 	if (!atomic_read(&rmnet_ipa3_ctx->is_ssr))
-	ipa3_q6_deinitialize_rm();
+		ipa3_q6_deinitialize_rm();
 
 q6_init_err:
 	free_netdev(dev);
@@ -2308,7 +2308,7 @@ static int ipa3_wwan_remove(struct platform_device *pdev)
 	cancel_work_sync(&ipa3_tx_wakequeue_work);
 	cancel_delayed_work(&ipa_tether_stats_poll_wakequeue_work);
 	if (IPA_NETDEV())
-	free_netdev(IPA_NETDEV());
+		free_netdev(IPA_NETDEV());
 	rmnet_ipa3_ctx->wwan_priv = NULL;
 	/* No need to remove wwan_ioctl during SSR */
 	if (!atomic_read(&rmnet_ipa3_ctx->is_ssr))
@@ -2396,7 +2396,7 @@ static int rmnet_ipa_ap_resume(struct device *dev)
 
 	IPAWANDBG("Enter...\n");
 	if (netdev)
-	netif_wake_queue(netdev);
+		netif_wake_queue(netdev);
 	IPAWANDBG("Exit\n");
 
 	return 0;
@@ -2467,30 +2467,30 @@ static int ipa3_ssr_notifier_cb(struct notifier_block *this,
 		IPAWANINFO("IPA received MPSS BEFORE_SHUTDOWN\n");
 		/* send SSR before-shutdown notification to IPACM */
 		rmnet_ipa_send_ssr_notification(false);
-			atomic_set(&rmnet_ipa3_ctx->is_ssr, 1);
+		atomic_set(&rmnet_ipa3_ctx->is_ssr, 1);
 		ipa3_q6_pre_shutdown_cleanup();
 		if (IPA_NETDEV())
 			netif_stop_queue(IPA_NETDEV());
-			ipa3_qmi_stop_workqueues();
-			ipa3_wan_ioctl_stop_qmi_messages();
-			ipa_stop_polling_stats();
-			if (atomic_read(&rmnet_ipa3_ctx->is_initialized))
-				platform_driver_unregister(&rmnet_ipa_driver);
+		ipa3_qmi_stop_workqueues();
+		ipa3_wan_ioctl_stop_qmi_messages();
+		ipa_stop_polling_stats();
+		if (atomic_read(&rmnet_ipa3_ctx->is_initialized))
+			platform_driver_unregister(&rmnet_ipa_driver);
 		IPAWANINFO("IPA BEFORE_SHUTDOWN handling is complete\n");
 		break;
 	case SUBSYS_AFTER_SHUTDOWN:
 		IPAWANINFO("IPA Received MPSS AFTER_SHUTDOWN\n");
-			if (atomic_read(&rmnet_ipa3_ctx->is_ssr))
+		if (atomic_read(&rmnet_ipa3_ctx->is_ssr))
 			ipa3_q6_post_shutdown_cleanup();
 		IPAWANINFO("IPA AFTER_SHUTDOWN handling is complete\n");
 		break;
 	case SUBSYS_BEFORE_POWERUP:
 		IPAWANINFO("IPA received MPSS BEFORE_POWERUP\n");
-			if (atomic_read(&rmnet_ipa3_ctx->is_ssr))
-				/* clean up cached QMI msg/handlers */
-				ipa3_qmi_service_exit();
+		if (atomic_read(&rmnet_ipa3_ctx->is_ssr))
+			/* clean up cached QMI msg/handlers */
+			ipa3_qmi_service_exit();
 		/*hold a proxy vote for the modem*/
-			ipa3_proxy_clk_vote();
+		ipa3_proxy_clk_vote();
 		ipa3_reset_freeze_vote();
 		IPAWANINFO("IPA BEFORE_POWERUP handling is complete\n");
 		break;
@@ -2571,15 +2571,15 @@ static void rmnet_ipa_get_stats_and_update(void)
 		return;
 	}
 
-		memset(&msg_meta, 0, sizeof(struct ipa_msg_meta));
-		msg_meta.msg_type = IPA_TETHERING_STATS_UPDATE_STATS;
+	memset(&msg_meta, 0, sizeof(struct ipa_msg_meta));
+	msg_meta.msg_type = IPA_TETHERING_STATS_UPDATE_STATS;
 	msg_meta.msg_len = sizeof(struct ipa_get_data_stats_resp_msg_v01);
-		rc = ipa_send_msg(&msg_meta, resp, rmnet_ipa_free_msg);
-		if (rc) {
-			IPAWANERR("ipa_send_msg failed: %d\n", rc);
-			kfree(resp);
-			return;
-		}
+	rc = ipa_send_msg(&msg_meta, resp, rmnet_ipa_free_msg);
+	if (rc) {
+		IPAWANERR("ipa_send_msg failed: %d\n", rc);
+		kfree(resp);
+		return;
+	}
 }
 
 /**
@@ -2633,15 +2633,15 @@ static void rmnet_ipa_get_network_stats_and_update(void)
 		return;
 	}
 
-		memset(&msg_meta, 0, sizeof(struct ipa_msg_meta));
-		msg_meta.msg_type = IPA_TETHERING_STATS_UPDATE_NETWORK_STATS;
+	memset(&msg_meta, 0, sizeof(struct ipa_msg_meta));
+	msg_meta.msg_type = IPA_TETHERING_STATS_UPDATE_NETWORK_STATS;
 	msg_meta.msg_len = sizeof(struct ipa_get_apn_data_stats_resp_msg_v01);
-		rc = ipa_send_msg(&msg_meta, resp, rmnet_ipa_free_msg);
-		if (rc) {
-			IPAWANERR("ipa_send_msg failed: %d\n", rc);
-			kfree(resp);
-			return;
-		}
+	rc = ipa_send_msg(&msg_meta, resp, rmnet_ipa_free_msg);
+	if (rc) {
+		IPAWANERR("ipa_send_msg failed: %d\n", rc);
+		kfree(resp);
+		return;
+	}
 }
 
 /**
@@ -3312,6 +3312,15 @@ int rmnet_ipa3_send_lan_client_msg(
 		IPAWANERR("Can't allocate memory for tether_info\n");
 		return -ENOMEM;
 	}
+
+	if (data->client_event != IPA_PER_CLIENT_STATS_CONNECT_EVENT &&
+		data->client_event != IPA_PER_CLIENT_STATS_DISCONNECT_EVENT) {
+		IPAWANERR("Wrong event given. Event:- %d\n",
+			data->client_event);
+		kfree(lan_client);
+		return -EINVAL;
+	}
+	data->lan_client.lanIface[IPA_RESOURCE_NAME_MAX-1] = '\0';
 	memset(&msg_meta, 0, sizeof(struct ipa_msg_meta));
 	memcpy(lan_client, &data->lan_client,
 		sizeof(struct ipa_lan_client_msg));

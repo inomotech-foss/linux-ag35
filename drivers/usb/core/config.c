@@ -433,7 +433,7 @@ static int usb_parse_configuration(struct usb_device *dev, int cfgidx,
 
 	memcpy(&config->desc, buffer, USB_DT_CONFIG_SIZE);
 	nintf = nintf_orig = config->desc.bNumInterfaces;
-	config->desc.bNumInterfaces = 0;	/* Adjusted later */
+	config->desc.bNumInterfaces = 0;	// Adjusted later
 
 	if (config->desc.bDescriptorType != USB_DT_CONFIG ||
 	    config->desc.bLength < USB_DT_CONFIG_SIZE ||

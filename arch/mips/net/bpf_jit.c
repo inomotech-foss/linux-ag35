@@ -563,7 +563,7 @@ static void save_bpf_jit_regs(struct jit_ctx *ctx, unsigned offset)
 
 	/* Adjust the stack pointer */
 	if (offset)
-	emit_stack_offset(-align_sp(offset), ctx);
+		emit_stack_offset(-align_sp(offset), ctx);
 
 	if (ctx->flags & SEEN_CALL) {
 		/* Argument save area */
@@ -643,7 +643,7 @@ static void restore_bpf_jit_regs(struct jit_ctx *ctx,
 
 	/* Restore the sp and discard the scrach memory */
 	if (offset)
-	emit_stack_offset(align_sp(offset), ctx);
+		emit_stack_offset(align_sp(offset), ctx);
 }
 
 static unsigned int get_stack_depth(struct jit_ctx *ctx)

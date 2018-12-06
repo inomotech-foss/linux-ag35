@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1380,7 +1380,7 @@ static int32_t adm_callback(struct apr_client_data *data, void *priv)
 	}
 
 	adm_callback_debug_print(data);
-	if (data->payload_size) {
+	if (data->payload_size >= sizeof(uint32_t)) {
 		copp_idx = (data->token) & 0XFF;
 		port_idx = ((data->token) >> 16) & 0xFF;
 		client_id = ((data->token) >> 8) & 0xFF;
@@ -1402,6 +1402,15 @@ static int32_t adm_callback(struct apr_client_data *data, void *priv)
 		if (data->opcode == APR_BASIC_RSP_RESULT) {
 			pr_debug("%s: APR_BASIC_RSP_RESULT id 0x%x\n",
 				__func__, payload[0]);
+			if (!((client_id != ADM_CLIENT_ID_SOURCE_TRACKING) &&
+			      (payload[0] == ADM_CMD_SET_PP_PARAMS_V5))) {
+				if (data->payload_size <
+						(2 * sizeof(uint32_t))) {
+					pr_err("%s: Invalid payload size %d\n",
+						__func__, data->payload_size);
+					return 0;
+				}
+			}
 			if (payload[1] != 0) {
 				pr_err("%s: cmd = 0x%x returned error = 0x%x\n",
 					__func__, payload[0], payload[1]);
@@ -1520,9 +1529,14 @@ static int32_t adm_callback(struct apr_client_data *data, void *priv)
 		switch (data->opcode) {
 		case ADM_CMDRSP_DEVICE_OPEN_V5:
 		case ADM_CMDRSP_DEVICE_OPEN_V6: {
-			struct adm_cmd_rsp_device_open_v5 *open =
-			(struct adm_cmd_rsp_device_open_v5 *)data->payload;
-
+			struct adm_cmd_rsp_device_open_v5 *open = NULL;
+			if (data->payload_size <
+				sizeof(struct adm_cmd_rsp_device_open_v5)) {
+				pr_err("%s: Invalid payload size %d\n", __func__,
+					data->payload_size);
+				return 0;
+			}
+			open = (struct adm_cmd_rsp_device_open_v5 *)data->payload;
 			if (open->copp_id == INVALID_COPP_ID) {
 				pr_err("%s: invalid coppid rxed %d\n",
 					__func__, open->copp_id);
@@ -1595,24 +1609,31 @@ static int32_t adm_callback(struct apr_client_data *data, void *priv)
 				pr_err("%s: ADM_CMDRSP_GET_PP_TOPO_MODULE_LIST",
 					 __func__);
 				pr_err(":err = 0x%x\n", payload[0]);
-			} else if (payload[1] >
-				   ((ADM_GET_TOPO_MODULE_LIST_LENGTH /
-				   sizeof(uint32_t)) - 1)) {
-				pr_err("%s: ADM_CMDRSP_GET_PP_TOPO_MODULE_LIST",
-					 __func__);
-				pr_err(":size = %d\n", payload[1]);
-			} else {
-				idx = ADM_GET_TOPO_MODULE_LIST_LENGTH *
-					copp_idx;
-				pr_debug("%s:Num modules payload[1] %d\n",
-					 __func__, payload[1]);
-				adm_module_topo_list[idx] = payload[1];
-				for (i = 1; i <= payload[1]; i++) {
-					adm_module_topo_list[idx+i] =
-						payload[1+i];
-					pr_debug("%s:payload[%d] = %x\n",
-						 __func__, (i+1), payload[1+i]);
+			} else if (data->payload_size >=
+				   (2 * sizeof(uint32_t))) {
+				if (payload[1] >
+					   ((ADM_GET_TOPO_MODULE_LIST_LENGTH /
+					   sizeof(uint32_t)) - 1)) {
+					pr_err("%s: ADM_CMDRSP_GET_PP_TOPO_MODULE_LIST",
+						 __func__);
+					pr_err(":size = %d\n", payload[1]);
+				} else {
+					idx = ADM_GET_TOPO_MODULE_LIST_LENGTH *
+						copp_idx;
+					pr_debug("%s:Num modules payload[1] %d\n",
+						 __func__, payload[1]);
+					adm_module_topo_list[idx] = payload[1];
+					for (i = 1; i <= payload[1]; i++) {
+						adm_module_topo_list[idx+i] =
+							payload[1+i];
+						pr_debug("%s:payload[%d] = %x\n",
+							 __func__, (i+1),
+							 payload[1+i]);
+					}
 				}
+			} else {
+				pr_err("%s: Invalid payload size %d\n",
+				       __func__, data->payload_size);
 			}
 			atomic_set(&this_adm.copp.stat
 				[port_idx][copp_idx], payload[0]);
@@ -2267,35 +2288,35 @@ int adm_arrange_mch_map(struct adm_cmd_device_open_v5 *open, int path,
 	if ((open->dev_num_channel > 2) && multi_ch_maps[idx].set_channel_map) {
 		memcpy(open->dev_channel_mapping,
 			multi_ch_maps[idx].channel_mapping,
-	       PCM_FORMAT_MAX_NUM_CHANNEL);
+			PCM_FORMAT_MAX_NUM_CHANNEL);
 	} else {
-	if (channel_mode == 1)	{
-		open->dev_channel_mapping[0] = PCM_CHANNEL_FC;
-	} else if (channel_mode == 2) {
-		open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
-		open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
-	} else if (channel_mode == 3)	{
-		open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
-		open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
-		open->dev_channel_mapping[2] = PCM_CHANNEL_FC;
-	} else if (channel_mode == 4) {
-		open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
-		open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
-		open->dev_channel_mapping[2] = PCM_CHANNEL_LS;
-		open->dev_channel_mapping[3] = PCM_CHANNEL_RS;
-	} else if (channel_mode == 5) {
-		open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
-		open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
-		open->dev_channel_mapping[2] = PCM_CHANNEL_FC;
-		open->dev_channel_mapping[3] = PCM_CHANNEL_LS;
-		open->dev_channel_mapping[4] = PCM_CHANNEL_RS;
-	} else if (channel_mode == 6) {
-		open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
-		open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
-		open->dev_channel_mapping[2] = PCM_CHANNEL_LFE;
-		open->dev_channel_mapping[3] = PCM_CHANNEL_FC;
-		open->dev_channel_mapping[4] = PCM_CHANNEL_LS;
-		open->dev_channel_mapping[5] = PCM_CHANNEL_RS;
+		if (channel_mode == 1) {
+			open->dev_channel_mapping[0] = PCM_CHANNEL_FC;
+		} else if (channel_mode == 2) {
+			open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
+			open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
+		} else if (channel_mode == 3) {
+			open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
+			open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
+			open->dev_channel_mapping[2] = PCM_CHANNEL_FC;
+		} else if (channel_mode == 4) {
+			open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
+			open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
+			open->dev_channel_mapping[2] = PCM_CHANNEL_LS;
+			open->dev_channel_mapping[3] = PCM_CHANNEL_RS;
+		} else if (channel_mode == 5) {
+			open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
+			open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
+			open->dev_channel_mapping[2] = PCM_CHANNEL_FC;
+			open->dev_channel_mapping[3] = PCM_CHANNEL_LS;
+			open->dev_channel_mapping[4] = PCM_CHANNEL_RS;
+		} else if (channel_mode == 6) {
+			open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
+			open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
+			open->dev_channel_mapping[2] = PCM_CHANNEL_LFE;
+			open->dev_channel_mapping[3] = PCM_CHANNEL_FC;
+			open->dev_channel_mapping[4] = PCM_CHANNEL_LS;
+			open->dev_channel_mapping[5] = PCM_CHANNEL_RS;
 		} else if (channel_mode == 7) {
 			open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
 			open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
@@ -2304,21 +2325,21 @@ int adm_arrange_mch_map(struct adm_cmd_device_open_v5 *open, int path,
 			open->dev_channel_mapping[4] = PCM_CHANNEL_LB;
 			open->dev_channel_mapping[5] = PCM_CHANNEL_RB;
 			open->dev_channel_mapping[6] = PCM_CHANNEL_CS;
-	} else if (channel_mode == 8) {
-		open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
-		open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
-		open->dev_channel_mapping[2] = PCM_CHANNEL_LFE;
-		open->dev_channel_mapping[3] = PCM_CHANNEL_FC;
-		open->dev_channel_mapping[4] = PCM_CHANNEL_LS;
-		open->dev_channel_mapping[5] = PCM_CHANNEL_RS;
-		open->dev_channel_mapping[6] = PCM_CHANNEL_LB;
-		open->dev_channel_mapping[7] = PCM_CHANNEL_RB;
-	} else {
-		pr_err("%s: invalid num_chan %d\n", __func__,
-			channel_mode);
-		rc = -EINVAL;
-		goto inval_ch_mod;
-	}
+		} else if (channel_mode == 8) {
+			open->dev_channel_mapping[0] = PCM_CHANNEL_FL;
+			open->dev_channel_mapping[1] = PCM_CHANNEL_FR;
+			open->dev_channel_mapping[2] = PCM_CHANNEL_LFE;
+			open->dev_channel_mapping[3] = PCM_CHANNEL_FC;
+			open->dev_channel_mapping[4] = PCM_CHANNEL_LS;
+			open->dev_channel_mapping[5] = PCM_CHANNEL_RS;
+			open->dev_channel_mapping[6] = PCM_CHANNEL_LB;
+			open->dev_channel_mapping[7] = PCM_CHANNEL_RB;
+		} else {
+			pr_err("%s: invalid num_chan %d\n", __func__,
+				channel_mode);
+			rc = -EINVAL;
+			goto inval_ch_mod;
+		}
 	}
 
 non_mch_path:
@@ -2522,7 +2543,7 @@ int adm_open(int port_id, int path, int rate, int channel_mode, int topology,
 		open.flags = flags;
 		open.mode_of_operation = path;
 		open.endpoint_id_1 = tmp_port;
-			open.endpoint_id_2 = 0xFFFF;
+		open.endpoint_id_2 = 0xFFFF;
 
 		if (this_adm.ec_ref_rx && (path != 1) &&
 		    (afe_get_port_type(tmp_port) == MSM_AFE_PORT_TYPE_TX)) {
@@ -2590,7 +2611,7 @@ int adm_open(int port_id, int path, int rate, int channel_mode, int topology,
 
 			ret = apr_send_pkt(this_adm.apr, (uint32_t *)&open_v6);
 		} else {
-		ret = apr_send_pkt(this_adm.apr, (uint32_t *)&open);
+			ret = apr_send_pkt(this_adm.apr, (uint32_t *)&open);
 		}
 		if (ret < 0) {
 			pr_err("%s: port_id: 0x%x for[0x%x] failed %d\n",

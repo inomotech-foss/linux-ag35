@@ -89,6 +89,11 @@
 #include <linux/random.h>
 #include "ubi.h"
 
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+#endif
+
+
 static int self_check_ai(struct ubi_device *ubi, struct ubi_attach_info *ai);
 
 /* Temporary variables used during scanning */
@@ -1502,6 +1507,14 @@ out_vtbl:
 	vfree(ubi->vtbl);
 out_ai:
 	destroy_ai(ai);
+
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+        {
+                printk("@Quectel0125 set file restore flag here 11 11 11 11 11 11\r\n");
+                Quectel_Set_Partition_RestoreFlag("", ubi->mtd->index,11);
+        }
+#endif
+
 	return err;
 }
 

@@ -355,7 +355,7 @@ static int __update_sensor_thresholds(struct sensor_info *sensor)
 		goto update_done;
 	}
 
-	pr_debug("sensor %d: low: %ld high: %ld\n",
+	printk("sensor %d: low: %ld high: %ld\n",
 		sensor->sensor_id,
 		sensor->threshold_min, sensor->threshold_max);
 
@@ -407,6 +407,13 @@ int thermal_sensor_trip(struct thermal_zone_device *tz,
 
 	if (list_empty(&tz->sensor.threshold_list))
 		return 0;
+
+	/* 20210218 merge qual patth */
+	mutex_lock(&tz->lock);
+	tz->last_temperature = tz->temperature;
+	tz->temperature = (int)temp;
+	mutex_unlock(&tz->lock);
+	/* end */
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(pos, &tz->sensor.threshold_list, list) {
@@ -1182,6 +1189,16 @@ trip_point_temp_show(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%ld\n", temperature);
 }
 
+/* 20210218 merge qual patth */
+static ssize_t
+trip_temp_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct thermal_zone_device *tz = to_thermal_zone(dev);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", tz->temperature);
+}
+/* end */
+ 
 static ssize_t
 trip_point_hyst_store(struct device *dev, struct device_attribute *attr,
 			const char *buf, size_t count)
@@ -1507,6 +1524,9 @@ int power_actor_set_power(struct thermal_cooling_device *cdev,
 static DEVICE_ATTR(type, 0444, type_show, NULL);
 static DEVICE_ATTR(temp, 0444, temp_show, NULL);
 static DEVICE_ATTR(mode, 0644, mode_show, mode_store);
+/* 20210218 merge qual patth */
+static DEVICE_ATTR(trip_temp, 0444, trip_temp_show, NULL);
+/* end */
 static DEVICE_ATTR(passive, S_IRUGO | S_IWUSR, passive_show, passive_store);
 static DEVICE_ATTR(policy, S_IRUGO | S_IWUSR, policy_show, policy_store);
 
@@ -2267,6 +2287,12 @@ struct thermal_zone_device *thermal_zone_device_register(const char *type,
 	if (result)
 		goto unregister;
 
+	/* 20210218 merge qual patth */
+	result = device_create_file(&tz->device, &dev_attr_trip_temp);
+	if (result)
+		goto unregister;
+	/* end */
+
 	if (ops->get_mode) {
 		result = device_create_file(&tz->device, &dev_attr_mode);
 		if (result)
@@ -2411,6 +2437,9 @@ void thermal_zone_device_unregister(struct thermal_zone_device *tz)
 	if (tz->type[0])
 		device_remove_file(&tz->device, &dev_attr_type);
 	device_remove_file(&tz->device, &dev_attr_temp);
+	/* 20210218 merge qual patth */
+	device_remove_file(&tz->device, &dev_attr_trip_temp);
+	/* end */
 	if (tz->ops->get_mode)
 		device_remove_file(&tz->device, &dev_attr_mode);
 	device_remove_file(&tz->device, &dev_attr_policy);

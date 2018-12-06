@@ -3833,7 +3833,7 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 	/* creating multiple pwqs breaks ordering guarantee */
 	if (!list_empty(&wq->pwqs)) {
 		if (WARN_ON(wq->flags & __WQ_ORDERED_EXPLICIT))
-		return -EINVAL;
+			return -EINVAL;
 
 		wq->flags &= ~__WQ_ORDERED;
 	}

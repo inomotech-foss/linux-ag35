@@ -1448,7 +1448,7 @@ static int tasha_micbias_control(struct snd_soc_codec *codec,
 		break;
 	case MICB_PULLUP_DISABLE:
 		if (tasha->pullup_ref[micb_index] > 0)
-		tasha->pullup_ref[micb_index]--;
+			tasha->pullup_ref[micb_index]--;
 		if ((tasha->pullup_ref[micb_index] == 0) &&
 		    (tasha->micb_ref[micb_index] == 0))
 			snd_soc_update_bits(codec, micb_reg, 0xC0, 0x00);
@@ -1467,7 +1467,7 @@ static int tasha_micbias_control(struct snd_soc_codec *codec,
 		break;
 	case MICB_DISABLE:
 		if (tasha->micb_ref[micb_index] > 0)
-		tasha->micb_ref[micb_index]--;
+			tasha->micb_ref[micb_index]--;
 		if ((tasha->micb_ref[micb_index] == 0) &&
 		    (tasha->pullup_ref[micb_index] > 0))
 			snd_soc_update_bits(codec, micb_reg, 0xC0, 0x80);
@@ -5852,7 +5852,7 @@ static int tasha_codec_enable_dec(struct snd_soc_dapm_widget *w,
 
 	dev_dbg(codec->dev, "%s %d\n", __func__, event);
 
-	widget_name = kstrndup(w->name, 15, GFP_KERNEL);
+	widget_name = kmemdup_nul(w->name, 15, GFP_KERNEL);
 	if (!widget_name)
 		return -ENOMEM;
 
@@ -10840,7 +10840,7 @@ static const struct snd_soc_dapm_widget tasha_dapm_widgets[] = {
 	SND_SOC_DAPM_MUX("SLIM TX13 MUX", SND_SOC_NOPM, TASHA_TX13, 0,
 		&sb_tx13_mux),
 	SND_SOC_DAPM_MUX("TX13 INP MUX", SND_SOC_NOPM, 0, 0,
-			 &tx13_inp_mux),
+		&tx13_inp_mux),
 	SND_SOC_DAPM_MUX("SLIM TX14 MUX", SND_SOC_NOPM, TASHA_TX14, 0,
 		&sb_tx14_mux),
 	SND_SOC_DAPM_MUX("SLIM TX15 MUX", SND_SOC_NOPM, TASHA_TX15, 0,
@@ -14166,8 +14166,8 @@ static int tasha_swrm_bulk_write(void *handle, u32 *reg, u32 *val, size_t len)
 		ret = wcd9xxx_slim_bulk_write(wcd9xxx, bulk_reg,
 				 (len * 2), false);
 		if (ret) {
-		dev_err(tasha->dev, "%s: swrm bulk write failed, ret: %d\n",
-			__func__, ret);
+			dev_err(tasha->dev, "%s: swrm bulk write failed, ret: %d\n",
+				__func__, ret);
 		}
 	}
 
@@ -14213,9 +14213,9 @@ static int tasha_swrm_write(void *handle, int reg, int val)
 				__func__, ret);
 		}
 	} else {
-	ret = wcd9xxx_slim_bulk_write(wcd9xxx, bulk_reg, 2, false);
-	if (ret < 0)
-		pr_err("%s: WR Data Failure\n", __func__);
+		ret = wcd9xxx_slim_bulk_write(wcd9xxx, bulk_reg, 2, false);
+		if (ret < 0)
+			pr_err("%s: WR Data Failure\n", __func__);
 	}
 
 	mutex_unlock(&tasha->swr_write_lock);
@@ -14429,7 +14429,7 @@ void tasha_get_codec_ver(struct tasha_priv *tasha)
 			codec_ver = WCD9335;
 			goto ret;
 		} else
-	codec_ver = WCD9326;
+			codec_ver = WCD9326;
 	}
 ret:
 	pr_debug("%s: codec is %d\n", __func__, codec_ver);

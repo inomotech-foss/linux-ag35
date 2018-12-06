@@ -852,7 +852,7 @@ posix_acl_xattr_set(struct dentry *dentry, const char *name,
 		acl = posix_acl_from_xattr(&init_user_ns, value, size);
 		if (IS_ERR(acl))
 			return PTR_ERR(acl);
-		}
+	}
 	ret = set_posix_acl(inode, type, acl);
 	posix_acl_release(acl);
 	return ret;
@@ -904,11 +904,10 @@ int simple_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 	int error;
 
 	if (type == ACL_TYPE_ACCESS) {
-		error = posix_acl_equiv_mode(acl, &inode->i_mode);
-		if (error < 0)
-			return 0;
-		if (error == 0)
-			acl = NULL;
+		error = posix_acl_update_mode(inode,
+				&inode->i_mode, &acl);
+		if (error)
+			return error;
 	}
 
 	inode->i_ctime = CURRENT_TIME;

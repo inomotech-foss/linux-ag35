@@ -49,8 +49,7 @@
 
 #define subsys_to_drv(d) container_of(d, struct modem_data, subsys_desc)
 
-
-#define QUECTEL_EFS_ERROR_BACKUP//quectel add
+#define QUECTEL_EFS_ERROR_BACKUP//quectel add 20180622
 #ifdef QUECTEL_EFS_ERROR_BACKUP
 
 #define MODEM_NORMAL_TIMEOUT_S 60000  //  if modem load and runnig this times not restart,  wo think modem runnig ok, then clear the modemFatalErrorRecord cnt.
@@ -62,7 +61,7 @@ struct work_struct MomdemOn_timer_work;
 struct work_struct ModemFatalError_handler_work;
 
 
-extern unsigned int Quectel_Set_Partition_RestoreFlag(const char* partition_name, int where);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char* partition_name,int mtd_nub, int where);
 
 /******************************************************************************************
 who-2018/06/25:Description....
@@ -127,14 +126,14 @@ static  int Quectel_ModemFatalErrProcess( void )
 	if (IS_ERR(file))
 	{
 		pr_err("%s, filp_open fail\n",__func__);
-		goto fail;
+		goto fail1;
 	}
 
 	rc = kernel_read(file, 0, tmpbuf, 3);
 	if (rc < 0 ) 
 	{
 		pr_err("%s, kernel read fail rc=%d\n",__func__,rc);
-		goto fail;
+		goto fail2;
 	}
 	while(tmpbuf[i])
 	{
@@ -169,12 +168,15 @@ static  int Quectel_ModemFatalErrProcess( void )
 		if(NULL != file)
 			filp_close(file, NULL);
 		// set  efs restore flag
-		Quectel_Set_Partition_RestoreFlag("efs2",9);
+		Quectel_Set_Partition_RestoreFlag("efs2",-1,9);
 		return 0;
     }
-
-fail:
-	pr_err("%s, goto fail\n",__func__);
+// modify by hans @20201223
+fail1:
+	pr_err("%s, goto fail1\n",__func__);      
+	return 0;
+fail2:
+	pr_err("%s, goto fail2\n",__func__);
 	if(NULL != file)
 	filp_close(file, NULL);        
 	return 0;
@@ -183,7 +185,6 @@ fail:
 
 ERROR: Please make sure QUECTEL_EFS_ERROR_BACKUP is defined !!!, Is it not need on your project
 #endif
-
 
 static void log_modem_sfr(void)
 {
@@ -355,6 +356,14 @@ static int pil_subsys_init(struct modem_data *drv,
 {
 	int ret;
 
+#ifdef QUECTEL_EFS_ERROR_BACKUP
+    Quectel_modemOnLine_timer_init();
+    INIT_WORK(&MomdemOn_timer_work,Quectel_clean_modemFatalTimes);
+    INIT_WORK(&ModemFatalError_handler_work,  Quectel_ModemFatalErrProcess);
+#else
+        ERROR:  Please make sure QUECTEL_EFS_ERROR_BACKUP is defined,is it not need on your project !!
+#endif
+
 	drv->subsys_desc.name = "modem";
 	drv->subsys_desc.dev = &pdev->dev;
 	drv->subsys_desc.owner = THIS_MODULE;
@@ -381,13 +390,6 @@ static int pil_subsys_init(struct modem_data *drv,
 		ret = -ENOMEM;
 		goto err_ramdump;
 	}
-#ifdef QUECTEL_EFS_ERROR_BACKUP
-    Quectel_modemOnLine_timer_init();
-    INIT_WORK(&MomdemOn_timer_work,Quectel_clean_modemFatalTimes);
-    INIT_WORK(&ModemFatalError_handler_work,  Quectel_ModemFatalErrProcess);		
-#else
-	ERROR:  Please make sure QUECTEL_EFS_ERROR_BACKUP is defined,is it not need on your project !!
-#endif
 
 	return 0;
 

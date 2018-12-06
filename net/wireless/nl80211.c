@@ -1286,7 +1286,7 @@ static int nl80211_send_wiphy(struct cfg80211_registered_device *rdev,
 
 	hdr = nl80211hdr_put(msg, portid, seq, flags, cmd);
 	if (!hdr)
-		return -ENOBUFS;
+		goto nla_put_failure;
 
 	if (WARN_ON(!state))
 		return -EINVAL;

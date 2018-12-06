@@ -269,9 +269,11 @@ static int __netlink_deliver_tap_skb(struct sk_buff *skb,
 	struct sk_buff *nskb;
 	struct sock *sk = skb->sk;
 	int ret = -ENOMEM;
-
-	if (!net_eq(dev_net(dev), sock_net(sk)))
+	
+	if (!net_eq(dev_net(dev), sock_net(sk)) &&
+	    !net_eq(dev_net(dev), &init_net)) {
 		return 0;
+	}
 
 	dev_hold(dev);
 
@@ -1133,7 +1135,7 @@ static int __netlink_sendskb(struct sock *sk, struct sk_buff *skb)
 
 	netlink_deliver_tap(skb);
 
-		skb_queue_tail(&sk->sk_receive_queue, skb);
+	skb_queue_tail(&sk->sk_receive_queue, skb);
 	sk->sk_data_ready(sk);
 	return len;
 }
@@ -2069,7 +2071,7 @@ int __netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
 	struct netlink_sock *nlk;
 	int ret;
 
-		atomic_inc(&skb->users);
+	atomic_inc(&skb->users);
 
 	sk = netlink_lookup(sock_net(ssk), ssk->sk_protocol, NETLINK_CB(skb).portid);
 	if (sk == NULL) {

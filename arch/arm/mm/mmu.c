@@ -1216,7 +1216,7 @@ void __init sanity_check_meminfo(void)
 	 * helps to ensure that we will allocate memory from the
 	 * last full pmd, which should be mapped.
 	 */
-		memblock_limit = round_down(memblock_limit, PMD_SIZE);
+	memblock_limit = round_down(memblock_limit, PMD_SIZE);
 
 	memblock_set_current_limit(memblock_limit);
 }

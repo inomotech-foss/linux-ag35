@@ -210,13 +210,13 @@ int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc, struct dwc3_ep *dep)
 	if (dep->endpoint.ep_type == EP_TYPE_GSI || dep->endpoint.endless)
 		mult = 3;
 
-		if (((dep->endpoint.maxburst > 1) &&
-				usb_endpoint_xfer_bulk(dep->endpoint.desc))
-				|| usb_endpoint_xfer_isoc(dep->endpoint.desc))
-			mult = 3;
+	if (((dep->endpoint.maxburst > 1) &&
+			usb_endpoint_xfer_bulk(dep->endpoint.desc))
+			|| usb_endpoint_xfer_isoc(dep->endpoint.desc))
+		mult = 3;
 
 	tmp = ((max_packet + mdwidth) * mult) + mdwidth;
-		fifo_size = DIV_ROUND_UP(tmp, mdwidth);
+	fifo_size = DIV_ROUND_UP(tmp, mdwidth);
 	dep->fifo_depth = fifo_size;
 	fifo_size |= (dwc3_readl(dwc->regs, DWC3_GTXFIFOSIZ(0)) & 0xffff0000)
 						+ (dwc->last_fifo_depth << 16);
@@ -229,7 +229,7 @@ int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc, struct dwc3_ep *dep)
 	dbg_event(0xFF, "resize_fifo", dep->number);
 	dbg_event(0xFF, "fifo_depth", dep->fifo_depth);
 	/* Check fifo size allocation doesn't exceed available RAM size. */
-		if (dwc->tx_fifo_size &&
+	if (dwc->tx_fifo_size &&
 		((dwc->last_fifo_depth * mdwidth) >= dwc->tx_fifo_size)) {
 		dev_err(dwc->dev, "Fifosize(%d) > RAM size(%d) %s depth:%d\n",
 			(dwc->last_fifo_depth * mdwidth), dwc->tx_fifo_size,
@@ -237,8 +237,8 @@ int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc, struct dwc3_ep *dep)
 		dwc->last_fifo_depth -= (fifo_size & 0xffff);
 		dep->fifo_depth = 0;
 		WARN_ON(1);
-			return -ENOMEM;
-		}
+		return -ENOMEM;
+	}
 
 	dwc3_writel(dwc->regs, DWC3_GTXFIFOSIZ(dep->endpoint.ep_num),
 							fifo_size);
@@ -479,7 +479,7 @@ static int dwc3_gadget_start_config(struct dwc3 *dwc, struct dwc3_ep *dep)
 		return 0;
 
 	memset(&params, 0x00, sizeof(params));
-		cmd = DWC3_DEPCMD_DEPSTARTCFG;
+	cmd = DWC3_DEPCMD_DEPSTARTCFG;
 
 	ret = dwc3_send_gadget_ep_cmd(dwc, 0, cmd, &params);
 	if (ret)
@@ -3189,8 +3189,11 @@ static void dwc3_gadget_wakeup_interrupt(struct dwc3 *dwc, bool remote_wakeup)
 
 		/*
 		 * In case of remote wake up dwc3_gadget_wakeup_work()
-		 * is doing pm_runtime_get_sync().
+		 * is doing pm_runtime_get_sync(). But mark last wakeup
+		 * event here to prevent runtime_suspend happening before this
+		 * wakeup event is processed.
 		 */
+		pm_runtime_mark_last_busy(dwc->dev);
 		dev_dbg(dwc->dev, "Notify OTG from %s\n", __func__);
 		dwc->b_suspend = false;
 		dwc3_notify_event(dwc,

@@ -1141,7 +1141,7 @@ int l2tp_xmit_skb(struct l2tp_session *session, struct sk_buff *skb, int hdr_len
 
 	/* Get routing info from the tunnel socket */
 	skb_dst_drop(skb);
-	skb_dst_set(skb, dst_clone(__sk_dst_check(sk, 0)));
+	skb_dst_set(skb, sk_dst_check(sk, 0));
 
 	inet = inet_sk(sk);
 	fl = &inet->cork.fl;
@@ -1649,7 +1649,7 @@ EXPORT_SYMBOL_GPL(l2tp_tunnel_create);
 void l2tp_tunnel_delete(struct l2tp_tunnel *tunnel)
 {
 	if (!test_and_set_bit(0, &tunnel->dead)) {
-	l2tp_tunnel_inc_refcount(tunnel);
+		l2tp_tunnel_inc_refcount(tunnel);
 		queue_work(l2tp_wq, &tunnel->del_work);
 	}
 }

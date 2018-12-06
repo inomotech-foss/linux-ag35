@@ -1062,7 +1062,7 @@ static int dev_alloc_name_ns(struct net *net,
 }
 
 int dev_get_valid_name(struct net *net, struct net_device *dev,
-			      const char *name)
+		       const char *name)
 {
 	BUG_ON(!net);
 
@@ -2451,7 +2451,7 @@ static inline bool skb_needs_check(struct sk_buff *skb, bool tx_path)
 		return skb->ip_summed != CHECKSUM_PARTIAL &&
 		       skb->ip_summed != CHECKSUM_UNNECESSARY;
 
-		return skb->ip_summed == CHECKSUM_NONE;
+	return skb->ip_summed == CHECKSUM_NONE;
 }
 
 /**
@@ -2848,7 +2848,7 @@ static void qdisc_pkt_len_init(struct sk_buff *skb)
 
 			if (skb_header_pointer(skb, skb_transport_offset(skb),
 					       sizeof(_udphdr), &_udphdr))
-			hdr_len += sizeof(struct udphdr);
+				hdr_len += sizeof(struct udphdr);
 		}
 
 		if (shinfo->gso_type & SKB_GSO_DODGY)
@@ -7041,7 +7041,8 @@ int dev_change_net_namespace(struct net_device *dev, struct net *net, const char
 		/* We get here if we can't use the current device name */
 		if (!pat)
 			goto out;
-		if (dev_get_valid_name(net, dev, pat) < 0)
+		err = dev_get_valid_name(net, dev, pat);
+		if (err < 0)
 			goto out;
 	}
 
@@ -7053,7 +7054,6 @@ int dev_change_net_namespace(struct net_device *dev, struct net *net, const char
 	dev_close(dev);
 
 	/* And unlink it from device chain */
-	err = -ENODEV;
 	unlist_netdevice(dev);
 
 	synchronize_net();

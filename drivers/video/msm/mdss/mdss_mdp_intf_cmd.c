@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1149,7 +1149,7 @@ static int mdss_mdp_cmd_intf_recovery(void *data, int event)
 			ctx->current_pp_num);
 		mdss_mdp_set_intr_callback_nosync(
 				MDSS_MDP_IRQ_TYPE_PING_PONG_COMP,
-			ctx->current_pp_num, NULL, NULL);
+				ctx->current_pp_num, NULL, NULL);
 		if (mdss_mdp_cmd_do_notifier(ctx))
 			notify_frame_timeout = true;
 	}
@@ -1207,7 +1207,7 @@ static void mdss_mdp_cmd_pingpong_done(void *arg)
 		if (sync_ppdone) {
 			atomic_inc(&ctx->pp_done_cnt);
 			if (!ctl->commit_in_progress)
-			schedule_work(&ctx->pp_done_work);
+				schedule_work(&ctx->pp_done_work);
 
 			mdss_mdp_resource_control(ctl,
 				MDP_RSRC_CTL_EVENT_PP_DONE);
@@ -1965,9 +1965,6 @@ static int mdss_mdp_cmd_wait4pingpong(struct mdss_mdp_ctl *ctl, void *arg)
 			mdss_fb_report_panel_dead(ctl->mfd);
 		} else if (ctx->pp_timeout_report_cnt == 0) {
 			MDSS_XLOG(0xbad);
-			MDSS_XLOG_TOUT_HANDLER("mdp", "dsi0_ctrl", "dsi0_phy",
-				"dsi1_ctrl", "dsi1_phy", "vbif", "vbif_nrt",
-				"dbg_bus", "vbif_dbg_bus", "panic");
 		} else if (ctx->pp_timeout_report_cnt == MAX_RECOVERY_TRIALS) {
 			MDSS_XLOG(0xbad2);
 			MDSS_XLOG_TOUT_HANDLER("mdp", "dsi0_ctrl", "dsi0_phy",
@@ -1986,7 +1983,7 @@ static int mdss_mdp_cmd_wait4pingpong(struct mdss_mdp_ctl *ctl, void *arg)
 			ctx->current_pp_num);
 		mdss_mdp_set_intr_callback_nosync(
 				MDSS_MDP_IRQ_TYPE_PING_PONG_COMP,
-			ctx->current_pp_num, NULL, NULL);
+				ctx->current_pp_num, NULL, NULL);
 		if (atomic_add_unless(&ctx->koff_cnt, -1, 0)
 			&& mdss_mdp_cmd_do_notifier(ctx))
 			mdss_mdp_ctl_notify(ctl, MDP_NOTIFY_FRAME_TIMEOUT);
@@ -2128,9 +2125,9 @@ static int mdss_mdp_cmd_panel_on(struct mdss_mdp_ctl *ctl,
 
 		}
 
-			rc = mdss_mdp_tearcheck_enable(ctl, true);
-			WARN(rc, "intf %d tearcheck enable error (%d)\n",
-					ctl->intf_num, rc);
+		rc = mdss_mdp_tearcheck_enable(ctl, true);
+		WARN(rc, "intf %d tearcheck enable error (%d)\n",
+				ctl->intf_num, rc);
 
 		ctx->panel_power_state = MDSS_PANEL_POWER_ON;
 		if (sctx)
@@ -2509,7 +2506,7 @@ static void mdss_mdp_cmd_wait4_autorefresh_done(struct mdss_mdp_ctl *ctl)
 
 		mask = mdss_mdp_get_irq_mask(
 				MDSS_MDP_IRQ_TYPE_PING_PONG_AUTO_REF,
-			ctx->current_pp_num);
+				ctx->current_pp_num);
 		status = mask & readl_relaxed(ctl->mdata->mdp_base +
 				MDSS_MDP_REG_INTR_STATUS);
 
@@ -2902,7 +2899,7 @@ int mdss_mdp_cmd_ctx_stop(struct mdss_mdp_ctl *ctl,
 
 	if (mdss_panel_is_power_off(panel_power_state) ||
 	    mdss_panel_is_power_on_ulp(panel_power_state))
-	mdss_mdp_tearcheck_enable(ctl, false);
+		mdss_mdp_tearcheck_enable(ctl, false);
 
 	if (mdss_panel_is_power_on(panel_power_state)) {
 		pr_debug("%s: intf stopped with panel on\n", __func__);
@@ -3487,7 +3484,7 @@ static int mdss_mdp_cmd_reconfigure(struct mdss_mdp_ctl *ctl,
 
 			mdss_mdp_ctl_stop(ctl, MDSS_PANEL_POWER_OFF);
 			mdss_mdp_ctl_intf_event(ctl,
-					MDSS_EVENT_DSI_DYNAMIC_SWITCH,
+				MDSS_EVENT_DSI_DYNAMIC_SWITCH,
 				(void *) mode, CTL_INTF_EVENT_FLAG_DEFAULT);
 		} else {
 			mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_OFF);

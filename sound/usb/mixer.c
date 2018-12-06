@@ -2123,10 +2123,10 @@ static int parse_audio_selector_unit(struct mixer_build *state, int unitid,
 		if (nameid)
 			len = snd_usb_copy_string_desc(state, nameid,
 						       kctl->id.name,
-					 sizeof(kctl->id.name));
+						       sizeof(kctl->id.name));
 		/* ... or pick up the terminal name at next */
 		if (!len)
-		len = get_term_name(state, &state->oterm,
+			len = get_term_name(state, &state->oterm,
 				    kctl->id.name, sizeof(kctl->id.name), 0);
 		/* ... or use the fixed string "USB" as the last resort */
 		if (!len)
@@ -2542,9 +2542,9 @@ void snd_usb_mixer_disconnect(struct list_head *p)
 	if (mixer->disconnected)
 		return;
 	if (mixer->urb)
-	usb_kill_urb(mixer->urb);
+		usb_kill_urb(mixer->urb);
 	if (mixer->rc_urb)
-	usb_kill_urb(mixer->rc_urb);
+		usb_kill_urb(mixer->rc_urb);
 	mixer->disconnected = true;
 }
 

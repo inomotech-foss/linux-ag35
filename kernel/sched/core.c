@@ -650,7 +650,7 @@ void resched_cpu(int cpu)
 
 	raw_spin_lock_irqsave(&rq->lock, flags);
 	if (cpu_online(cpu) || cpu == smp_processor_id())
-	resched_curr(rq);
+		resched_curr(rq);
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
 
@@ -967,7 +967,7 @@ static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	update_rq_clock(rq);
 	if (!(flags & ENQUEUE_RESTORE))
-	sched_info_queued(rq, p);
+		sched_info_queued(rq, p);
 	p->sched_class->enqueue_task(rq, p, flags);
 	trace_sched_enq_deq_task(p, 1, cpumask_bits(&p->cpus_allowed)[0]);
 }
@@ -976,7 +976,7 @@ static inline void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	update_rq_clock(rq);
 	if (!(flags & DEQUEUE_SAVE))
-	sched_info_dequeued(rq, p);
+		sched_info_dequeued(rq, p);
 	p->sched_class->dequeue_task(rq, p, flags);
 	trace_sched_enq_deq_task(p, 0, cpumask_bits(&p->cpus_allowed)[0]);
 }
@@ -2316,7 +2316,7 @@ void update_task_pred_demand(struct rq *rq, struct task_struct *p, int event)
  * Account cpu activity in its busy time counters (rq->curr/prev_runnable_sum)
  */
 static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
-	     int event, u64 wallclock, u64 irqtime)
+				 int event, u64 wallclock, u64 irqtime)
 {
 	int new_window, full_window = 0;
 	int p_is_curr_task = (p == rq->curr);
@@ -2914,7 +2914,7 @@ static void add_to_task_demand(struct rq *rq, struct task_struct *p, u64 delta)
  * depends on it!
  */
 static void update_task_demand(struct task_struct *p, struct rq *rq,
-	     int event, u64 wallclock)
+			       int event, u64 wallclock)
 {
 	u64 mark_start = p->ravg.mark_start;
 	u64 delta, window_start = rq->window_start;
@@ -3507,7 +3507,7 @@ static void fixup_busy_time(struct task_struct *p, int new_cpu)
 	struct related_thread_group *grp;
 
 	if (!sched_enable_hmp || (!p->on_rq && p->state != TASK_WAKING))
-			return;
+		return;
 
 	if (exiting_task(p)) {
 		clear_ed_task(p, src_rq);

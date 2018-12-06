@@ -134,8 +134,8 @@
 #define ACCEL_COVARIANCE_SIZE  (COVARIANCE_SIZE * sizeof(int))
 
 #ifdef CONFIG_ENABLE_IAM_ACC_GYRO_BUFFERING
-#define INV_ACC_MAXSAMPLE        4000
-#define INV_GYRO_MAXSAMPLE       4000
+#define INV_ACC_MAXSAMPLE        400  //4000-->400: 4M-->400K
+#define INV_GYRO_MAXSAMPLE       400  //4000-->400: 4M-->400K 
 #define G_MAX                    23920640
 struct inv_acc_sample {
 	int xyz[3];

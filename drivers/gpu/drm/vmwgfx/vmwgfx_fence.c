@@ -539,7 +539,7 @@ int vmw_fence_create(struct vmw_fence_manager *fman,
 		     struct vmw_fence_obj **p_fence)
 {
 	struct vmw_fence_obj *fence;
-	int ret;
+ 	int ret;
 
 	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
 	if (unlikely(fence == NULL))

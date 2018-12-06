@@ -22,7 +22,7 @@ config ANDROID_BINDER_IPC
 config ANDROID_BINDER_IPC_32BIT
 	bool
 	depends on !64BIT && ANDROID_BINDER_IPC
-	default y
+	default n
 	---help---
 	  The Binder API has been changed to support both 32 and 64bit
 	  applications in a mixed environment.
@@ -156,6 +156,11 @@ config ANDROID_VSOC
 	  This option adds support for the Virtual SoC driver needed to boot
 	  a 'cuttlefish' Android image inside QEmu. The driver interacts with
 	  a QEmu ivshmem device. If built as a module, it will be called vsoc.
+
+config ANDROID_ALARM
+    tristate "Android Alarm"
+	default m
+
 
 source "drivers/staging/android/ion/Kconfig"
 

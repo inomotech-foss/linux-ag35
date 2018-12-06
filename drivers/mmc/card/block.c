@@ -3781,7 +3781,6 @@ static int mmc_blk_cmdq_issue_rq(struct mmc_queue *mq, struct request *req)
 		goto out;
 	}
 	}
-	}
 
 	if (req) {
 		struct mmc_host *host = card->host;

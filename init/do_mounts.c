@@ -37,7 +37,11 @@
 #include "do_mounts.h"
 
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
-extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int where);
+#include "linux/mtd/mtd.h"
+#include "../drivers/mtd/ubi/ubi.h"
+
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
 #endif
 
 int __initdata rd_doload;	/* 1 = load RAM disk, 0 = don't load */
@@ -45,6 +49,7 @@ int __initdata rd_doload;	/* 1 = load RAM disk, 0 = don't load */
 int root_mountflags = MS_RDONLY | MS_SILENT;
 static char * __initdata root_device_name;
 static char __initdata saved_root_name[64];
+char __initdata dm_root_name[64];
 static int root_wait;
 
 dev_t ROOT_DEV;
@@ -296,6 +301,7 @@ EXPORT_SYMBOL_GPL(name_to_dev_t);
 static int __init root_dev_setup(char *line)
 {
 	strlcpy(saved_root_name, line, sizeof(saved_root_name));
+	strlcpy(dm_root_name, line, sizeof(dm_root_name));
 	return 1;
 }
 
@@ -310,6 +316,14 @@ static int __init rootwait_setup(char *str)
 }
 
 __setup("rootwait", rootwait_setup);
+unsigned int __initdata have_dm_verity = 0;
+static int __init dm_verity_setup(char *str)
+{
+	if (*str)
+		return 0;
+	have_dm_verity = 1;
+	return 1;
+}
 
 static char * __initdata root_mount_data;
 static int __init root_data_setup(char *str)
@@ -332,6 +346,7 @@ static int __init root_delay_setup(char *str)
 	return 1;
 }
 
+__setup("dm-verity", dm_verity_setup);
 __setup("rootflags=", root_data_setup);
 __setup("rootfstype=", fs_names_setup);
 __setup("rootdelay=", root_delay_setup);
@@ -340,7 +355,7 @@ static void __init get_fs_names(char *page)
 {
 	char *s = page;
 
-	if (root_fs_names) {
+	if (root_fs_names && (! have_dm_verity)) {
 		strcpy(page, root_fs_names);
 		while (*s++) {
 			if (s[-1] == ',')
@@ -367,17 +382,21 @@ static int __init do_mount_root(char *name, char *fs, int flags, void *data)
 {
 	struct super_block *s;
 	int err = sys_mount(name, "/root", fs, flags, data);
+	struct ubi_device *ActiveSystem_ubi = NULL; //Quectel add log for debug
 	if (err)
 		return err;
 
 	sys_chdir("/root");
 	s = current->fs->pwd.dentry->d_sb;
 	ROOT_DEV = s->s_dev;
+	
+	//Quectel add log for get rootfs mtd number
+	ActiveSystem_ubi = ubi_get_device(MINOR(ROOT_DEV));
 	printk(KERN_INFO
-	       "VFS: Mounted root (%s filesystem)%s on device %u:%u.\n",
+	       "VFS: Mounted root (%s filesystem)%s on device %u:%u.mtd_num=%d\n",
 	       s->s_type->name,
 	       s->s_flags & MS_RDONLY ?  " readonly" : "",
-	       MAJOR(ROOT_DEV), MINOR(ROOT_DEV));
+	       MAJOR(ROOT_DEV), MINOR(ROOT_DEV),ActiveSystem_ubi->mtd->index);
 	return 0;
 }
 
@@ -425,13 +444,8 @@ retry:
 #endif
 
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
-		if (!get_bootmode(NULL))
-		{
-			printk("@Ramos set restore systemfs flag here 111 \r\n");
-			Quectel_Set_Partition_RestoreFlag("system",1);
-		}else{
-			Quectel_Set_Partition_RestoreFlag("recovery",1);
-		}
+		printk("@Quectel0125 set restore systemfs flag here 111 mtd=%d \r\n", ubi_get_device(0)->mtd->index);
+		Quectel_Set_Partition_RestoreFlag("", ubi_get_device(0)->mtd->index,1);// rootfs must be ubi0, so we can usr ubi_get_device(0)
 #endif
 		panic("VFS: Unable to mount root fs on %s", b);
 	}
@@ -447,13 +461,9 @@ retry:
 #endif
 
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
-		if (!get_bootmode(NULL))
-		{
-			printk("@Ramos set restore systemfs flag here 222 \r\n");
-			Quectel_Set_Partition_RestoreFlag("system",2);
-		}else{
-			Quectel_Set_Partition_RestoreFlag("recovery",2);
-		}
+
+	printk("@Quectel0125 set restore systemfs flag here 2222 \r\n");
+	Quectel_Set_Partition_RestoreFlag("", ubi_get_device(0)->mtd->index,2);// rootfs must be ubi0, so we can usr ubi_get_device(0)
 #endif
 	panic("VFS: Unable to mount root fs on %s", b);
 out:
@@ -584,7 +594,7 @@ void __init prepare_namespace(void)
 	md_run_setup();
 	dm_run_setup();
 
-	if (saved_root_name[0]) {
+	if (saved_root_name[0] && (! have_dm_verity)) {
 		root_device_name = saved_root_name;
 		if (!strncmp(root_device_name, "mtd", 3) ||
 		    !strncmp(root_device_name, "ubi", 3)) {

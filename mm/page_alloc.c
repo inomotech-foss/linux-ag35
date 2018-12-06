@@ -1199,10 +1199,10 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
 
 	pages = move_freepages_block(zone, page, start_type, 0);
 
-		/* Claim the whole block if over half of it is free */
-		if (pages >= (1 << (pageblock_order-1)) ||
-				page_group_by_mobility_disabled)
-			set_pageblock_migratetype(page, start_type);
+	/* Claim the whole block if over half of it is free */
+	if (pages >= (1 << (pageblock_order-1)) ||
+			page_group_by_mobility_disabled)
+		set_pageblock_migratetype(page, start_type);
 }
 
 /* Check whether there is a suitable fallback freepage with requested order. */
@@ -1229,6 +1229,8 @@ static int find_suitable_fallback(struct free_area *area, unsigned int order,
 
 		return fallback_mt;
 	}
+
+	return -1;
 }
 
 /* Remove an element from the buddy allocator from the fallback list */
@@ -1245,42 +1247,42 @@ __rmqueue_fallback(struct zone *zone, unsigned int order, int start_migratetype)
 	for (current_order = MAX_ORDER-1;
 				current_order >= order && current_order <= MAX_ORDER-1;
 				--current_order) {
-			area = &(zone->free_area[current_order]);
+		area = &(zone->free_area[current_order]);
 		fallback_mt = find_suitable_fallback(area, current_order,
 				start_migratetype, &can_steal);
 		if (fallback_mt == -1)
-				continue;
+			continue;
 
 		page = list_entry(area->free_list[fallback_mt].next,
-					struct page, lru);
+						struct page, lru);
 		if (can_steal)
 			steal_suitable_fallback(zone, page, start_migratetype);
 
-			/* Remove the page from the freelists */
+		/* Remove the page from the freelists */
 		area->nr_free--;
 
                 if (is_migrate_cma(fallback_mt))
                         area->nr_free_cma--;
-			list_del(&page->lru);
-			rmv_page_order(page);
+		list_del(&page->lru);
+		rmv_page_order(page);
 
-			expand(zone, page, order, current_order, area,
+		expand(zone, page, order, current_order, area,
 					start_migratetype);
-			/*
-			 * The freepage_migratetype may differ from pageblock's
-			 * migratetype depending on the decisions in
-			 * try_to_steal_freepages(). This is OK as long as it
-			 * does not differ for MIGRATE_CMA pageblocks. For CMA
-			 * we need to make sure unallocated pages flushed from
-			 * pcp lists are returned to the correct freelist.
-			 */
+		/*
+		 * The freepage_migratetype may differ from pageblock's
+		 * migratetype depending on the decisions in
+		 * try_to_steal_freepages(). This is OK as long as it
+		 * does not differ for MIGRATE_CMA pageblocks. For CMA
+		 * we need to make sure unallocated pages flushed from
+		 * pcp lists are returned to the correct freelist.
+		 */
 		set_freepage_migratetype(page, start_migratetype);
 
-			trace_mm_page_alloc_extfrag(page, order, current_order,
+		trace_mm_page_alloc_extfrag(page, order, current_order,
 			start_migratetype, fallback_mt);
 
-			return page;
-		}
+		return page;
+	}
 
 	return NULL;
 }

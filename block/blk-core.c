@@ -747,6 +747,7 @@ blk_init_allocated_queue(struct request_queue *q, request_fn_proc *rfn,
 
 fail:
 	blk_free_flush_queue(q->fq);
+	q->fq = NULL;
 	return NULL;
 }
 EXPORT_SYMBOL(blk_init_allocated_queue);
@@ -2966,7 +2967,7 @@ int blk_rq_prep_clone(struct request *rq, struct request *rq_src,
 	blk_rq_init(NULL, rq);
 
 	__rq_for_each_bio(bio_src, rq_src) {
-		bio = bio_clone_fast(bio_src, gfp_mask, bs);
+		bio = bio_clone_bioset(bio_src, gfp_mask, bs);
 		if (!bio)
 			goto free_and_out;
 
@@ -3381,28 +3382,28 @@ blk_latency_hist_show(char* name, struct io_latency_state *s, char *buf,
 	u_int64_t average;
 
        num_elem = s->latency_elems;
-	if (num_elem > 0) {
+       if (num_elem > 0) {
 	       average = div64_u64(s->latency_sum, s->latency_elems);
-		bytes_written += scnprintf(buf + bytes_written,
+	       bytes_written += scnprintf(buf + bytes_written,
 			       buf_size - bytes_written,
 			       "IO svc_time %s Latency Histogram (n = %llu,"
 			       " average = %llu):\n", name, num_elem, average);
-		for (i = 0;
-		     i < ARRAY_SIZE(latency_x_axis_us);
-		     i++) {
+	       for (i = 0;
+		    i < ARRAY_SIZE(latency_x_axis_us);
+		    i++) {
 		       elem = s->latency_y_axis[i];
-			pct = div64_u64(elem * 100, num_elem);
-			bytes_written += scnprintf(buf + bytes_written,
-						   PAGE_SIZE - bytes_written,
+		       pct = div64_u64(elem * 100, num_elem);
+		       bytes_written += scnprintf(buf + bytes_written,
+				       PAGE_SIZE - bytes_written,
 				       "\t< %6lluus%15llu%15d%%\n",
-						   latency_x_axis_us[i],
-						   elem, pct);
-		}
-		/* Last element in y-axis table is overflow */
+				       latency_x_axis_us[i],
+				       elem, pct);
+	       }
+	       /* Last element in y-axis table is overflow */
 	       elem = s->latency_y_axis[i];
-		pct = div64_u64(elem * 100, num_elem);
-		bytes_written += scnprintf(buf + bytes_written,
-					   PAGE_SIZE - bytes_written,
+	       pct = div64_u64(elem * 100, num_elem);
+	       bytes_written += scnprintf(buf + bytes_written,
+			       PAGE_SIZE - bytes_written,
 			       "\t>=%6lluus%15llu%15d%%\n",
 			       latency_x_axis_us[i - 1], elem, pct);
 	}

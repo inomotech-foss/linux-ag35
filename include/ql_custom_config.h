@@ -24,6 +24,31 @@
 /******************* SPECIFIC FUNCS MACRO  ********************************/
 #elif defined(QL_G_CUSTOM_MLABS)
 
+#elif defined(QL_G_CUSTOM_NIO)
+
+#elif defined(QL_G_CUSTOM_LEAR)
+
+#elif defined(QL_G_CUSTOM_YAXON)
+
+#elif defined(QL_G_CUSTOM_LY)
+
+#elif defined(QL_G_CUSTOM_JAC)
+
+#elif defined(QL_G_CUSTOM_DSV)
+
+#elif defined(QL_G_CUSTOM_YW)
+
+#elif defined(QL_G_CUSTOM_Digen)
+
+#elif defined(QL_G_CUSTOM_DP)
+
+#elif defined(QL_G_CUSTOM_YKCL) || defined(QL_G_CUSTOM_BMY)
+
+#elif defined(QL_G_CUSTOM_DSVDX)
+
+#elif defined(QL_G_CUSTOM_YX)
+
+#elif defined(QL_G_CUSTOM_HS)
 
 #elif defined(QL_G_CUSTOM_INTEST) /* Intest Project INT */
     #ifdef FEATURE_QUECTEL_NAT

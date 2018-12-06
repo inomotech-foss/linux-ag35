@@ -37,6 +37,7 @@
 #define GLINK_QOS_DEF_NUM_PRIORITY	1
 #define GLINK_QOS_DEF_MTU		2048
 
+#define GLINK_CH_XPRT_NAME_SIZE ((3 * GLINK_NAME_SIZE) + 4)
 #define GLINK_KTHREAD_PRIO 1
 
 /**
@@ -556,7 +557,7 @@ static bool glink_core_remote_close_common(struct channel_ctx *ctx, bool safe)
 		ctx->remote_opened = false;
 		is_fully_closed = ch_is_fully_closed(ctx);
 	} else {
-	is_fully_closed = ch_update_rmt_state(ctx, false);
+		is_fully_closed = ch_update_rmt_state(ctx, false);
 	}
 	ctx->rcid = 0;
 
@@ -1199,19 +1200,19 @@ int ch_pop_remote_rx_intent(struct channel_ctx *ctx, size_t size,
 	}
 	if (best_intent) {
 		list_del(&best_intent->list);
-			GLINK_DBG_CH(ctx,
-					"%s: R[%u]:%zu Removed remote intent\n",
-					__func__,
+		GLINK_DBG_CH(ctx,
+				"%s: R[%u]:%zu Removed remote intent\n",
+				__func__,
 				best_intent->id,
 				best_intent->intent_size);
 		*riid_ptr = best_intent->id;
 		*intent_size = best_intent->intent_size;
 		*cookie = best_intent->cookie;
 		kfree(best_intent);
-			spin_unlock_irqrestore(
-				&ctx->rmt_rx_intent_lst_lock_lhc2, flags);
-			return 0;
-		}
+		spin_unlock_irqrestore(
+			&ctx->rmt_rx_intent_lst_lock_lhc2, flags);
+		return 0;
+	}
 	spin_unlock_irqrestore(&ctx->rmt_rx_intent_lst_lock_lhc2, flags);
 	return -EAGAIN;
 }
@@ -2867,6 +2868,7 @@ static int glink_tx_common(void *handle, void *pkt_priv,
 	size_t intent_size;
 	bool is_atomic =
 		tx_flags & (GLINK_TX_SINGLE_THREADED | GLINK_TX_ATOMIC);
+	char glink_name[GLINK_CH_XPRT_NAME_SIZE];
 	unsigned long flags;
 	void *cookie = NULL;
 
@@ -2901,21 +2903,22 @@ static int glink_tx_common(void *handle, void *pkt_priv,
 		tracer_pkt_log_event(data, GLINK_CORE_TX);
 	}
 
-	/* find matching rx intent (best-fit algorithm for now) */
+	scnprintf(glink_name, GLINK_CH_XPRT_NAME_SIZE, "%s_%s_%s", ctx->name,
+			ctx->transport_ptr->edge, ctx->transport_ptr->name);
+	/* find matching rx intent (first-fit algorithm for now) */
 	if (ch_pop_remote_rx_intent(ctx, size, &riid, &intent_size, &cookie)) {
 		if (!(tx_flags & GLINK_TX_REQ_INTENT)) {
 			/* no rx intent available */
-			GLINK_ERR_CH(ctx,
-				"%s: R[%u]:%zu Intent not present for lcid\n",
-				__func__, riid, size);
+			GLINK_ERR(
+				"%s: %s: R[%u]:%zu Intent not present\n",
+				glink_name, __func__, riid, size);
 			ret = -EAGAIN;
 			goto glink_tx_common_err;
 		}
 		if (is_atomic && !(ctx->transport_ptr->capabilities &
 					  GCAP_AUTO_QUEUE_RX_INT)) {
-			GLINK_ERR_CH(ctx,
-				"%s: Cannot request intent in atomic context\n",
-				__func__);
+			GLINK_ERR("%s: %s: %s\n", glink_name, __func__,
+				"Cannot request intent in atomic context");
 			ret = -EINVAL;
 			goto glink_tx_common_err;
 		}
@@ -2925,8 +2928,8 @@ static int glink_tx_common(void *handle, void *pkt_priv,
 		ret = ctx->transport_ptr->ops->tx_cmd_rx_intent_req(
 				ctx->transport_ptr->ops, ctx->lcid, size);
 		if (ret) {
-			GLINK_ERR_CH(ctx, "%s: Request intent failed %d\n",
-					__func__, ret);
+			GLINK_ERR("%s: %s: Request intent failed %d\n",
+					glink_name, __func__, ret);
 			goto glink_tx_common_err;
 		}
 
@@ -2934,18 +2937,18 @@ static int glink_tx_common(void *handle, void *pkt_priv,
 						&intent_size, &cookie)) {
 			rwref_read_put(&ctx->ch_state_lhb2);
 			if (is_atomic) {
-				GLINK_ERR_CH(ctx,
-				    "%s Intent of size %zu not ready\n",
-				    __func__, size);
+				GLINK_ERR("%s: %s: Intent of size %zu %s\n",
+					glink_name, __func__, size,
+					"not ready");
 				ret = -EAGAIN;
 				goto glink_tx_common_err_2;
 			}
 
 			if (ctx->transport_ptr->local_state == GLINK_XPRT_DOWN
 			    || !ch_is_fully_opened(ctx)) {
-				GLINK_ERR_CH(ctx,
-					"%s: Channel closed while waiting for intent\n",
-					__func__);
+				GLINK_ERR("%s: %s: %s %s\n", glink_name,
+					 __func__, "Channel closed while",
+					"waiting for intent");
 				ret = -EBUSY;
 				goto glink_tx_common_err_2;
 			}
@@ -2954,18 +2957,18 @@ static int glink_tx_common(void *handle, void *pkt_priv,
 			if (!wait_for_completion_timeout(
 					&ctx->int_req_ack_complete,
 					ctx->rx_intent_req_timeout_jiffies)) {
-				GLINK_ERR_CH(ctx,
-					"%s: Intent request ack with size: %zu not granted for lcid\n",
-					__func__, size);
+				GLINK_ERR(
+					"%s: %s: %s %zu not granted for lcid\n",
+					glink_name, __func__,
+					"Intent request ack with size:", size);
 				ret = -ETIMEDOUT;
 				goto glink_tx_common_err_2;
 			}
 
 			if (!ctx->int_req_ack) {
-				GLINK_ERR_CH(ctx,
-				    "%s: Intent Request with size: %zu %s",
-				    __func__, size,
-				    "not granted for lcid\n");
+				GLINK_ERR("%s: %s: %s %zu %s\n", glink_name,
+					__func__, "Intent Request with size:",
+					size, "not granted for lcid");
 				ret = -EAGAIN;
 				goto glink_tx_common_err_2;
 			}
@@ -2974,9 +2977,9 @@ static int glink_tx_common(void *handle, void *pkt_priv,
 			if (!wait_for_completion_timeout(
 					&ctx->int_req_complete,
 					ctx->rx_intent_req_timeout_jiffies)) {
-				GLINK_ERR_CH(ctx,
-					"%s: Intent request with size: %zu not granted for lcid\n",
-					__func__, size);
+				GLINK_ERR("%s: %s: %s %zu %s\n", glink_name,
+					 __func__, "Intent request with size: ",
+					size, "not granted for lcid");
 				ret = -ETIMEDOUT;
 				goto glink_tx_common_err_2;
 			}
@@ -4219,7 +4222,7 @@ static void glink_core_channel_cleanup(struct glink_core_xprt_ctx *xprt_ptr)
 		rwref_write_put(&ctx->ch_state_lhb2);
 		ctx = get_first_ch_ctx(xprt_ptr);
 	}
-			spin_lock_irqsave(&xprt_ptr->xprt_ctx_lock_lhb1, flags);
+	spin_lock_irqsave(&xprt_ptr->xprt_ctx_lock_lhb1, flags);
 	list_for_each_entry_safe(temp_lcid, temp_lcid1,
 			&xprt_ptr->free_lcid_list, list_node) {
 		list_del(&temp_lcid->list_node);
@@ -4336,7 +4339,7 @@ static void glink_core_rx_cmd_version(struct glink_transport_if *if_ptr,
 		if_ptr->glink_core_priv->remote_neg_completed = true;
 		if (xprt_is_fully_opened(xprt_ptr))
 			check_link_notifier_and_notify(xprt_ptr,
-						       GLINK_LINK_STATE_UP);
+					GLINK_LINK_STATE_UP);
 	}
 }
 
@@ -4444,7 +4447,7 @@ static void glink_core_rx_cmd_version_ack(struct glink_transport_if *if_ptr,
 		xprt_ptr->local_state = GLINK_XPRT_OPENED;
 		if (xprt_is_fully_opened(xprt_ptr))
 			check_link_notifier_and_notify(xprt_ptr,
-						       GLINK_LINK_STATE_UP);
+					GLINK_LINK_STATE_UP);
 	} else {
 		if_ptr->tx_cmd_version(if_ptr, l_version, xprt_ptr->l_features);
 	}
@@ -4700,11 +4703,11 @@ static bool ch_migrate(struct channel_ctx *l_ctx, struct channel_ctx *r_ctx)
 	l_ctx->local_xprt_req = 0;
 	l_ctx->local_xprt_resp = 0;
 	if (new_xprt != r_ctx->transport_ptr->id || l_ctx == r_ctx) {
-	if (new_xprt != r_ctx->transport_ptr->id) {
-		r_ctx->local_xprt_req = 0;
-		r_ctx->local_xprt_resp = 0;
-		r_ctx->remote_xprt_req = 0;
-		r_ctx->remote_xprt_resp = 0;
+		if (new_xprt != r_ctx->transport_ptr->id) {
+			r_ctx->local_xprt_req = 0;
+			r_ctx->local_xprt_resp = 0;
+			r_ctx->remote_xprt_req = 0;
+			r_ctx->remote_xprt_resp = 0;
 		}
 
 		l_ctx->remote_xprt_req = 0;

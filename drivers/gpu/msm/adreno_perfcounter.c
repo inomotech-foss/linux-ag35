@@ -770,9 +770,9 @@ static int _perfcounter_enable_default(struct adreno_device *adreno_dev,
 			if (ret == -EAGAIN)
 				ret = 0;
 			else
-			KGSL_DRV_ERR(device,
-			"Perfcounter %u/%u/%u start via commands failed %d\n",
-			group, counter, countable, ret);
+				KGSL_DRV_ERR(device,
+				"Perfcounter %u/%u/%u start via commands failed %d\n",
+				group, counter, countable, ret);
 		}
 	} else {
 		/* Select the desired perfcounter */

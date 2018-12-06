@@ -376,7 +376,7 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)
 		}
 
 		if (is_stack(priv, vma)) {
-				name = "[stack]";
+			name = "[stack]";
 			goto done;
 		}
 
@@ -1821,7 +1821,7 @@ static int show_numa_map(struct seq_file *m, void *v, int is_pid)
 	} else if (vma->vm_start <= mm->brk && vma->vm_end >= mm->start_brk) {
 		seq_puts(m, " heap");
 	} else if (is_stack(proc_priv, vma)) {
-				seq_puts(m, " stack");
+		seq_puts(m, " stack");
 	}
 
 	if (is_vm_hugetlb_page(vma))

@@ -2364,8 +2364,6 @@ composite_resume(struct usb_gadget *gadget)
 				}
 				f->func_wakeup_pending = 0;
 			}
-				f->func_wakeup_pending = 0;
-			}
 
 			if (gadget->speed != USB_SPEED_SUPER && f->resume)
 				f->resume(f);

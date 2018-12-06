@@ -56,21 +56,12 @@
 #include <linux/slab.h>
 #include <linux/migrate.h>
 #include <linux/qstart.h>
-
-#include "../../drivers/mtd/ubi/ubi.h"
-
-#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for ubi  restore
-extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int where);
-#endif
-
+#include "../../drivers/mtd/ubi/ubi.h" // quectel add
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
-/******************************************************************************************
-francis-2018/12/29:Description....
-Refer to [Issue-Depot].[IS0000416][Submitter:dawn.yang@quectel.com,Date:2018-12-28]
-<recovery模式下usrdata 的ubi设备号被改为3，导致概率性被擦除，差分包丢失>
-******************************************************************************************/
-extern unsigned int Quectel_Restore(const char * partition_name, int where);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name,int mtd_nub, int where);
+// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
 #endif
+
 static int read_block(struct inode *inode, void *addr, unsigned int block,
 		      struct ubifs_data_node *dn)
 {
@@ -114,8 +105,12 @@ static int read_block(struct inode *inode, void *addr, unsigned int block,
 dump:
 	ubifs_err(c, "bad data node (block %u, inode %lu)",
 		  block, inode->i_ino);
-	printk("@Ramos set restore modem  flag here 33331111\r\n");
-	Quectel_Restore(ubi_get_device(c->vi.ubi_num)->mtd->name, 3);
+	
+#if 1 // def  QUECTEL_MODEM_BACKUP   //Ramos 20160801 add for modem file backup
+		printk("@Quectel0125 read block  set restore UBI =%d,mtd =%d\r\n", c->vi.ubi_num,ubi_get_device(c->vi.ubi_num)->mtd->index);
+// modify by [francis.huan] 20180524 ,for match mtd nub to restore
+		Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index, 3);
+#endif
 
 	ubifs_dump_node(c, dn);
 	return -EINVAL;
@@ -953,8 +948,10 @@ static int do_writepage(struct page *page, int len)
 		ubifs_err(c, "cannot write page %lu of inode %lu, error %d",
 			  page->index, inode->i_ino, err);
 
+#if 1 // def  QUECTEL_MODEM_BACKUP   //Ramos 20160801 add for modem file backup
 		printk("@Ramos read block  set restore UBI =%d,  \r\n", c->vi.ubi_num);
-		Quectel_Restore(ubi_get_device(c->vi.ubi_num)->mtd->name, 3);
+		Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index, 3);
+#endif
 
 		ubifs_ro_mode(c, err);
 	}

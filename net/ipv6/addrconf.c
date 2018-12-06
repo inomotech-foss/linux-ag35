@@ -302,7 +302,7 @@ static void addrconf_mod_rs_timer(struct inet6_dev *idev,
 static void addrconf_mod_dad_work(struct inet6_ifaddr *ifp,
 				   unsigned long delay)
 {
-		in6_ifa_hold(ifp);
+	in6_ifa_hold(ifp);
 	if (mod_delayed_work(addrconf_wq, &ifp->dad_work, delay))
 		in6_ifa_put(ifp);
 }

@@ -707,7 +707,7 @@ static int dwc3_msm_ep_queue(struct usb_ep *ep,
 		dev_err(mdwc->dev,
 			"%s: trying to queue request %pK to disabled ep %s\n",
 			__func__, request, ep->name);
-	spin_unlock_irqrestore(&dwc->lock, flags);
+		spin_unlock_irqrestore(&dwc->lock, flags);
 		return -EPERM;
 	}
 
@@ -1103,9 +1103,9 @@ static int gsi_prepare_trbs(struct usb_ep *ep, struct usb_gsi_request *req)
 							&dep->trb_pool[1]);
 				trb->ctrl = DWC3_TRBCTL_LINK_TRB;
 			} else if (i == (num_trbs - 1)) {
-			/* Set up the Link TRB at the end */
+				/* Set up the Link TRB at the end */
 				trb->bpl = dwc3_trb_dma_offset(dep,
-							&dep->trb_pool[0]);
+						&dep->trb_pool[0]);
 				trb->bph = (1 << 23) | (1 << 21)
 						| (ep->ep_intr_num << 16);
 				trb->ctrl = DWC3_TRBCTL_LINK_TRB
@@ -1174,7 +1174,7 @@ static void gsi_configure_ep(struct usb_ep *ep, struct usb_gsi_request *request)
 	struct dwc3_gadget_ep_cmd_params params;
 	const struct usb_endpoint_descriptor *desc = ep->desc;
 	const struct usb_ss_ep_comp_descriptor *comp_desc = ep->comp_desc;
-	u32			reg;
+	u32 reg;
 	int ret;
 
 	memset(&params, 0x00, sizeof(params));
@@ -1308,11 +1308,11 @@ static bool gsi_check_ready_to_suspend(struct usb_ep *ep, bool f_suspend)
 	}
 	/* Check for U3 only if we are not handling Function Suspend */
 	if (!f_suspend) {
-	reg = dwc3_readl(dwc->regs, DWC3_DSTS);
-	if (DWC3_DSTS_USBLNKST(reg) != DWC3_LINK_STATE_U3) {
-		dev_err(mdwc->dev, "Unable to suspend GSI ch\n");
-		return false;
-	}
+		reg = dwc3_readl(dwc->regs, DWC3_DSTS);
+		if (DWC3_DSTS_USBLNKST(reg) != DWC3_LINK_STATE_U3) {
+			dev_err(mdwc->dev, "Unable to suspend GSI ch\n");
+			return false;
+		}
 	}
 
 	return true;
@@ -2095,6 +2095,12 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc)
 		return -EBUSY;
 	}
 
+	if (!mdwc->in_host_mode && (mdwc->vbus_active && !mdwc->suspend)) {
+		dev_dbg(mdwc->dev,
+			"Received wakeup event before the core suspend\n");
+		return -EBUSY;
+	}
+
 	ret = dwc3_msm_prepare_suspend(mdwc);
 	if (ret)
 		return ret;
@@ -2321,7 +2327,7 @@ static void dwc3_ext_event_notify(struct dwc3_msm *mdwc)
 	 * for initial notification during bootup.
 	 */
 	if (mdwc->init)
-	flush_delayed_work(&mdwc->sm_work);
+		flush_delayed_work(&mdwc->sm_work);
 
 	if (mdwc->id_state == DWC3_ID_FLOAT) {
 		dbg_event(0xFF, "ID set", 0);
@@ -3686,7 +3692,7 @@ static int dwc3_otg_start_host(struct dwc3_msm *mdwc, int on)
 
 		/* re-init core and OTG registers as block reset clears these */
 		if (!mdwc->host_only_mode)
-		dwc3_post_host_reset_core_init(dwc);
+			dwc3_post_host_reset_core_init(dwc);
 
 		pm_runtime_mark_last_busy(mdwc->dev);
 		pm_runtime_put_sync_autosuspend(mdwc->dev);
@@ -4178,7 +4184,7 @@ static void dwc3_msm_otg_sm_work(struct work_struct *w)
 			mdwc->vbus_retry_count = 0;
 			mdwc->hc_died = false;
 			if (!mdwc->stop_host)
-			work = 1;
+				work = 1;
 			mdwc->stop_host = false;
 		} else {
 			dev_dbg(mdwc->dev, "still in a_host state. Resuming root hub.\n");

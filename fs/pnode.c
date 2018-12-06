@@ -226,7 +226,7 @@ static int propagate_one(struct mount *m)
 			p = n->mnt_master;
 			if (p == dest_master || IS_MNT_MARKED(p))
 				break;
-			}
+		}
 		do {
 			struct mount *parent = last_source->mnt_parent;
 			if (last_source == first_source)
@@ -258,7 +258,7 @@ static int propagate_one(struct mount *m)
 		read_sequnlock_excl(&mount_lock);
 	}
 	hlist_add_head(&child->mnt_hash, list);
-	return 0;
+	return count_mounts(m->mnt_ns, child);
 }
 
 /*

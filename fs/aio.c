@@ -68,8 +68,8 @@ struct aio_ring {
 #define AIO_RING_PAGES	8
 
 struct kioctx_table {
-	struct rcu_head	rcu;
-	unsigned	nr;
+	struct rcu_head		rcu;
+	unsigned		nr;
 	struct kioctx __rcu	*table[];
 };
 
@@ -1007,7 +1007,7 @@ static struct kioctx *lookup_ioctx(unsigned long ctx_id)
 	ctx = rcu_dereference(table->table[id]);
 	if (ctx && ctx->user_id == ctx_id) {
 		if (percpu_ref_tryget_live(&ctx->users))
-		ret = ctx;
+			ret = ctx;
 	}
 out:
 	rcu_read_unlock();
@@ -1447,6 +1447,7 @@ rw_common:
 			break;
 		}
 
+		get_file(file);
 		if (rw == WRITE)
 			file_start_write(file);
 
@@ -1459,6 +1460,7 @@ rw_common:
 
 		if (rw == WRITE)
 			file_end_write(file);
+		fput(file);
 		break;
 
 	case IOCB_CMD_FDSYNC:
