@@ -46,8 +46,8 @@
 * Private constant and macro definitions using #define
 *****************************************************************************/
 #define FTS_DRIVER_NAME                     "fts_ts"
-#define INTERVAL_READ_REG                   50  /*interval time per read:ms*/
-#define TIMEOUT_READ_REG                    101 /*timeout of read reg:ms*/
+#define INTERVAL_READ_REG                   20  /*interval time per read:ms*/
+#define TIMEOUT_READ_REG                    300 /*timeout of read reg:ms*/
 #if FTS_POWER_SOURCE_CUST_EN
 #define FTS_VTG_MIN_UV                      2600000
 #define FTS_VTG_MAX_UV                      3300000
@@ -1125,6 +1125,7 @@ int fts_ts_inputdev_open(struct input_dev *dev)
 	struct i2c_client *client = data->client;
 	const struct fts_ts_platform_data *pdata = data->pdata;
 	int err;
+	int retry = 0;
 
 	FTS_INFO("%s users = %d", __func__, dev->users);
 
@@ -1145,19 +1146,31 @@ int fts_ts_inputdev_open(struct input_dev *dev)
 
 	err = gpio_direction_output(pdata->switch_gpio, 1);
 	if (err) {
-		dev_err(&client->dev, "unable to set direction for switch gpio %d\n",
-				pdata->switch_gpio);
+		dev_err(&client->dev, "unable to set direction for \
+			switch gpio %d\n",pdata->switch_gpio);
 		return -EIO;
 	}
 
+	mutex_lock(&fts_wq_data->reset_mutex);
 	fts_reset_proc(200);
 
+	 while(retry < 10) {
+		retry++;
 	err = fts_wait_tp_to_valid(client);
 	if (err) {
-		FTS_ERROR("failed to open input dev!");
+			printk("failed to open input dev! retry=%d\n", retry);
+		} else {
+			break;
+		}
+	}
+
+	if (err) {
+		printk("failed to open input dev! retry=%d\n", retry);
+		mutex_unlock(&fts_wq_data->reset_mutex);
 		return -EIO;
 	}
 
+	mutex_unlock(&fts_wq_data->reset_mutex);
 	data->inputdev_opened = true;
 	return 0;
 }
@@ -1285,6 +1298,7 @@ static int fts_ts_probe(struct i2c_client *client,
 
 	spin_lock_init(&fts_wq_data->irq_lock);
 	mutex_init(&fts_wq_data->report_mutex);
+	mutex_init(&fts_wq_data->reset_mutex);
 
 	fts_ctpm_get_upgrade_array();
 
@@ -1567,7 +1581,9 @@ static int fts_ts_resume(struct device *dev)
 	fts_release_all_finger();
 
 #if (!FTS_CHIP_IDC)
-	fts_reset_proc(200);
+	mutex_lock(&fts_wq_data->reset_mutex);
+	fts_reset_proc(1);
+	mutex_unlock(&fts_wq_data->reset_mutex);
 #endif
 
 	fts_tp_state_recovery(data->client);
