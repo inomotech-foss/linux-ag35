@@ -1942,7 +1942,8 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 					flags);
 				return -EINVAL;
 			}
-			if (lower_32_bits(port->buf[data->token].phys) !=
+			if (data->payload_size >= 2 * sizeof(uint32_t) &&
+				(lower_32_bits(port->buf[data->token].phys) !=
 				payload[0] ||
 				msm_audio_populate_upper_32_bits(
 					port->buf[data->token].phys) !=
@@ -2135,6 +2136,18 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 		break;
 	case ASM_SESSION_CMDRSP_GET_MTMX_STRTR_PARAMS_V2:
 		q6asm_process_mtmx_get_param_rsp(ac, (void *) payload);
+		break;
+	case ASM_SESSION_CMDRSP_ADJUST_SESSION_CLOCK_V2:
+		if (data->payload_size >= 3 * sizeof(uint32_t))
+			pr_debug("%s: ASM_SESSION_CMDRSP_ADJUST_SESSION_CLOCK_V2 sesion %d status 0x%x msw %u lsw %u\n",
+				 __func__, ac->session,
+				 payload[0],
+				 payload[2],
+				payload[1]);
+		else
+			pr_err("%s: payload size of %x is less than expected.\n",
+				__func__, data->payload_size);
+		wake_up(&ac->cmd_wait);
 		break;
 	case ASM_SESSION_CMDRSP_GET_PATH_DELAY_V2:
 		if (data->payload_size >= 3 * sizeof(uint32_t))
