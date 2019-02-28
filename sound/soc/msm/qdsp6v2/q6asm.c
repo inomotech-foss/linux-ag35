@@ -1933,7 +1933,7 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 			spin_lock_irqsave(&port->dsp_lock, dsp_flags);
 			if (data->token < 0 ||
 					data->token >= port->max_buf_cnt) {
-				pr_err("%s: Invalid token buffer index %u\n",
+				pr_debug("%s: Invalid token buffer index %u\n",
 					__func__, data->token);
 				spin_unlock_irqrestore(&port->dsp_lock,
 								dsp_flags);
@@ -1942,8 +1942,7 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 					flags);
 				return -EINVAL;
 			}
-			if (data->payload_size >= 2 * sizeof(uint32_t) &&
-				(lower_32_bits(port->buf[data->token].phys) !=
+			if (lower_32_bits(port->buf[data->token].phys) !=
 				payload[0] ||
 				msm_audio_populate_upper_32_bits(
 					port->buf[data->token].phys) !=
@@ -2054,7 +2053,7 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 			spin_lock_irqsave(&port->dsp_lock, dsp_flags);
 			token = data->token;
 			if (token < 0 || token >= port->max_buf_cnt) {
-				pr_err("%s: Invalid token buffer index %u\n",
+				pr_debug("%s: Invalid token buffer index %u\n",
 					__func__, token);
 				spin_unlock_irqrestore(&port->dsp_lock,
 								dsp_flags);
