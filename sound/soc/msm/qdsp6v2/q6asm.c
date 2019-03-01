@@ -3372,6 +3372,7 @@ int q6asm_open_shared_io(struct audio_client *ac,
 			config->channels);
 		return -EINVAL;
 	}
+
 	bufsz = config->bufsz;
 	bufcnt = config->bufcnt;
 	num_watermarks = 0;
@@ -3842,6 +3843,7 @@ int q6asm_set_encdec_chan_map(struct audio_client *ac,
 			num_channels);
 		return -EINVAL;
 	}
+
 	q6asm_add_hdr(ac, &chan_map.hdr, sizeof(chan_map), TRUE);
 	atomic_set(&ac->cmd_state, -1);
 	chan_map.hdr.opcode = ASM_STREAM_CMD_SET_ENCDEC_PARAM;
@@ -3919,11 +3921,13 @@ int q6asm_enc_cfg_blk_pcm_v4(struct audio_client *ac,
 		rc = -EINVAL;
 		goto fail_cmd;
 	}
+
 	if (channels > PCM_FORMAT_MAX_NUM_CHANNEL) {
 		pr_err("%s: Invalid channel count %d\n", __func__, channels);
 		rc = -EINVAL;
 		goto fail_cmd;
 	}
+
 	pr_debug("%s: session[%d]rate[%d]ch[%d]bps[%d]wordsize[%d]\n", __func__,
 		 ac->session, rate, channels,
 		 bits_per_sample, sample_word_size);
@@ -4025,7 +4029,7 @@ int q6asm_enc_cfg_blk_pcm_v3(struct audio_client *ac,
 
 	if (channels > PCM_FORMAT_MAX_NUM_CHANNEL) {
 		pr_err("%s: Invalid channel count %d\n", __func__, channels);
-		rc= -EINVAL;
+		rc = -EINVAL;
 		goto fail_cmd;
 	}
 
@@ -4115,6 +4119,7 @@ int q6asm_enc_cfg_blk_pcm_v2(struct audio_client *ac,
 		   pr_err("%s: Invalid channel count %d\n", __func__, channels);
 		   return -EINVAL;
 	}
+
 	pr_debug("%s: Session %d, rate = %d, channels = %d\n", __func__,
 			 ac->session, rate, channels);
 
@@ -4277,6 +4282,7 @@ int q6asm_enc_cfg_blk_pcm_native(struct audio_client *ac,
 		pr_err("%s: Invalid channel count %d\n", __func__, channels);
 		return -EINVAL;
 	}
+
 	pr_debug("%s: Session %d, rate = %d, channels = %d\n", __func__,
 			 ac->session, rate, channels);
 
