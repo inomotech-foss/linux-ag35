@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1448,8 +1448,8 @@ void diag_dci_notify_client(int peripheral_mask, int data, int proc)
 					stat = send_sig_info(
 						entry->client_info.signal_type,
 						&info, dci_task);
-			if (stat)
-				pr_err("diag: Err sending dci signal to client, signal data: 0x%x, stat: %d\n",
+					if (stat)
+						pr_err("diag: Err sending dci signal to client, signal data: 0x%x, stat: %d\n",
 							info.si_int, stat);
 				} else
 					pr_err("diag: client data is corrupted, signal data: 0x%x, stat: %d\n",
@@ -2196,8 +2196,8 @@ struct diag_dci_client_tbl *dci_lookup_client_entry_pid(int tgid)
 		pid_struct = find_get_pid(entry->tgid);
 		if (!pid_struct) {
 			DIAG_LOG(DIAG_DEBUG_DCI,
-				"diag: valid pid doesn't exist for pid = %d\n",
-				entry->tgid);
+			"diag: Exited pid (%d) doesn't match dci client of pid (%d)\n",
+			tgid, entry->tgid);
 			continue;
 		}
 		task_s = get_pid_task(pid_struct, PIDTYPE_PID);
@@ -2874,7 +2874,7 @@ int diag_dci_register_client(struct diag_dci_reg_tbl_t *reg_entry)
 
 	new_entry->buffers = kzalloc(new_entry->num_buffers *
 				     sizeof(struct diag_dci_buf_peripheral_t),
-				     GFP_KERNEL);
+					GFP_KERNEL);
 	if (!new_entry->buffers) {
 		pr_err("diag: Unable to allocate buffers for peripherals in %s\n",
 								__func__);
@@ -2898,7 +2898,7 @@ int diag_dci_register_client(struct diag_dci_reg_tbl_t *reg_entry)
 		if (!proc_buf->buf_primary)
 			goto fail_alloc;
 		proc_buf->buf_cmd = kzalloc(sizeof(struct diag_dci_buffer_t),
-					    GFP_KERNEL);
+					GFP_KERNEL);
 		if (!proc_buf->buf_cmd)
 			goto fail_alloc;
 		err = diag_dci_init_buffer(proc_buf->buf_primary,
@@ -2954,7 +2954,7 @@ fail_alloc:
 		new_entry->dci_log_mask = NULL;
 		kfree(new_entry->buffers);
 		new_entry->buffers = NULL;
-	kfree(new_entry);
+		kfree(new_entry);
 		new_entry = NULL;
 	}
 	mutex_unlock(&driver->dci_mutex);
@@ -3104,7 +3104,7 @@ int diag_dci_write_proc(uint8_t peripheral, int pkt_type, char *buf, int len)
 	    !(driver->feature[PERIPHERAL_MODEM].rcvd_feature_mask)) {
 		DIAG_LOG(DIAG_DEBUG_DCI,
 			"buf: 0x%pK, p: %d, len: %d, f_mask: %d\n",
-				buf, peripheral, len,
+			buf, peripheral, len,
 			driver->feature[PERIPHERAL_MODEM].rcvd_feature_mask);
 		return -EINVAL;
 	}
