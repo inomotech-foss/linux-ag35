@@ -1091,8 +1091,10 @@ static void msm_hs_enable_flow_control(struct uart_port *uport, bool override)
 {
 	struct msm_hs_port *msm_uport = UARTDM_TO_MSM(uport);
 	unsigned int data;
+	unsigned long flags;
 
 	if (msm_uport->flow_control || override) {
+		raw_local_irq_save(flags);
 		/* Enable RFR line */
 		msm_hs_write(uport, UART_DM_CR, RFR_LOW);
 		/* Enable auto RFR */
@@ -1101,6 +1103,7 @@ static void msm_hs_enable_flow_control(struct uart_port *uport, bool override)
 		msm_hs_write(uport, UART_DM_MR1, data);
 		/* Ensure register IO completion */
 		mb();
+		raw_local_irq_restore(flags);
 	}
 }
 
@@ -1108,6 +1111,7 @@ static void msm_hs_disable_flow_control(struct uart_port *uport, bool override)
 {
 	struct msm_hs_port *msm_uport = UARTDM_TO_MSM(uport);
 	unsigned int data;
+	unsigned long flags;
 
 	/*
 	 * Clear the Rx Ready Ctl bit - This ensures that
@@ -1116,6 +1120,7 @@ static void msm_hs_disable_flow_control(struct uart_port *uport, bool override)
 	 */
 
 	if (msm_uport->flow_control || override) {
+		raw_local_irq_save(flags);
 		data = msm_hs_read(uport, UART_DM_MR1);
 		/* disable auto ready-for-receiving */
 		data &= ~UARTDM_MR1_RX_RDY_CTL_BMSK;
@@ -1124,6 +1129,7 @@ static void msm_hs_disable_flow_control(struct uart_port *uport, bool override)
 		msm_hs_write(uport, UART_DM_CR, RFR_HIGH);
 		/* Ensure register IO completion */
 		mb();
+		raw_local_irq_restore(flags);
 	}
 }
 
