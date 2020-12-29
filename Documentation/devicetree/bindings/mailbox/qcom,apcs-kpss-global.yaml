@@ -54,6 +54,7 @@ properties:
           - const: qcom,sdm845-apss-shared
       - items:
           - enum:
+              - qcom,mdm9607-apcs-kpss-global
               - qcom,msm8916-apcs-kpss-global
               - qcom,msm8939-apcs-kpss-global
               - qcom,msm8953-apcs-kpss-global
