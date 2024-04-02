@@ -10,7 +10,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022, 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include "skeleton.dtsi"
@@ -1050,7 +1050,6 @@
 
 	qcom,msm-audio-ion {
 		compatible = "qcom,msm-audio-ion";
-		qcom,scm-mp-enabled;
 		memory-region = <&audio_mem>;
 	};
 
