@@ -239,6 +239,52 @@ int emac_clk_set_rate(struct emac_adapter *adpt, enum emac_clk_id id,
 	return ret;
 }
 
+/* Check link status and handle link state changes */
+static void emac_mac2mac_adjust_link(struct net_device *netdev)
+{
+	struct emac_adapter *adpt = netdev_priv(netdev);
+	struct emac_phy *phy = &adpt->phy;
+	struct emac_hw *hw = &adpt->hw;
+	bool status_changed = false;
+	int vote_idx = 0;
+	int ret = 0;
+
+	if (!adpt)
+		return;
+
+	/* ensure that no reset is in progress while link task is running */
+	while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING))
+		/* Reset might take few 10s of ms */
+		msleep(EMAC_ADPT_RESET_WAIT_TIME);
+
+	if (TEST_FLAG(adpt, ADPT_STATE_DOWN))
+		goto link_task_done;
+
+	phy->link_speed = adpt->speed_mac2mac;
+	status_changed = true;
+
+	/* Acquire resources */
+	pm_runtime_get_sync(netdev->dev.parent);
+
+	phy->ops.tx_clk_set_rate(adpt);
+	emac_hw_start_mac(hw);
+	adpt->serdes_synced = 1;
+	netif_carrier_on(adpt->netdev);
+link_task_done:
+	CLR_FLAG(adpt, ADPT_STATE_RESETTING);
+}
+
+static void check_serdes_linkup(struct work_struct *work) {
+	struct delayed_work *dwork = container_of(work, struct delayed_work, work);
+	struct emac_adapter *adpt = container_of(dwork, struct emac_adapter, work_delayed);
+	struct emac_sgmii *sgmii = adpt->phy.private;
+
+	if (readl_relaxed(sgmii->base + EMAC_SGMII_PHY_RX_CHK_STATUS) & 0x40)
+		emac_mac2mac_adjust_link(adpt->netdev);
+	else
+		schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
+}
+
 /* reinitialize */
 int emac_reinit_locked(struct emac_adapter *adpt)
 {
@@ -266,8 +312,15 @@ int emac_reinit_locked(struct emac_adapter *adpt)
 	pm_runtime_put_autosuspend(netdev->dev.parent);
 
 	CLR_FLAG(adpt, ADPT_STATE_RESETTING);
-	emac_phy_down(adpt);
-	emac_phy_up(adpt);
+	if (!adpt->mac2mac_en){
+		emac_phy_down(adpt);
+		emac_phy_up(adpt);
+	}
+	adpt->serdes_synced = 0;
+	if(adpt->mac2mac_en){
+		if(!adpt->serdes_synced)
+			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
+	}
 	return ret;
 }
 
@@ -1168,19 +1221,20 @@ static irqreturn_t emac_wol_isr(int irq, void *data)
 
 	pm_runtime_get_sync(netdev->dev.parent);
 
-	/* read switch interrupt status reg */
-	if (QCA8337_PHY_ID == adpt->phydev->phy_id)
-		ret = qca8337_read(adpt->phydev->priv, QCA8337_GLOBAL_INT1);
+	if(!adpt->mac2mac_en){
+		/* read switch interrupt status reg */
+		if (QCA8337_PHY_ID == adpt->phydev->phy_id)
+			ret = qca8337_read(adpt->phydev->priv, QCA8337_GLOBAL_INT1);
 
-	for (i = 0; i < QCA8337_NUM_PHYS ; i++) {
-		ret = mdiobus_read(adpt->phydev->bus, i, MII_INT_STATUS);
-		if ((ret & LINK_SUCCESS_INTERRUPT) || (ret & LINK_SUCCESS_BX) ||
-		    (ret & WOL_INT))
-			val |= 1 << i;
-		if (QCA8337_PHY_ID != adpt->phydev->phy_id)
-			break;
+		for (i = 0; i < QCA8337_NUM_PHYS ; i++) {
+			ret = mdiobus_read(adpt->phydev->bus, i, MII_INT_STATUS);
+			if ((ret & LINK_SUCCESS_INTERRUPT) || (ret & LINK_SUCCESS_BX) ||
+			    (ret & WOL_INT))
+				val |= 1 << i;
+			if (QCA8337_PHY_ID != adpt->phydev->phy_id)
+				break;
+		}
 	}
-
 	pm_runtime_mark_last_busy(netdev->dev.parent);
 	pm_runtime_put_autosuspend(netdev->dev.parent);
 
@@ -1887,7 +1941,6 @@ link_task_done:
 void emac_phy_up(struct emac_adapter *adpt)
 {
 	phy_start(adpt->phydev);
-
 }
 
 /* Bringup the interface/HW */
@@ -1934,7 +1987,7 @@ int emac_mac_up(struct emac_adapter *adpt)
 	for (i = 0; i < adpt->num_rxques; i++)
 		emac_refresh_rx_buffer(&adpt->rx_queue[i]);
 
-	if (!adpt->phy.is_ext_phy_connect) {
+	if (!adpt->phy.is_ext_phy_connect && !adpt->mac2mac_en) {
 		ret = phy_connect_direct(netdev, adpt->phydev, emac_adjust_link,
 					 phy->phy_interface);
 		if (ret) {
@@ -1953,11 +2006,13 @@ int emac_mac_up(struct emac_adapter *adpt)
 	phy->link_speed = SPEED_UNKNOWN;
 	phy->link_pause = 0;
 
-	/* Enable pause frames. */
-	adpt->phydev->supported |= SUPPORTED_Pause | SUPPORTED_Asym_Pause;
-	adpt->phydev->advertising |= SUPPORTED_Pause | SUPPORTED_Asym_Pause;
+	if(!adpt->mac2mac_en){
+		/* Enable pause frames. */
+		adpt->phydev->supported |= SUPPORTED_Pause | SUPPORTED_Asym_Pause;
+		adpt->phydev->advertising |= SUPPORTED_Pause | SUPPORTED_Asym_Pause;
 
-	adpt->phydev->irq = PHY_POLL;
+		adpt->phydev->irq = PHY_POLL;
+	}
 
 	emac_napi_enable_all(adpt);
 	netif_start_queue(netdev);
@@ -2009,10 +2064,11 @@ void emac_mac_down(struct emac_adapter *adpt, u32 ctrl)
 		if (adpt->irq[i].irq)
 			free_irq(adpt->irq[i].irq, &adpt->irq[i]);
 
-	if (((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
+	if ((!adpt->mac2mac_en) &&
+	    ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	     (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
 	     (ATH8035_PHY_ID == adpt->phydev->phy_id)) &&
-	   (adpt->phy.is_ext_phy_connect)) {
+	     (adpt->phy.is_ext_phy_connect)) {
 		phy_disconnect(adpt->phydev);
 		adpt->phy.is_ext_phy_connect = 0;
 	}
@@ -2052,7 +2108,8 @@ static int emac_open(struct net_device *netdev)
 
 	pm_runtime_get_sync(netdev->dev.parent);
 	retval = emac_mac_up(adpt);
-	emac_phy_up(adpt);
+	if (!adpt->mac2mac_en)
+		emac_phy_up(adpt);
 	pm_runtime_mark_last_busy(netdev->dev.parent);
 	pm_runtime_put_autosuspend(netdev->dev.parent);
 	if (retval)
@@ -2076,6 +2133,11 @@ static int emac_open(struct net_device *netdev)
 			phy->is_wol_enabled = true;
 			emac_wol_gpio_irq(adpt, false);
 		}
+	}
+
+	if(adpt->mac2mac_en){
+		if(!adpt->serdes_synced)
+			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
 	}
 	return retval;
 
@@ -2104,7 +2166,8 @@ static int emac_close(struct net_device *netdev)
 
 	if (!TEST_FLAG(adpt, ADPT_STATE_DOWN)) {
 		emac_mac_down(adpt, EMAC_HW_CTRL_RESET_MAC);
-		emac_phy_down(adpt);
+		if (!adpt->mac2mac_en)
+			emac_phy_down(adpt);
 	} else
 		emac_hw_reset_mac(hw);
 
@@ -2116,6 +2179,9 @@ static int emac_close(struct net_device *netdev)
 
 	emac_free_all_rtx_descriptor(adpt);
 
+	cancel_delayed_work_sync(&adpt->work_delayed);
+ 	flush_delayed_work(&adpt->work_delayed);
+	adpt->serdes_synced = 0;
 	return 0;
 }
 
@@ -2144,7 +2210,10 @@ static int emac_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 		if (TEST_FLAG(hw, HW_PTP_CAP))
 			return emac_tstamp_ioctl(netdev, ifr, cmd);
 	default:
-		return phy_mii_ioctl(netdev->phydev, ifr, cmd);
+		if(!adpt->mac2mac_en)
+			return phy_mii_ioctl(netdev->phydev, ifr, cmd);
+		else
+			return 0;
 	}
 }
 
@@ -2158,7 +2227,7 @@ void emac_update_hw_stats(struct emac_adapter *adpt)
 	/* Prevent stats update while adapter is being reset, or if the
 	 * connection is down.
 	 */
-	if (adpt->phydev->speed <= 0)
+	if (!adpt->mac2mac_en && adpt->phydev->speed <= 0)
 		return;
 
 	if (TEST_FLAG(adpt, ADPT_STATE_DOWN) ||
@@ -2684,6 +2753,10 @@ static int emac_get_resources(struct platform_device *pdev,
 		adpt->tstamp_en
 			= of_property_read_bool(node, "qcom,emac-tstamp-en");
 
+	/* get mac2mac enable flag and speed*/
+	adpt->mac2mac_en = of_property_read_bool(node, "mac2mac");
+	of_property_read_u32(node, "speed_mac2mac", &adpt->speed_mac2mac);
+
 	/* get mac address */
 	if (ACPI_COMPANION(&pdev->dev)) {
 		retval = device_property_read_u8_array(&pdev->dev,
@@ -2882,46 +2955,52 @@ static int emac_pm_suspend(struct device *device, bool wol_enable)
 			msleep(EMAC_ADPT_RESET_WAIT_TIME);
 
 		emac_mac_down(adpt, 0);
-		emac_phy_down(adpt);
+		if (!adpt->mac2mac_en)
+			emac_phy_down(adpt);
 
 		CLR_FLAG(adpt, ADPT_STATE_RESETTING);
 	}
+	if(!adpt->mac2mac_en){
+		phy_suspend(adpt->phydev);
+		flush_delayed_work(&adpt->phydev->state_queue);
+		if (QCA8337_PHY_ID != adpt->phydev->phy_id)
+			emac_hw_config_pow_save(hw, adpt->phydev->speed, !!wufc,
+						!!(wufc & EMAC_WOL_PHY));
 
-	phy_suspend(adpt->phydev);
-	flush_delayed_work(&adpt->phydev->state_queue);
-	if (QCA8337_PHY_ID != adpt->phydev->phy_id)
-		emac_hw_config_pow_save(hw, adpt->phydev->speed, !!wufc,
-					!!(wufc & EMAC_WOL_PHY));
+		if (!adpt->phydev->link && phy->is_wol_irq_reg) {
+			int value, i;
 
-	if (!adpt->phydev->link && phy->is_wol_irq_reg) {
-		int value, i;
-
-		for (i = 0; i < QCA8337_NUM_PHYS ; i++) {
-			/* ePHY driver keep external phy into power down mode
-			 * if WOL is not enabled. This change is to make sure
-			 * to keep ePHY in active state for LINK UP to work
+			for (i = 0; i < QCA8337_NUM_PHYS ; i++) {
+				/* ePHY driver keep external phy into power down mode
+				 * if WOL is not enabled. This change is to make sure
+				 * to keep ePHY in active state for LINK UP to work
 			 */
-			value = mdiobus_read(adpt->phydev->bus, i, MII_BMCR);
-			value &= ~BMCR_PDOWN;
-			mdiobus_write(adpt->phydev->bus, i, MII_BMCR, value);
+				value = mdiobus_read(adpt->phydev->bus, i, MII_BMCR);
+				value &= ~BMCR_PDOWN;
+				mdiobus_write(adpt->phydev->bus, i, MII_BMCR, value);
 
-			/* Enable EPHY Link UP interrupt */
-			mdiobus_write(adpt->phydev->bus, i, MII_INT_ENABLE,
-				      LINK_SUCCESS_INTERRUPT |
-				      LINK_SUCCESS_BX);
+				/* Enable EPHY Link UP interrupt */
+				mdiobus_write(adpt->phydev->bus, i, MII_INT_ENABLE,
+					      LINK_SUCCESS_INTERRUPT |
+					      LINK_SUCCESS_BX);
+			}
+
+			/* enable switch interrupts */
+			if (QCA8337_PHY_ID == adpt->phydev->phy_id)
+				qca8337_write(adpt->phydev->priv,
+					      QCA8337_GLOBAL_INT1_MASK, 0x8000);
+
+			if (wol_enable && phy->is_wol_irq_reg)
+				emac_wol_gpio_irq(adpt, true);
 		}
-
-		/* enable switch interrupts */
-		if (QCA8337_PHY_ID == adpt->phydev->phy_id)
-			qca8337_write(adpt->phydev->priv,
-				      QCA8337_GLOBAL_INT1_MASK, 0x8000);
-
-		if (wol_enable && phy->is_wol_irq_reg)
-			emac_wol_gpio_irq(adpt, true);
 	}
-
 	adpt->gpio_off(adpt, true, false);
 	msm_emac_clk_path_vote(adpt, EMAC_NO_PERF_VOTE);
+
+	adpt->suspend_called = 1;
+	cancel_delayed_work_sync(&adpt->work_delayed);
+	flush_delayed_work(&adpt->work_delayed);
+	adpt->serdes_synced = 0;
 	return 0;
 }
 
@@ -2938,23 +3017,32 @@ static int emac_pm_resume(struct device *device)
 	msm_emac_clk_path_vote(adpt, EMAC_MAX_PERF_VOTE);
 	emac_hw_reset_mac(hw);
 
-	/* Disable EPHY Link UP interrupt */
-	if (phy->is_wol_irq_reg) {
-		for (i = 0; i < QCA8337_NUM_PHYS ; i++)
-			mdiobus_write(adpt->phydev->bus, i, MII_INT_ENABLE, 0);
+	if (!adpt->mac2mac_en){
+		/* Disable EPHY Link UP interrupt */
+		if (phy->is_wol_irq_reg) {
+			for (i = 0; i < QCA8337_NUM_PHYS ; i++)
+				mdiobus_write(adpt->phydev->bus, i, MII_INT_ENABLE, 0);
+		}
+
+		/* disable switch interrupts */
+		if (QCA8337_PHY_ID == adpt->phydev->phy_id)
+			qca8337_write(adpt->phydev->priv, QCA8337_GLOBAL_INT1, 0x8000);
+
+		phy_resume(adpt->phydev);
 	}
-
-	/* disable switch interrupts */
-	if (QCA8337_PHY_ID == adpt->phydev->phy_id)
-		qca8337_write(adpt->phydev->priv, QCA8337_GLOBAL_INT1, 0x8000);
-
-	phy_resume(adpt->phydev);
-
 	if (netif_running(netdev)) {
 		retval = emac_mac_up(adpt);
 		emac_phy_up(adpt);
 		if (retval)
 			goto error;
+		if (!adpt->mac2mac_en){
+			emac_phy_up(adpt);
+		}
+	}
+
+	if(adpt->mac2mac_en){
+		if(!adpt->serdes_synced && adpt->suspend_called)
+			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
 	}
 	return 0;
 error:
@@ -3299,7 +3387,11 @@ static int emac_probe(struct platform_device *pdev)
 		goto err_clk_init;
 
 	/* init external phy */
-	ret = emac_phy_config_external(pdev, adpt);
+	if (!adpt->mac2mac_en)
+		ret = emac_phy_config_external(pdev, adpt);
+	else
+		dev_err(&pdev->dev, "mac2mac is enabled, not attaching external phy\n");
+
 	if (ret)
 		goto err_init_mdio_gpio;
 
@@ -3317,6 +3409,8 @@ static int emac_probe(struct platform_device *pdev)
 				 NETIF_F_TSO | NETIF_F_TSO6;
 
 	INIT_WORK(&adpt->work_thread, emac_work_thread);
+	if(adpt->mac2mac_en)
+		INIT_DELAYED_WORK(&adpt->work_delayed, check_serdes_linkup);
 
 	/* Initialize queues */
 	emac_mac_rx_tx_ring_init_all(pdev, adpt);
@@ -3378,18 +3472,20 @@ static int emac_probe(struct platform_device *pdev)
 err_undo_napi:
 	for (i = 0; i < adpt->num_rxques; i++)
 		netif_napi_del(&adpt->rx_queue[i].napi);
-	if (!ACPI_COMPANION(&pdev->dev))
+	if (!adpt->mac2mac_en && !ACPI_COMPANION(&pdev->dev))
 		put_device(&adpt->phydev->dev);
 	mdiobus_unregister(adpt->mii_bus);
 err_init_mdio_gpio:
 	adpt->gpio_off(adpt, true, true);
 err_clk_init:
-	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
+	if ((!adpt->mac2mac_en) &&
+	    (ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
 		emac_disable_clks(adpt);
 err_ldo_init:
-	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
+	if ((!adpt->mac2mac_en) &&
+	    (ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
 		emac_disable_regulator(adpt, EMAC_VREG1, EMAC_VREG5);
@@ -3411,9 +3507,10 @@ static int emac_remove(struct platform_device *pdev)
 	if (!pm_runtime_enabled(&pdev->dev) ||
 	    !pm_runtime_suspended(&pdev->dev)) {
 		if (netif_running(netdev)) {
-				emac_mac_down(adpt, 0);
+			emac_mac_down(adpt, 0);
+			if(!adpt->mac2mac_en)
 				emac_phy_down(adpt);
-			}
+		}
 		pm_runtime_disable(netdev->dev.parent);
 		pm_runtime_set_suspended(netdev->dev.parent);
 		pm_runtime_enable(netdev->dev.parent);
@@ -3425,7 +3522,8 @@ static int emac_remove(struct platform_device *pdev)
 	if (phy->is_wol_irq_reg)
 		emac_wol_gpio_irq(adpt, false);
 
-	mdiobus_unregister(adpt->mii_bus);
+	if(!adpt->mac2mac_en)
+		mdiobus_unregister(adpt->mii_bus);
 	unregister_netdev(netdev);
 
 	for (i = 0; i < adpt->num_rxques; i++)
@@ -3441,11 +3539,12 @@ static int emac_remove(struct platform_device *pdev)
 	emac_disable_regulator(adpt, EMAC_VREG1, EMAC_VREG5);
 	msm_emac_clk_path_teardown(adpt);
 
+
 #ifdef CONFIG_DEBUG_FS
 	debugfs_remove_recursive(adpt->debugfs_dir);
 #endif
 
-	if (!ACPI_COMPANION(&pdev->dev))
+	if (!adpt->mac2mac_en && !ACPI_COMPANION(&pdev->dev))
 		put_device(&adpt->phydev->dev);
 
 	if (sgmii->digital)

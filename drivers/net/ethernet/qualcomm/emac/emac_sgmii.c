@@ -244,9 +244,17 @@ int emac_sgmii_link_init(struct emac_adapter *adpt)
 	u32 val;
 	int autoneg, speed, duplex;
 
-	autoneg = (adpt->phydev) ? phydev->autoneg : AUTONEG_ENABLE;
-	speed = (adpt->phydev) ? phydev->speed : SPEED_UNKNOWN;
-	duplex = (adpt->phydev) ? phydev->duplex : DUPLEX_UNKNOWN;
+	if(!adpt->mac2mac_en){
+		phydev = adpt->phydev;
+		autoneg = (adpt->phydev) ? phydev->autoneg : AUTONEG_ENABLE;
+		speed = (adpt->phydev) ? phydev->speed : SPEED_UNKNOWN;
+		duplex = (adpt->phydev) ? phydev->duplex : DUPLEX_UNKNOWN;
+	}
+	else{
+		autoneg = AUTONEG_DISABLE;
+		speed = adpt->speed_mac2mac;
+		duplex = DUPLEX_FULL;
+	}
 
 	val = readl_relaxed(sgmii->base + EMAC_SGMII_PHY_AUTONEG_CFG2);
 
@@ -339,40 +347,42 @@ int emac_sgmii_autoneg_check(struct emac_adapter *adpt,
 	autoneg1 = readl_relaxed(sgmii->base + EMAC_SGMII_PHY_AUTONEG1_STATUS);
 	status   = ((autoneg1 & 0xff) << 8) | (autoneg0 & 0xff);
 
-	if (!(status & TXCFG_LINK)) {
-		phydev->link = false;
-		phydev->speed = SPEED_UNKNOWN;
-		phydev->duplex = DUPLEX_UNKNOWN;
-		return 0;
-	}
+	if(!adpt->mac2mac_en){
+		if (!(status & TXCFG_LINK)) {
+			phydev->link = false;
+			phydev->speed = SPEED_UNKNOWN;
+			phydev->duplex = DUPLEX_UNKNOWN;
+			return 0;
+		}
 
-	phydev->link = true;
+		phydev->link = true;
 
-	switch (status & TXCFG_MODE_BMSK) {
-	case TXCFG_1000_FULL:
-		phydev->speed = SPEED_1000;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case TXCFG_100_FULL:
-		phydev->speed = SPEED_100;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case TXCFG_100_HALF:
-		phydev->speed = SPEED_100;
-		phydev->duplex = DUPLEX_HALF;
-		break;
-	case TXCFG_10_FULL:
-		phydev->speed = SPEED_10;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case TXCFG_10_HALF:
-		phydev->speed = SPEED_10;
-		phydev->duplex = DUPLEX_HALF;
-		break;
-	default:
-		phydev->speed = SPEED_UNKNOWN;
-		phydev->duplex = DUPLEX_UNKNOWN;
-		break;
+		switch (status & TXCFG_MODE_BMSK) {
+		case TXCFG_1000_FULL:
+			phydev->speed = SPEED_1000;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case TXCFG_100_FULL:
+			phydev->speed = SPEED_100;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case TXCFG_100_HALF:
+			phydev->speed = SPEED_100;
+			phydev->duplex = DUPLEX_HALF;
+			break;
+		case TXCFG_10_FULL:
+			phydev->speed = SPEED_10;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case TXCFG_10_HALF:
+			phydev->speed = SPEED_10;
+			phydev->duplex = DUPLEX_HALF;
+			break;
+		default:
+			phydev->speed = SPEED_UNKNOWN;
+			phydev->duplex = DUPLEX_UNKNOWN;
+			break;
+		}
 	}
 	return 0;
 }
@@ -389,33 +399,35 @@ int emac_sgmii_link_check_no_ephy(struct emac_adapter *adpt,
 
 	val = readl_relaxed(sgmii->base + EMAC_SGMII_PHY_SPEED_CFG1);
 	val &= DUPLEX_MODE | SPDMODE_BMSK;
-	switch (val) {
-	case DUPLEX_MODE | SPDMODE_1000:
-		phydev->speed = SPEED_1000;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case DUPLEX_MODE | SPDMODE_100:
-		phydev->speed = SPEED_100;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case SPDMODE_100:
-		phydev->speed = SPEED_100;
-		phydev->duplex = DUPLEX_HALF;
-		break;
-	case DUPLEX_MODE | SPDMODE_10:
-		phydev->speed = SPEED_10;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case SPDMODE_10:
-		phydev->speed = SPEED_10;
-		phydev->duplex = DUPLEX_HALF;
-		break;
-	default:
-		phydev->speed = SPEED_UNKNOWN;
-		phydev->duplex = DUPLEX_UNKNOWN;
-		break;
+	if (!adpt->mac2mac_en){
+		switch (val) {
+		case DUPLEX_MODE | SPDMODE_1000:
+			phydev->speed = SPEED_1000;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case DUPLEX_MODE | SPDMODE_100:
+			phydev->speed = SPEED_100;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case SPDMODE_100:
+			phydev->speed = SPEED_100;
+			phydev->duplex = DUPLEX_HALF;
+			break;
+		case DUPLEX_MODE | SPDMODE_10:
+			phydev->speed = SPEED_10;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case SPDMODE_10:
+			phydev->speed = SPEED_10;
+			phydev->duplex = DUPLEX_HALF;
+			break;
+		default:
+			phydev->speed = SPEED_UNKNOWN;
+			phydev->duplex = DUPLEX_UNKNOWN;
+			break;
+		}
+		phydev->link = true;
 	}
-	phydev->link = true;
 	return 0;
 }
 

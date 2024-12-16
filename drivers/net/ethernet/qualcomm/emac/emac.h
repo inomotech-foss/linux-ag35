@@ -718,10 +718,15 @@ struct emac_adapter {
 	struct emac_tx_tstamp_stats hwtxtstamp_stats;
 
 	struct work_struct work_thread;
+	struct delayed_work  work_delayed;
 	struct timer_list  emac_timer;
 	unsigned long	link_jiffies;
 
 	bool            tstamp_en;
+	bool            mac2mac_en;
+	bool            suspend_called;
+	bool            serdes_synced;
+	u32             speed_mac2mac;
 	u32             wol;
 	u16             msg_enable;
 	unsigned long   flags;
