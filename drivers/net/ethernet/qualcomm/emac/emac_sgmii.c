@@ -254,6 +254,7 @@ int emac_sgmii_link_init(struct emac_adapter *adpt)
 		autoneg = AUTONEG_DISABLE;
 		speed = adpt->speed_mac2mac;
 		duplex = DUPLEX_FULL;
+		writel_relaxed(0, sgmii->base + EMAC_SGMII_PHY_SPEED_CFG1);
 	}
 
 	val = readl_relaxed(sgmii->base + EMAC_SGMII_PHY_AUTONEG_CFG2);
