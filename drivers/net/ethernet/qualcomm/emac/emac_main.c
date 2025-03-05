@@ -78,6 +78,9 @@
 #define BT_BX_REG_SEL                    0x8000
 #endif
 
+#define EMAC_SYSFS_DEV_ATTR_PERMS 0644
+#define BUFF_SZ 256
+
 struct emac_skb_cb {
 	u32           tpd_idx;
 	unsigned long jiffies;
@@ -2135,10 +2138,14 @@ static int emac_open(struct net_device *netdev)
 		}
 	}
 
-	if(adpt->mac2mac_en){
+	if(adpt->mac2mac_en) {
+		if (adpt->remote_mac_down)
+			return retval;
+
 		if(!adpt->serdes_synced)
 			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
 	}
+
 	return retval;
 
 err_up:
@@ -3040,7 +3047,10 @@ static int emac_pm_resume(struct device *device)
 		}
 	}
 
-	if(adpt->mac2mac_en){
+	if(adpt->mac2mac_en) {
+		if (adpt->remote_mac_down)
+			return retval;
+
 		if(!adpt->serdes_synced && adpt->suspend_called)
 			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
 	}
@@ -3285,6 +3295,170 @@ fail:
 }
 #endif
 
+static ssize_t read_remote_mac_state(struct device *dev,
+			      struct device_attribute *attr,
+			      char *user_buf)
+{
+	struct net_device *netdev = NULL;
+	struct emac_adapter *adpt = NULL;
+	unsigned int len = 0, buf_len = 2000;
+	char buf[2000];
+
+	if (!dev) {
+		pr_info("%s %d device is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	netdev = to_net_dev(dev);
+	if (!netdev) {
+		pr_info("%s %d net_device is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	adpt = netdev_priv(netdev);
+	if (!adpt) {
+		pr_info("%s %d adpt is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	if (netif_running(netdev) && netif_carrier_ok(netdev)) {
+		len += scnprintf(buf + len, buf_len - len,
+				"Current EMAC state : UP\n");
+	} else {
+		len += scnprintf(buf + len, buf_len - len,
+				"Current EMAC state : DOWN\n");
+	}
+
+	if (len > buf_len)
+		len = buf_len;
+
+	memcpy(user_buf, buf, len);
+	return len;
+}
+
+static ssize_t write_remote_mac_state(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *user_buf,
+			       size_t count)
+{
+	struct net_device *netdev = NULL;
+	struct emac_adapter *adpt = NULL;
+	struct emac_hw *hw = NULL;
+	struct emac_phy *phy = NULL;
+	int retval = 0, i;
+
+	if (!dev) {
+		pr_info("%s %d device is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	netdev = to_net_dev(dev);
+	if (!netdev) {
+		pr_info("%s %d net_device is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	adpt = netdev_priv(netdev);
+	if (!adpt) {
+		pr_info("%s %d adpt is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	hw = &adpt->hw;
+	phy = &adpt->phy;
+
+	if (kstrtos8(user_buf, 0, &adpt->current_status))
+		return -1;
+
+	if (adpt->current_status == EMAC_MAC_UP) {
+		if (!adpt->remote_mac_down) {
+			pr_err("remote mac state is already up\n");
+			return -1;
+		}
+		adpt->remote_mac_down = false;
+
+		if(netif_running(netdev))
+			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
+
+	} else if (adpt->current_status == EMAC_MAC_DOWN) {
+		if (adpt->remote_mac_down) {
+			pr_err("remote mac state is already down\n");
+			return -1;
+		}
+		adpt->remote_mac_down = true;
+
+		if (!netif_carrier_ok(netdev)) {
+			pr_err("ethernet interface is already down\n");
+			return -1;
+		}
+
+		netif_carrier_off(netdev);
+		emac_hw_stop_mac(hw);
+
+		pm_runtime_mark_last_busy(netdev->dev.parent);
+		pm_runtime_put_autosuspend(netdev->dev.parent);
+
+		cancel_delayed_work_sync(&adpt->work_delayed);
+		flush_delayed_work(&adpt->work_delayed);
+		adpt->serdes_synced = 0;
+	} else {
+		pr_err("option 1 for bringdown\n option 0 for bringup\n");
+	}
+
+	return count;
+}
+
+static DEVICE_ATTR(remote_mac_state, EMAC_SYSFS_DEV_ATTR_PERMS,
+		                   read_remote_mac_state, write_remote_mac_state);
+
+static int emac_remove_sysfs(struct emac_adapter *adpt)
+{
+	struct net_device *netdev;
+
+	if (!adpt) {
+		pr_err("adpt is NULL\n");
+		return -1;
+	}
+
+	netdev = adpt->netdev;
+
+	if (!netdev) {
+		pr_err("netdev is NULL\n");
+		return -1;
+	}
+
+	sysfs_remove_file(&netdev->dev.kobj,
+			  &dev_attr_remote_mac_state.attr);
+	return 0;
+}
+
+static int emac_create_sysfs(struct emac_adapter *adpt)
+{
+	struct net_device *netdev;
+	int ret = 0;
+
+	if (!adpt || !adpt->netdev) {
+		pr_err("adpt is NULL\n");
+		goto fail;
+	}
+
+	netdev = adpt->netdev;
+	if (!netdev) {
+		pr_err("netdev is NULL\n");
+		goto fail;
+	}
+
+	ret = sysfs_create_file(&netdev->dev.kobj, &dev_attr_remote_mac_state.attr);
+	if (ret) {
+		pr_err("unable to create sysfs mac_state node\n");
+		goto fail;
+	}
+	return 0;
+
+fail:
+	return -1;
+}
+
 /* Probe function */
 static int emac_probe(struct platform_device *pdev)
 {
@@ -3460,6 +3634,10 @@ static int emac_probe(struct platform_device *pdev)
 #ifdef CONFIG_DEBUG_FS
 	emac_create_debugfs(adpt);
 #endif
+	if (adpt->mac2mac_en){
+		if (emac_create_sysfs(adpt))
+			pr_err("Error: create sysfs node failed\n");
+	}
 
 	emac_dbg(adpt, probe, "HW ID %d.%d, HW version %d.%d.%d\n",
 		 hw->devid, hw->revid,
@@ -3544,6 +3722,8 @@ static int emac_remove(struct platform_device *pdev)
 #ifdef CONFIG_DEBUG_FS
 	debugfs_remove_recursive(adpt->debugfs_dir);
 #endif
+	if (adpt->mac2mac_en)
+		emac_remove_sysfs(adpt);
 
 	if (!adpt->mac2mac_en && !ACPI_COMPANION(&pdev->dev))
 		put_device(&adpt->phydev->dev);

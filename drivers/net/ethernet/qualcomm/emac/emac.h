@@ -215,6 +215,9 @@ enum emac_adapter_flags {
 	EMAC_FLAG_ADPT_TASK_CHK_SGMII_REQ,
 };
 
+#define EMAC_MAC_UP	0
+#define EMAC_MAC_DOWN	1
+
 /* emac shorthand bitops macros */
 #define TEST_FLAG(OBJ, FLAG)	test_bit(EMAC_FLAG_ ## FLAG,  &((OBJ)->flags))
 #define SET_FLAG(OBJ,  FLAG)	set_bit(EMAC_FLAG_ ## FLAG,   &((OBJ)->flags))
@@ -741,6 +744,8 @@ struct emac_adapter {
 
 	u32       bus_cl_hdl;
 	struct msm_bus_scale_pdata *bus_scale_table;
+	bool remote_mac_down;
+	s8 current_status;
 };
 
 static inline struct emac_adapter *emac_hw_get_adap(struct emac_hw *hw)
