@@ -223,15 +223,18 @@ static void dtmf_rx_detected_cb(uint8_t *pkt,
 }
 
 static int msm_pcm_capture_copy(struct snd_pcm_substream *substream,
-				int channel, unsigned long hwoff,
-				void __user *buf, unsigned long fbytes)
+                                int channel,snd_pcm_uframes_t hwoff,
+				void __user *buf,snd_pcm_uframes_t frames)
 {
 	int ret = 0;
+	int fbytes = 0;
 	struct dtmf_buf_node *buf_node = NULL;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct dtmf_drv_info *prtd = runtime->private_data;
 	unsigned long dsp_flags = 0;
-
+	if(runtime != NULL) {
+		fbytes = frames_to_bytes(runtime, frames);
+	}
 	ret = wait_event_interruptible_timeout(prtd->out_wait,
 				(!list_empty(&prtd->out_queue)),
 				1 * HZ);
@@ -271,16 +274,17 @@ static int msm_pcm_capture_copy(struct snd_pcm_substream *substream,
 	return ret;
 }
 
-static int msm_pcm_copy(struct snd_pcm_substream *substream, int a,
-	 unsigned long hwoff, void __user *buf, unsigned long fbytes)
+static int msm_pcm_copy(struct snd_pcm_substream *substream,
+                        int a,snd_pcm_uframes_t hwoff,
+			void __user *buf,snd_pcm_uframes_t frames)
 {
 	int ret = 0;
 
 	pr_debug("%s() DTMF\n", __func__);
 
-	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
-		ret = msm_pcm_capture_copy(substream, a, hwoff, buf, fbytes);
-
+	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+		ret = msm_pcm_capture_copy(substream, a, hwoff, buf, frames);
+        }
 	return ret;
 }
 
@@ -527,7 +531,7 @@ static snd_pcm_uframes_t msm_pcm_pointer(struct snd_pcm_substream *substream)
 
 static const struct snd_pcm_ops msm_pcm_ops = {
 	.open           = msm_pcm_open,
-	.copy	= msm_pcm_copy,
+	.copy 		=  msm_pcm_copy,
 	.hw_params	= msm_pcm_hw_params,
 	.close          = msm_pcm_close,
 	.prepare        = msm_pcm_prepare,
