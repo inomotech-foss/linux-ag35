@@ -59,6 +59,10 @@
 #define ubi_is_module() 0
 #endif
 
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+#endif
+
 /**
  * struct mtd_dev_param - MTD device parameter description data structure.
  * @name: MTD character device node path, MTD device name, or MTD device number
@@ -1300,6 +1304,12 @@ static int __init ubi_init(void)
 		if (err < 0) {
 			pr_err("UBI error: cannot attach mtd%d\n",
 			       mtd->index);
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+	{
+		printk("@Quectel0125 set file restore flag here 3333\r\n");
+		Quectel_Set_Partition_RestoreFlag("", mtd->index,3);
+	}
+#endif
 			put_mtd_device(mtd);
 
 			/*

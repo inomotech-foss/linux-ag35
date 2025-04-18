@@ -1042,6 +1042,10 @@ static ssize_t tty_write(struct file *file, const char __user *buf,
 	else
 		ret = do_tty_write(ld->ops->write, tty, file, buf, count);
 	tty_ldisc_deref(ld);
+	if(tty->uart_err == 1){
+		ret = -11;
+		pr_err("%s set ret =-11\n",tty->name);
+	}
 	return ret;
 }
 
@@ -2834,6 +2838,7 @@ struct tty_struct *alloc_tty_struct(struct tty_driver *driver, int idx)
 	if (!tty)
 		return NULL;
 
+	tty->uart_err = 0;
 	kref_init(&tty->kref);
 	tty->magic = TTY_MAGIC;
 	if (tty_ldisc_init(tty)) {

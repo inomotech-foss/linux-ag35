@@ -51,6 +51,9 @@
 #define SCM_DLOAD_MINIDUMP		0X20
 #define SCM_DLOAD_BOTHDUMPS	(SCM_DLOAD_MINIDUMP | SCM_DLOAD_FULLDUMP)
 
+#define QUECTEL_RESET_SYSTEM
+#define QUECTEL_POWER_DOWN
+
 static int restart_mode;
 static void *restart_reason;
 static bool scm_pmic_arbiter_disable_supported;
@@ -65,7 +68,11 @@ static void scm_disable_sdi(void);
  * There is no API from TZ to re-enable the registers.
  * So the SDI cannot be re-enabled when it already by-passed.
  */
+#ifdef QUECTEL_RESET_SYSTEM
+static int download_mode = 0;
+#else
 static int download_mode = 1;
+#endif
 static bool force_warm_reboot;
 
 #ifdef CONFIG_QCOM_DLOAD_MODE
@@ -285,6 +292,14 @@ static void halt_spmi_pmic_arbiter(void)
 	}
 }
 
+#ifdef QUECTEL_RESET_SYSTEM
+void quectel_set_system_reset_mode(int mode)
+{
+	download_mode = mode;
+	set_dload_mode(download_mode);
+}
+#endif
+
 static void msm_restart_prepare(const char *cmd)
 {
 	bool need_warm_reset = false;
@@ -293,6 +308,10 @@ static void msm_restart_prepare(const char *cmd)
 	 * Write download mode flags if restart_mode says so
 	 * Kill download mode if master-kill switch is set
 	 */
+#ifndef QUECTEL_RESET_SYSTEM
+	set_dload_mode(download_mode &&
+			(in_panic || restart_mode == RESTART_DLOAD));
+#else
 	if (!is_kdump_kernel())
 		set_dload_mode(download_mode &&
 			(in_panic || restart_mode == RESTART_DLOAD));
@@ -550,10 +569,67 @@ RESET_ATTR(dload_mode, 0644, show_dload_mode, store_dload_mode);
 
 RESET_ATTR(emmc_dload, 0644, show_emmc_dload, store_emmc_dload);
 
+//2016-04-04, add by jun.wu
+#ifdef CONFIG_QUECTEL_POWER_DRIVER
+static size_t store_power_off(struct kobject *kobj, struct attribute *attr,
+				const char *buf, size_t count)
+{
+	uint32_t power_off;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &power_off);
+	if (ret < 0)
+		return ret;
+
+	if (power_off != 1)
+		return -EINVAL;
+
+	do_msm_poweroff();
+
+	return count;
+}
+RESET_ATTR(power_off, 0644, NULL, store_power_off);
+#endif
+//end jun.wu
+
+#ifdef QUECTEL_POWER_DOWN
+static int system_power_downed = 0;
+
+int quec_system_power_downed(void) {
+
+	return system_power_downed;
+}
+
+static ssize_t system_power_downed_show(struct kobject *kobj, struct attribute *attr,
+				char *buf) {
+
+	return snprintf(buf, sizeof(system_power_downed), "%u\n", system_power_downed);
+}
+
+static ssize_t system_power_downed_store(struct device *dev,
+                struct device_attribute *attr, const char *buf, size_t count) {
+
+	sscanf(buf, "%d", &system_power_downed);
+
+    return count;
+}
+
+RESET_ATTR(power_downed, 0644, system_power_downed_show, system_power_downed_store);
+
+#endif
+
 static struct attribute *reset_attrs[] = {
 	&reset_attr_emmc_dload.attr,
 #ifdef CONFIG_QCOM_MINIDUMP
 	&reset_attr_dload_mode.attr,
+#endif
+//2016-04-04, add by jun.wu
+#ifdef CONFIG_QUECTEL_POWER_DRIVER
+	&reset_attr_power_off.attr,
+#endif
+//end jun.wu
+#ifdef QUECTEL_POWER_DOWN
+	&reset_attr_power_downed.attr,
 #endif
 	NULL
 };
@@ -639,8 +715,12 @@ static int msm_restart_probe(struct platform_device *pdev)
 	np = of_find_compatible_node(NULL, NULL,
 				"qcom,msm-imem-dload-type");
 	if (!np) {
+#ifdef CONFIG_QUECTEL_POWER_DRIVER
+		pr_err("unable to find DT imem dload-type node [QPOWD]continue create emmc_dload power_off dev\n");	
+#else
 		pr_err("unable to find DT imem dload-type node\n");
 		goto skip_sysfs_create;
+#endif
 	} else {
 		dload_type_addr = of_iomap(np, 0);
 		if (!dload_type_addr) {

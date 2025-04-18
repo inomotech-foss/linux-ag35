@@ -41,6 +41,7 @@
 #include <asm/current.h>
 #include <linux/timer.h>
 
+#define QUECTEL_RESET_SYSTEM
 #include "peripheral-loader.h"
 
 #define DISABLE_SSR 0x9889deed
@@ -244,6 +245,31 @@ static ssize_t name_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(name);
 
+#ifdef CONFIG_QUECTEL_MODEM_RESTART_LEVEL  //jun20160728 subsystem restart config
+
+#define TRUE 1
+#define FALSE 0
+
+#include <linux/wait.h>
+
+wait_queue_head_t quectel_check_modem_state_wait;
+int quectel_restart_modem = FALSE;
+
+static ssize_t quec_state_show(struct device *dev, struct device_attribute *attr,
+		char *buf)
+{
+	pr_info("[%p]: line: %d, quectel_restart_modem: %d\n", current, __LINE__, quectel_restart_modem);
+	//wait_event(quectel_check_modem_state_wait, (quectel_restart_modem == TRUE));	
+	wait_event_freezable(quectel_check_modem_state_wait, (quectel_restart_modem == TRUE));
+	pr_info("[%p]: line: %d, quectel_restart_modem: %d\n", current, __LINE__, quectel_restart_modem);
+	quectel_restart_modem = FALSE; 
+	pr_info("[%p]: state %s\n", current, subsys_states[to_subsys(dev)->track.state]);
+	return snprintf(buf, PAGE_SIZE, "%d\n", TRUE);
+}
+static DEVICE_ATTR_RO(quec_state);
+#endif
+//end jun.wu
+
 static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
 {
@@ -259,6 +285,27 @@ static ssize_t crash_count_show(struct device *dev,
 	return snprintf(buf, PAGE_SIZE, "%d\n", to_subsys(dev)->crash_count);
 }
 static DEVICE_ATTR_RO(crash_count);
+
+#ifdef QUECTEL_RESET_SYSTEM
+static int system_reset_mode = 1; //0 - dload, 1 - reset
+extern void quectel_set_system_reset_mode(int mode);
+static ssize_t
+system_reset_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+        return snprintf(buf, PAGE_SIZE, "%d\n", system_reset_mode);
+}
+
+static ssize_t system_reset_mode_store(struct device *dev,
+                struct device_attribute *attr, const char *buf, size_t count)
+{
+	sscanf(buf, "%d", &system_reset_mode);
+
+	quectel_set_system_reset_mode((system_reset_mode == 0) ? 1 : 0);
+
+        return count;
+}
+static DEVICE_ATTR_RW(system_reset_mode);
+#endif
 
 static ssize_t
 restart_level_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -364,6 +411,16 @@ static void subsys_set_state(struct subsys_device *subsys,
 
 	spin_lock_irqsave(&subsys->track.s_lock, flags);
 	if (subsys->track.state != state) {
+#ifdef CONFIG_QUECTEL_MODEM_RESTART_LEVEL  // Ramos 20160623 add  for modem subsystem restart config
+		if((subsys->track.state == SUBSYS_ONLINE)
+		&& (state == SUBSYS_OFFLINE) 
+		)
+		{
+			quectel_restart_modem = TRUE; 
+			pr_info("[%p]: set quectel_restart_modem: %d\n", current, quectel_restart_modem);
+			wake_up(&quectel_check_modem_state_wait);
+		}
+#endif
 		subsys->track.state = state;
 		spin_unlock_irqrestore(&subsys->track.s_lock, flags);
 		sysfs_notify(&subsys->dev.kobj, NULL, "state");
@@ -389,10 +446,16 @@ EXPORT_SYMBOL(subsys_default_online);
 static struct attribute *subsys_attrs[] = {
 	&dev_attr_name.attr,
 	&dev_attr_state.attr,
+#ifdef CONFIG_QUECTEL_MODEM_RESTART_LEVEL	//jun20160728 subsystem restart config
+	&dev_attr_quec_state.attr,
+#endif										//jun20160728
 	&dev_attr_crash_count.attr,
 	&dev_attr_restart_level.attr,
 	&dev_attr_firmware_name.attr,
 	&dev_attr_system_debug.attr,
+#ifdef QUECTEL_RESET_SYSTEM
+	&dev_attr_system_reset_mode.attr,
+#endif
 	NULL,
 };
 
@@ -1851,6 +1914,23 @@ struct subsys_device *subsys_register(struct subsys_desc *desc)
 	}
 
 	dev_set_name(&subsys->dev, "subsys%d", subsys->id);
+
+#ifdef CONFIG_QUECTEL_MODEM_RESTART_LEVEL  // Ramos 20160623 add  for modem subsystem restart config
+	init_waitqueue_head(&quectel_check_modem_state_wait);
+#if 1
+    pr_info("@Ramos  desc->name =[%s]  , subsys->desc name=[%s]  fw_name=[%s]\n",desc->name,  subsys->desc->name , subsys->desc->fw_name);
+    if(strncasecmp("modem", desc->name, sizeof("modem")) == 0)
+    {
+		init_waitqueue_head(&quectel_check_modem_state_wait);
+
+		/* Modify the default value of ModemRstLevel, the default action is changed to restart 
+		 * the whole module rather than resart the modem, it is necessary for Open solution that 
+		 * no external mcu, gale-2018-07-23*/
+		pr_info("@Ramosr  set modem restart level 0");
+        	subsys->restart_level = 0; 
+    	}
+#endif
+#endif
 
 	mutex_init(&subsys->track.lock);
 	init_all_completions(subsys);

@@ -28,6 +28,11 @@
 #include <asm/div64.h>
 #include "ubi.h"
 
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
+#endif
+
 /**
  * ubi_do_get_device_info - get information about UBI device.
  * @ubi: UBI device description object
@@ -230,6 +235,12 @@ out_put_ubi:
 	ubi_err(ubi, "cannot open device %d, volume %d, error %d",
 		ubi_num, vol_id, err);
 	ubi_put_device(ubi);
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+	{
+		printk("@Quectel0125 set file restore flag here 3333\r\n");
+		Quectel_Set_Partition_RestoreFlag("", ubi->mtd->index,3);
+	}
+#endif
 	return ERR_PTR(err);
 }
 EXPORT_SYMBOL_GPL(ubi_open_volume);

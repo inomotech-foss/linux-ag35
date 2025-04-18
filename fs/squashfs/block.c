@@ -38,6 +38,12 @@
 #include "squashfs.h"
 #include "decompressor.h"
 #include "page_actor.h"
+#include  <linux/genhd.h> //Quectel add 20180918
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+#include "../../drivers/mtd/ubi/ubi.h"
+extern int get_ubi_num_from_gd(struct gendisk *gd);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+#endif
 
 /*
  * Read the metadata block length, this is stored in the first two
@@ -212,6 +218,10 @@ block_release:
 read_failure:
 	ERROR("squashfs_read_data failed to read block 0x%llx\n",
 					(unsigned long long) index);
+#if 1 //Ramos.zhang-20180918 add for system restore function  QUECTEL_SYSTEM_BACKUP
+	printk("@Quectel0125,func:%s,Line=%d, set mtd=%d,restore \r\n",__func__,__LINE__,ubi_get_device(get_ubi_num_from_gd(sb->s_bdev->bd_disk))->mtd->index);
+	Quectel_Set_Partition_RestoreFlag("", ubi_get_device(get_ubi_num_from_gd(sb->s_bdev->bd_disk))->mtd->index,6);
+#endif
 	kfree(bh);
 	return -EIO;
 }

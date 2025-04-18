@@ -53,6 +53,12 @@
 #include <linux/mount.h>
 #include <linux/slab.h>
 #include <linux/migrate.h>
+#include <linux/qstart.h>
+#include "../../drivers/mtd/ubi/ubi.h" // quectel add
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name,int mtd_nub, int where);
+// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
+#endif
 
 static int read_block(struct inode *inode, void *addr, unsigned int block,
 		      struct ubifs_data_node *dn)
@@ -104,6 +110,13 @@ static int read_block(struct inode *inode, void *addr, unsigned int block,
 dump:
 	ubifs_err(c, "bad data node (block %u, inode %lu)",
 		  block, inode->i_ino);
+	
+#if 1 // def  QUECTEL_MODEM_BACKUP   //Ramos 20160801 add for modem file backup
+		printk("@Quectel0125 read block  set restore UBI =%d,mtd =%d\r\n", c->vi.ubi_num,ubi_get_device(c->vi.ubi_num)->mtd->index);
+// modify by [francis.huan] 20180524 ,for match mtd nub to restore
+		Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index, 3);
+#endif
+
 	ubifs_dump_node(c, dn);
 	return -EINVAL;
 }
@@ -948,6 +961,12 @@ static int do_writepage(struct page *page, int len)
 		SetPageError(page);
 		ubifs_err(c, "cannot write page %lu of inode %lu, error %d",
 			  page->index, inode->i_ino, err);
+
+#if 1 // def  QUECTEL_MODEM_BACKUP   //Ramos 20160801 add for modem file backup
+		printk("@Ramos read block  set restore UBI =%d,  \r\n", c->vi.ubi_num);
+		Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index, 3);
+#endif
+
 		ubifs_ro_mode(c, err);
 	}
 

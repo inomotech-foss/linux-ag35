@@ -258,6 +258,141 @@ static struct usb_gadget_strings *gser_strings[] = {
 };
 
 /*-------------------------------------------------------------------------*/
+int gport_setup(struct usb_configuration *c)
+{
+	int ret = 0;
+	int port_idx;
+	int i;
+
+	pr_debug("%s: no_tty_ports: %u no_smd_ports: %u no_hsic_sports: %u nr_ports: %u\n",
+		__func__, no_tty_ports, no_smd_ports, no_hsic_sports, nr_ports);
+	
+	//javen-2019/04/30:add usb channel
+	if (no_tty_ports) {
+		for (i = 0; i < GSERIAL_NO_PORTS; i++) {
+			if(gserial_ports[i].transport == USB_GADGET_XPORT_TTY)
+			{
+				ret = gserial_alloc_line(
+						&gserial_ports[i].client_port_num);
+				if (ret)
+					return ret;
+			}
+		}
+	}
+
+	if (no_char_bridge_ports)
+		gbridge_setup(c->cdev->gadget, no_char_bridge_ports);
+	if (no_smd_ports)
+		ret = gsmd_setup(c->cdev->gadget, no_smd_ports);
+	if (no_hsic_sports) {
+		port_idx = ghsic_data_setup(no_hsic_sports, USB_GADGET_SERIAL);
+		if (port_idx < 0)
+			return port_idx;
+
+		for (i = 0; i < nr_ports; i++) {
+			if (gserial_ports[i].transport ==
+					USB_GADGET_XPORT_HSIC) {
+				gserial_ports[i].client_port_num = port_idx;
+				port_idx++;
+			}
+		}
+
+		/*clinet port num is same for data setup and ctrl setup*/
+		ret = ghsic_ctrl_setup(no_hsic_sports, USB_GADGET_SERIAL);
+		if (ret < 0)
+			return ret;
+		return 0;
+	}
+
+	return ret;
+}
+
+void gport_cleanup(void)
+{
+	int i;
+
+	for (i = 0; i < no_tty_ports; i++)
+		gserial_free_line(gserial_ports[i].client_port_num);
+}
+
+static int gport_connect(struct f_gser *gser)
+{
+	unsigned	port_num;
+	int		ret;
+
+	pr_debug("%s: transport: %s f_gser: %pK gserial: %pK port_num: %d\n",
+			__func__, xport_to_str(gser->transport),
+			gser, &gser->port, gser->port_num);
+
+	port_num = gserial_ports[gser->port_num].client_port_num;
+
+	switch (gser->transport) {
+	case USB_GADGET_XPORT_TTY:
+		gserial_connect(&gser->port, port_num);
+		break;
+	case USB_GADGET_XPORT_SMD:
+		gsmd_connect(&gser->port, port_num);
+		break;
+	case USB_GADGET_XPORT_CHAR_BRIDGE:
+		gbridge_connect(&gser->port, port_num);
+		break;
+	case USB_GADGET_XPORT_HSIC:
+		ret = ghsic_ctrl_connect(&gser->port, port_num);
+		if (ret) {
+			pr_err("%s: ghsic_ctrl_connect failed: err:%d\n",
+					__func__, ret);
+			return ret;
+		}
+		ret = ghsic_data_connect(&gser->port, port_num);
+		if (ret) {
+			pr_err("%s: ghsic_data_connect failed: err:%d\n",
+					__func__, ret);
+			ghsic_ctrl_disconnect(&gser->port, port_num);
+			return ret;
+		}
+		break;
+	default:
+		pr_err("%s: Un-supported transport: %s\n", __func__,
+				xport_to_str(gser->transport));
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
+static int gport_disconnect(struct f_gser *gser)
+{
+	unsigned port_num;
+
+	port_num = gserial_ports[gser->port_num].client_port_num;
+
+	pr_debug("%s: transport: %s f_gser: %pK gserial: %pK port_num: %d\n",
+			__func__, xport_to_str(gser->transport),
+			gser, &gser->port, gser->port_num);
+
+	switch (gser->transport) {
+	case USB_GADGET_XPORT_TTY:
+		gserial_disconnect(&gser->port);
+		break;
+	case USB_GADGET_XPORT_SMD:
+		gsmd_disconnect(&gser->port, port_num);
+		break;
+	case USB_GADGET_XPORT_CHAR_BRIDGE:
+		gbridge_disconnect(&gser->port, port_num);
+		break;
+	case USB_GADGET_XPORT_HSIC:
+		ghsic_ctrl_disconnect(&gser->port, port_num);
+		ghsic_data_disconnect(&gser->port, port_num);
+		break;
+	default:
+		pr_err("%s: Un-supported transport:%s\n", __func__,
+				xport_to_str(gser->transport));
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
 static void gser_complete_set_line_coding(struct usb_ep *ep,
 					struct usb_request *req)
 {

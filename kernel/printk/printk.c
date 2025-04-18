@@ -1558,6 +1558,10 @@ SYSCALL_DEFINE3(syslog, int, type, char __user *, buf, int, len)
 	return do_syslog(type, buf, len, SYSLOG_FROM_READER);
 }
 
+#ifndef CONFIG_DYNAMIC_DEBUG //carl, use this macro indicate mdm9607-perf_config
+static int __read_mostly perf_mode_console = 0;
+module_param(perf_mode_console, int, 0644);
+#endif
 /*
  * Special console_lock variants that help to reduce the risk of soft-lockups.
  * They allow to pass console_lock to another printk() call using a busy wait.
@@ -1712,6 +1716,10 @@ static void call_console_drivers(const char *ext_text, size_t ext_len,
 
 	if (!console_drivers)
 		return;
+#ifndef CONFIG_DYNAMIC_DEBUG
+	if (!perf_mode_console)
+		return;
+#endif
 
 	for_each_console(con) {
 		if (exclusive_console && con != exclusive_console)

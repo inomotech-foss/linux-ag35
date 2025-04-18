@@ -45,6 +45,13 @@
 #include "squashfs.h"
 #include "decompressor.h"
 #include "xattr.h"
+#include  <linux/genhd.h> //Quectel add 20180918
+
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for restore funciton
+#include "../../drivers/mtd/ubi/ubi.h"
+extern int get_ubi_num_from_gd(struct gendisk *gd);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+#endif
 
 static struct file_system_type squashfs_fs_type;
 static const struct super_operations squashfs_super_ops;
@@ -125,6 +132,10 @@ static int squashfs_fill_super(struct super_block *sb, void *data, int silent)
 		if (!silent)
 			ERROR("Can't find a SQUASHFS superblock on %pg\n",
 						sb->s_bdev);
+#if 1 // Ramos.zhang-20180918 add for system restore function
+		printk("@Quectel0125 func:%s,line=%d,set mtd=%d,restore \r\n",__func__,__LINE__, ubi_get_device(get_ubi_num_from_gd(sb->s_bdev->bd_disk))->mtd->index);
+		Quectel_Set_Partition_RestoreFlag("", ubi_get_device(get_ubi_num_from_gd(sb->s_bdev->bd_disk))->mtd->index,7);
+#endif
 		goto failed_mount;
 	}
 

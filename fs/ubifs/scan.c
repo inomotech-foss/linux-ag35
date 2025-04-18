@@ -29,6 +29,11 @@
 
 #include "ubifs.h"
 
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+#include "../../drivers/mtd/ubi/ubi.h"
+#include <linux/qstart.h> //quectel add
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name,int mtd_nub,int where);
+#endif
 /**
  * scan_padding_bytes - scan for padding bytes.
  * @buf: buffer to scan
@@ -349,6 +354,13 @@ corrupted:
 		ubifs_scanned_corruption(c, lnum, offs, buf);
 		ubifs_err(c, "LEB %d scanning failed", lnum);
 	}
+#if 1
+      	ubifs_err(c, "@quetel  add for backup in 101010 ,scan LEB failed for corrupted\n");
+      Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,10);
+//add by [francis],20180927,add backup check point
+#endif
+
+
 	err = -EUCLEAN;
 	ubifs_scan_destroy(sleb);
 	return ERR_PTR(err);

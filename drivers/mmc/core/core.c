@@ -54,6 +54,24 @@
 #include "sd_ops.h"
 #include "sdio_ops.h"
 
+EXPORT_TRACEPOINT_SYMBOL_GPL(mmc_blk_erase_start);
+EXPORT_TRACEPOINT_SYMBOL_GPL(mmc_blk_erase_end);
+EXPORT_TRACEPOINT_SYMBOL_GPL(mmc_blk_rw_start);
+EXPORT_TRACEPOINT_SYMBOL_GPL(mmc_blk_rw_end);
+
+/*Quinn, Several eMMCs need delay to match powerup timing
+    0:Disable
+    1:Enable
+*/
+#define QUECTEL_ENABLE_DELAY_SCAN   1
+#define QUECTEL_DELAY_SCAN_HZ       2 /*2 seconds*/
+
+/*Quinn, whether switch signal voltage to 3.3v
+    0:switch to 3.3v
+    1:switch to 1.8v
+*/
+#define QUECTEL_DISABLE_SWITCH_SIGNAL_VOLTAGE_330 0
+
 /* If the device is not responding */
 #define MMC_CORE_TIMEOUT_MS	(10 * 60 * 1000) /* 10 minute timeout */
 
@@ -3129,6 +3147,13 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	/* Set initial state and call mmc_set_ios */
 	mmc_set_initial_state(host);
 
+#if QUECTEL_DISABLE_SWITCH_SIGNAL_VOLTAGE_330
+        /* Try to set signal voltage to 1.8v or 1.2v */
+	if (__mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_180) == 0)
+		dev_dbg(mmc_dev(host), "Initial signal voltage of 1.8v\n");
+	else if (__mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_120) == 0)
+		dev_dbg(mmc_dev(host), "Initial signal voltage of 1.2v\n");
+#else
 	/* Try to set signal voltage to 3.3V but fall back to 1.8v or 1.2v */
 	if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_330))
 		dev_dbg(mmc_dev(host), "Initial signal voltage of 3.3v\n");
@@ -3136,6 +3161,8 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 		dev_dbg(mmc_dev(host), "Initial signal voltage of 1.8v\n");
 	else if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_120))
 		dev_dbg(mmc_dev(host), "Initial signal voltage of 1.2v\n");
+#endif
+
 
 	/*
 	 * This delay should be sufficient to allow the power supply
@@ -4337,6 +4364,12 @@ void mmc_rescan(struct work_struct *work)
 	}
 	spin_unlock_irqrestore(&host->lock, flags);
 
+	if((host->caps & MMC_CAP_NEEDS_POLL) == 0 && (strncmp(mmc_hostname(host),"mmc0",4) == 0) && ((host->caps2 & MMC_CAP2_NONHOTPLUG) == 0 ))
+	{
+		printk("eyelyn   %s  disable polling\n",mmc_hostname(host));	
+		return;
+	}
+
 	/* If there is a non-removable card registered, only scan once */
 	if (!mmc_card_is_removable(host) && host->rescan_entered)
 		return;
@@ -4416,7 +4449,12 @@ void mmc_start_host(struct mmc_host *host)
 	mmc_gpiod_request_cd_irq(host);
 	mmc_register_extcon(host);
 	mmc_release_host(host);
+
+    #ifdef QUECTEL_ENABLE_DELAY_SCAN
+	_mmc_detect_change(host, (QUECTEL_DELAY_SCAN_HZ*HZ), false);
+    #else
 	_mmc_detect_change(host, 0, false);
+    #endif
 }
 
 void mmc_stop_host(struct mmc_host *host)

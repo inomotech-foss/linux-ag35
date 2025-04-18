@@ -38,6 +38,12 @@
 
 static unsigned dm_verity_prefetch_cluster = DM_VERITY_DEFAULT_PREFETCH_SIZE;
 
+/* add for quectel for linuxfs restore */
+#include "../drivers/mtd/ubi/ubi.h"
+extern int get_ubi_num_from_gd(struct gendisk *gd);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char
+			 *partition_name, int mtd_nub, int where);
+
 module_param_named(prefetch_cluster, dm_verity_prefetch_cluster, uint, S_IRUGO | S_IWUSR);
 
 struct dm_verity_prefetch_work {
@@ -297,6 +303,12 @@ static int verity_handle_err(struct dm_verity *v, enum verity_block_type type,
 	kobject_uevent_env(&disk_to_dev(dm_disk(md))->kobj, KOBJ_CHANGE, envp);
 
 out:
+	/* add for system restore function */
+	printk("@Quectel0125 func:%s, Line=%d, set mtd=%d,restore!\r\n", __func__, __LINE__, 
+		ubi_get_device(get_ubi_num_from_gd(v->data_dev->bdev->bd_disk))->mtd->index);
+	Quectel_Set_Partition_RestoreFlag("",
+		ubi_get_device(get_ubi_num_from_gd(v->data_dev->bdev->bd_disk))->mtd->index, 0);
+
 	if (v->mode == DM_VERITY_MODE_LOGGING)
 		return 0;
 

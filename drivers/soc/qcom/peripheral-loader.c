@@ -98,6 +98,9 @@ static void __iomem *map_prop(const char *propname)
 }
 #endif
 
+// Quectel-specific modem restore logic
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char *partition_name, int mtd_nub, int where);
+
 /**
  * proxy_timeout - Override for proxy vote timeouts
  * -1: Use driver-specified timeout
@@ -192,7 +195,7 @@ struct pil_priv {
  */
 struct aux_minidump_info {
 	struct md_ss_region __iomem *region_info_aux;
-	unsigned int seg_cnt;
+	int seg_cnt;
 };
 
 /**
@@ -1073,6 +1076,11 @@ static int pil_load_seg(struct pil_desc *desc, struct pil_seg *seg)
 		if (ret) {
 			pil_err(desc, "Failed to locate blob %s or blob is too big(rc:%d)\n",
 				fw_name, ret);
+			if(0 == strcmp(desc->fw_name, "modem")) {
+				printk("@Quectel0125 set restore modem flag here 666111 \r\n");
+				Quectel_Set_Partition_RestoreFlag("modem", -1, 6);
+			}
+			subsys_set_error(desc->subsys_dev, firmware_error_msg);
 			return ret;
 		}
 
@@ -1284,7 +1292,11 @@ int pil_boot(struct pil_desc *desc)
 	snprintf(fw_name, sizeof(fw_name), "%s.mdt", desc->fw_name);
 	ret = request_firmware(&fw, fw_name, desc->dev);
 	if (ret) {
-		pil_err(desc, "Failed to locate %s(rc:%d)\n", fw_name, ret);
+		pil_err(desc, "Failed to locate %s\n", fw_name);
+		if(0 == strcmp(desc->fw_name, "modem")) {
+			printk("@Quectel0125 set restore modem flag here 666222 \r\n");
+			Quectel_Set_Partition_RestoreFlag("modem", -1, 6);
+		}
 		goto out;
 	}
 
@@ -1331,7 +1343,11 @@ int pil_boot(struct pil_desc *desc)
 		ret = desc->ops->init_image(desc, fw->data, fw->size);
 	if (ret) {
 		pil_err(desc, "Initializing image failed(rc:%d)\n", ret);
-		goto err_boot;
+		if(0 == strcmp(desc->fw_name, "modem")) {
+			printk("@Quectel0125 set restore modem flag here 666333 \r\n");
+			Quectel_Set_Partition_RestoreFlag("modem", -1, 6);
+		}
+		subsys_set_error(desc->subsys_dev, firmware_error_msg);		goto err_boot;
 	}
 
 	pil_log("before_mem_setup", desc);

@@ -1301,6 +1301,11 @@ static int get_string(struct usb_composite_dev *cdev,
 		return sizeof(*b);
 	}
 
+#if 1 //will.shao, for quectel usb discriptor
+	if (language == 0)
+		language = 0x409;
+#endif
+
 	list_for_each_entry(uc, &cdev->gstrings, list) {
 		struct usb_gadget_strings **sp;
 

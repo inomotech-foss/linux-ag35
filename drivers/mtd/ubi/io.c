@@ -89,7 +89,12 @@
 #include <linux/crc32.h>
 #include <linux/err.h>
 #include <linux/slab.h>
+#include <linux/qstart.h>
 #include "ubi.h"
+
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub , int where);  // modify by [francis.huan] 20180417 ,for match mtd_nub to restore
+#endif
 
 static int self_check_not_bad(const struct ubi_device *ubi, int pnum);
 static int self_check_peb_ec_hdr(const struct ubi_device *ubi, int pnum);
@@ -179,6 +184,12 @@ retry:
 			 */
 			ubi_msg(ubi, "fixable bit-flip detected at PEB %d",
 				pnum);
+			if(len != read)
+			{
+				printk("@Quectel0125 UBI Error 999999 set restore UBI =%d,	\r\n", ubi->ubi_num);
+				Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,9);
+				// modify by [francis.huan],20180417,for match mtd_nub who need to backup
+			}
 			ubi_assert(len == read);
 			return UBI_IO_BITFLIPS;
 		}
@@ -192,6 +203,11 @@ retry:
 
 		ubi_err(ubi, "error %d%s while reading %d bytes from PEB %d:%d, read %zd bytes",
 			err, errstr, len, pnum, offset, read);
+#if 1 // def  QUECTEL_BACKUP	  //Ramos 20170511 add for ubi read err 
+		//printk("@Quectel0125 UBI Error 8888 set restore UBI=%d\r\n", ubi->ubi_num);
+		//Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,8);
+		// modify by [francis.huan],20180417,for match mtd_nub who need to backup	
+#endif
 		dump_stack();
 
 		/*
@@ -200,10 +216,21 @@ retry:
 		 * this, so we change it to -EIO.
 		 */
 		if (read != len && mtd_is_eccerr(err)) {
+#if 1 // def  QUECTEL_BACKUP   //Ramos 20160801 add for modem file backup
+		printk("@Quectel0125 UBI Error 555 set restore UBI=%d\r\n", ubi->ubi_num);
+		Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,5);
+		// modify by [francis.huan],20180417,for match mtd_nub who need to backup
+#endif
 			ubi_assert(0);
 			err = -EIO;
 		}
 	} else {
+		if(len != read)
+		{
+			printk("@Quectel0125 UBI Error 555551122 set restore UBI =%d\r\n", ubi->ubi_num);
+			Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,5);
+			// modify by [francis.huan],20180417,for match mtd_nub who need to backup
+		}
 		ubi_assert(len == read);
 
 		if (ubi_dbg_is_bitflip(ubi)) {

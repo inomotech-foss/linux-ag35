@@ -594,6 +594,11 @@ config TEST_IRQ_REQUESTER
 	  interrupt handling.
 
 	  If in doubt, say N.
+#2016-01-29, add by jun.wu, for power manager
+config QUECTEL_POWER_MANAGER
+	bool "add quectel_power_manager"
+	default y
+#end jun.wu
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"

@@ -51,6 +51,13 @@
 #include <linux/slab.h>
 #include "ubifs.h"
 
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+#include "../../drivers/mtd/ubi/ubi.h"
+#include <linux/qstart.h>
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name,int mtd_nub,int where);
+// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
+#endif
+
 /**
  * is_empty - determine whether a buffer is empty (contains all 0xff).
  * @buf: buffer to clean
@@ -361,6 +368,12 @@ out_err:
 	err = -EINVAL;
 out_free:
 	ubifs_err(c, "failed to recover master node");
+#if 1
+        ubifs_err(c, "@quetel  add for backup in 999111 ,scan LEB failed for corrupted\n");
+      Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,9);
+//add by [francis],20180927,add backup check point
+#endif
+
 	if (mst1) {
 		ubifs_err(c, "dumping first master node");
 		ubifs_dump_node(c, mst1);
@@ -794,6 +807,7 @@ corrupted:
 	err = -EUCLEAN;
 error:
 	ubifs_err(c, "LEB %d scanning failed", lnum);
+	Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,9);
 	ubifs_scan_destroy(sleb);
 	return ERR_PTR(err);
 }

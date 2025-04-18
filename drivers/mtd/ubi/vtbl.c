@@ -61,8 +61,14 @@
 #include <linux/crc32.h>
 #include <linux/err.h>
 #include <linux/slab.h>
+#include <linux/qstart.h>
 #include <asm/div64.h>
 #include "ubi.h"
+
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub, int where);
+// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
+#endif
 
 static void self_vtbl_check(const struct ubi_device *ubi);
 
@@ -447,6 +453,10 @@ static struct ubi_vtbl_record *process_lvol(struct ubi_device *ubi,
 			leb_corrupted[1] = memcmp(leb[0], leb[1],
 						  ubi->vtbl_size);
 		if (leb_corrupted[1]) {
+#if 1 // def  QUECTEL_MODEM_BACKUP   //Ramos 20160801 add for modem file backup
+		printk("@Quectel0125 UBI Error 7771111 set restore UBI =%d\r\n", ubi->ubi_num);
+		Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,7);
+#endif
 			ubi_warn(ubi, "volume table copy #2 is corrupted");
 			err = create_vtbl(ubi, ai, 1, leb[0]);
 			if (err)
@@ -471,6 +481,11 @@ static struct ubi_vtbl_record *process_lvol(struct ubi_device *ubi,
 		}
 
 		ubi_warn(ubi, "volume table copy #1 is corrupted");
+#if 1
+		printk("@Quectel0125 UBI Error 77722222 set restore UBI =%d\r\n", ubi->ubi_num);
+	// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
+			Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,7);
+#endif
 		err = create_vtbl(ubi, ai, 0, leb[1]);
 		if (err)
 			goto out_free;

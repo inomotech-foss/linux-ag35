@@ -42,12 +42,33 @@
 #include <linux/leds.h>
 #include <linux/debugfs.h>
 
+#include <linux/uaccess.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
 
 #include "mtdcore.h"
 
 struct backing_dev_info *mtd_bdi;
+
+#define QUECTEL_FLASH_BLOCK_ERASE_MONITOR
+#ifdef QUECTEL_FLASH_BLOCK_ERASE_MONITOR
+#define BUFSIZE 50
+#define FLASH_BLK_CNT 2000
+static char *rcv_buf;
+static int write_cnt = 0;
+static struct proc_dir_entry *blk_monitor;
+static struct proc_dir_entry *blk_erase_cnt;
+static struct proc_dir_entry *page_write_cnt;
+int blk_cnt_arr[FLASH_BLK_CNT] = {0};
+#endif
+
+/*
+ * backing device capabilities for non-mappable devices (such as NAND flash)
+ * - permits private mappings, copies are taken of the data
+ */
+static struct backing_dev_info mtd_bdi_unmappable = {
+	.capabilities	= BDI_CAP_MAP_COPY,
+};
 
 #ifdef CONFIG_PM_SLEEP
 
@@ -966,6 +987,10 @@ EXPORT_SYMBOL_GPL(__put_mtd_device);
  */
 int mtd_erase(struct mtd_info *mtd, struct erase_info *instr)
 {
+#ifdef QUECTEL_FLASH_BLOCK_ERASE_MONITOR
+	uint32_t blk_id = 0;
+#endif
+
 	if (instr->addr >= mtd->size || instr->len > mtd->size - instr->addr)
 		return -EINVAL;
 	if (!(mtd->flags & MTD_WRITEABLE))
@@ -977,6 +1002,17 @@ int mtd_erase(struct mtd_info *mtd, struct erase_info *instr)
 		return 0;
 	}
 	ledtrig_mtd_activity();
+#ifdef QUECTEL_FLASH_BLOCK_ERASE_MONITOR
+	if(mtd->erasesize == 131072)        //128kb
+	{
+		blk_id = instr->addr >> 17;
+	}
+		
+	else if(mtd->erasesize == 262144)   //256kb
+	{
+		blk_id = instr->addr >> 18;
+	}		
+#endif
 	return mtd->_erase(mtd, instr);
 }
 EXPORT_SYMBOL_GPL(mtd_erase);
@@ -1066,6 +1102,11 @@ int mtd_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen,
 	if (!len)
 		return 0;
 	ledtrig_mtd_activity();
+
+#ifdef QUECTEL_FLASH_BLOCK_ERASE_MONITOR
+	write_cnt++;
+#endif
+
 	return mtd->_write(mtd, to, len, retlen, buf);
 }
 EXPORT_SYMBOL_GPL(mtd_write);
@@ -1745,6 +1786,127 @@ void *mtd_kmalloc_up_to(const struct mtd_info *mtd, size_t *size)
 }
 EXPORT_SYMBOL_GPL(mtd_kmalloc_up_to);
 
+#ifdef QUECTEL_FLASH_BLOCK_ERASE_MONITOR
+#if 0
+static void quectel_set_blk_info(char *buf) 
+{
+	int i = 0;
+	char *blk_id_str = NULL;
+	while(i <= strlen(buf))
+	{
+		if(buf[i] == ',')
+			break;
+		i++;
+	}
+
+	memcpy(blk_id_str, buf, i);
+	ret = kstrtoint(blk_id_str, 10, &blk_id);
+	if(ret) {
+		pr_err("[ql_block][%s] kstrtoint error return %d.\n", __FUNCTION__, ret);
+		return;
+	}
+	pr_debug("[Tako] blk_id = %d.\n");
+
+	ret = kstrtoint(buf[i+1], 10, &blk_erz_cnt);
+	if(ret) {
+		pr_err("[ql_block][%s] kstrtoint error return %d.\n", __FUNCTION__, ret);
+		return;
+	}
+	pr_debug("[Tako] blk_erz_cnt = %d.\n");
+
+	// blk_cnt_arr[blk_id] += blk_erz_cnt;
+	return;
+}
+#endif
+static ssize_t quectel_blk_monitor_r(struct file *filp, char __user *buf, size_t count, loff_t *offset)
+{
+	pr_debug("[ql_block][%s]\n", __FUNCTION__);
+	int ret = 0, i = 0;
+	int erase_total_cnt = 0;
+	char buffer[20] = {0};
+
+	if(*offset > 0)
+		return 0;
+
+	for(i; i < FLASH_BLK_CNT; i++)
+		erase_total_cnt += blk_cnt_arr[i];
+
+	sprintf(buffer, "%d", erase_total_cnt);
+	ret = copy_to_user(buf, buffer, strlen(buffer));
+	if(ret) {
+		pr_err("[ql_block][%s] copy to user failed.\n", __FUNCTION__);
+		return -EFAULT;
+	}
+	
+	*offset += strlen(buffer);
+
+	return strlen(buffer);
+}
+
+static ssize_t quectel_blk_monitor_w(struct file *filp, const char __user *buf, size_t count, loff_t *offset)
+{
+	pr_debug("[ql_block][%s]\n", __FUNCTION__);
+	int ret = 0, len;
+	len = count > BUFSIZE ? BUFSIZE : count;
+
+	/* kfree memory by kmalloc before */
+	if(rcv_buf != NULL)
+		kfree(rcv_buf);
+	rcv_buf = (char*)kmalloc(len+1, GFP_KERNEL);
+	if(rcv_buf == NULL)
+	{
+		pr_err("[ql_block][%s] kmalloc failure.\n", __FUNCTION__);
+		return -EFAULT;
+	}
+	//memset(rcv_buf, 0, sizeof(rcv_buf));
+	memset(rcv_buf, 0, len+1);
+
+	ret = copy_from_user(rcv_buf, buf, len);
+	if(ret) {
+		pr_err("[ql_block][%s] copy from user failed.\n", __FUNCTION__);
+		return -EFAULT;
+	}
+
+	// quectel_set_blk_info(rcv_buf);
+	 kfree(rcv_buf);
+
+	return len;
+}
+
+static ssize_t quectel_page_write_r(struct file *filp, char __user *buf, size_t count, loff_t *offset)
+{
+	pr_debug("[ql_block][%s]\n", __FUNCTION__);
+	int ret = 0;
+	char buffer[20] = {0};
+
+	if(*offset > 0)
+		return 0;
+
+	sprintf(buffer, "%d", write_cnt);
+	ret = copy_to_user(buf, buffer, strlen(buffer));
+	if(ret) {
+		pr_err("[ql_block][%s] copy to user failed.\n", __FUNCTION__);
+		return -EFAULT;
+	}
+	
+	*offset += strlen(buffer);
+
+	return strlen(buffer);
+}
+
+static const struct file_operations quectel_blk_monitor_ops = {
+	.owner = THIS_MODULE,
+    .read  = quectel_blk_monitor_r,
+    .write = quectel_blk_monitor_w,
+};
+
+static const struct file_operations quectel_page_write_ops = {
+	.owner = THIS_MODULE,
+    .read  = quectel_page_write_r,
+};
+
+#endif
+
 #ifdef CONFIG_PROC_FS
 
 /*====================================================================*/
@@ -1819,6 +1981,12 @@ static int __init init_mtd(void)
 	}
 
 	proc_mtd = proc_create("mtd", 0, NULL, &mtd_proc_ops);
+
+#ifdef QUECTEL_FLASH_BLOCK_ERASE_MONITOR
+	blk_monitor = proc_mkdir("blk_monitor", NULL);
+	blk_erase_cnt = proc_create("blk_erase_cnt", 0777, blk_monitor, &quectel_blk_monitor_ops);
+	page_write_cnt = proc_create("page_write_cnt", 0777, blk_monitor, &quectel_page_write_ops);
+#endif
 
 	ret = init_mtdchar();
 	if (ret)

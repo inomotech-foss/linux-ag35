@@ -88,7 +88,7 @@
 #include <linux/io.h>
 #include <linux/cache.h>
 #include <linux/rodata_test.h>
-
+#include <linux/qstart.h>
 #include <asm/io.h>
 #include <asm/bugs.h>
 #include <asm/setup.h>
@@ -97,6 +97,12 @@
 #include <soc/qcom/boot_stats.h>
 
 #include "do_mounts.h"
+
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+#include "../drivers/mtd/ubi/ubi.h"
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
+#endif
 
 static int kernel_init(void *);
 
@@ -980,11 +986,31 @@ static int try_to_run_init_process(const char *init_filename)
 
 	if (ret && ret != -ENOENT) {
 		pr_err("Starting init: %s exists but couldn't execute it (error %d)\n",
-		       init_filename, ret);
+			   init_filename, ret);
 	}
 
 	return ret;
 }
+
+//add by len [QUECTEL], 2018-1-18
+static unsigned char rootfstype[20], rootflags[20];
+
+static int __init quectel_set_rootfstype(char *str)
+{
+	strcpy(rootfstype, str);
+	rootfstype[strlen(str)] = '\0';
+	return 0;
+}
+early_param("rootfstype", quectel_set_rootfstype);
+
+static int __init quectel_set_rootflags(char *str)
+{
+	strcpy(rootflags, str);
+	rootflags[strlen(str)]='\0';
+	return 0;
+}
+early_param("rootflags", quectel_set_rootflags);
+//add end
 
 static noinline void __init kernel_init_freeable(void);
 
@@ -1073,6 +1099,11 @@ static int __ref kernel_init(void *unused)
 	    !try_to_run_init_process("/bin/init") ||
 	    !try_to_run_init_process("/bin/sh"))
 		return 0;
+
+
+	printk("@Ramos kernel_init try_to_run_init_process EXIT panic 22222\r\n\r\n");	
+	printk("@Quectel0125 set restore systemfs flag here 444444 \r\n");
+	Quectel_Set_Partition_RestoreFlag("", ubi_get_device(0)->mtd->index,4);// rootfs must be ubi0, so we usr ubi0 to get mtd
 
 	panic("No working init found.  Try passing init= option to kernel. "
 	      "See Linux Documentation/admin-guide/init.rst for guidance.");

@@ -91,3 +91,6 @@ $(obj)/lkdtm_rodata_objcopy.o: $(obj)/lkdtm_rodata.o FORCE
 obj-$(CONFIG_OKL4_USER_VIPC)    += okl4-vipc.o
 obj-$(CONFIG_OKL4_GUEST)        += okl4-panic.o
 obj-$(CONFIG_OKL4_LINK_SHBUF)    += okl4-link-shbuf.o
+#2016-01-29,add by jun.wu, for power manager
+obj-$(CONFIG_QUECTEL_POWER_MANAGER)	+= quectel_power_manager.o
+#end jun.wu
