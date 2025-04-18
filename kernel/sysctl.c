@@ -63,6 +63,7 @@
 #include <linux/binfmts.h>
 #include <linux/sched/sysctl.h>
 #include <linux/kexec.h>
+#include <linux/mount.h>
 
 #include <asm/uaccess.h>
 #include <asm/processor.h>
@@ -113,6 +114,14 @@ extern int latencytop_enabled;
 extern int sysctl_nr_open_min, sysctl_nr_open_max;
 #ifndef CONFIG_MMU
 extern int sysctl_nr_trim_pages;
+#endif
+
+#ifndef SYS_CONFIG_QUECTEL_ESCAPE_FEATURE ////MaxCodeFlagForEscapeFunc
+#define SYS_CONFIG_QUECTEL_ESCAPE_FEATURE
+#endif
+
+#ifdef SYS_CONFIG_QUECTEL_ESCAPE_FEATURE ////MaxCodeFlagForEscapeFunc
+extern int q_modemmode;
 #endif
 
 /* Constants used for minimum and  maximum */
@@ -1059,6 +1068,20 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
+	
+#ifdef SYS_CONFIG_QUECTEL_ESCAPE_FEATURE
+     /* 2015/4/20 added by tommy for modem mode */
+    {
+        .procname       = "qmodem_mode",
+        .data           = &q_modemmode,
+        .maxlen         = sizeof(int),
+        .mode           = 0644,
+        .proc_handler   = proc_dointvec,
+    },
+#else
+#error "max cmp tag: donot get expect src code!"
+#endif
+	
 	{
 		.procname	= "printk_ratelimit_burst",
 		.data		= &printk_ratelimit_state.burst,
@@ -2029,6 +2052,14 @@ static struct ctl_table fs_table[] = {
 		.maxlen		= sizeof(pipe_user_pages_soft),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
+	},
+	{
+		.procname	= "mount-max",
+		.data		= &sysctl_mount_max,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
 	},
 	{ }
 };

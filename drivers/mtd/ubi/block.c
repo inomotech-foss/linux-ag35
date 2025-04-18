@@ -63,6 +63,11 @@
 /* Maximum number of comma-separated items in the 'block=' parameter */
 #define UBIBLOCK_PARAM_COUNT 2
 
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+#include "linux/mtd/mtd.h"
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+#endif
+
 struct ubiblock_param {
 	int ubi_num;
 	int vol_id;
@@ -317,9 +322,9 @@ static void ubiblock_do_work(struct work_struct *work)
 }
 
 static int ubiblock_queue_rq(struct blk_mq_hw_ctx *hctx,
-			     const struct blk_mq_queue_data *bd)
+			       const struct requect  *bd, bool last)
 {
-	struct request *req = bd->rq;
+	struct request *req = bd;//Darren fix for ubi block 20180413
 	struct ubiblock *dev = hctx->queue->queuedata;
 	struct ubiblock_pdu *pdu = blk_mq_rq_to_pdu(req);
 
@@ -434,7 +439,12 @@ int ubiblock_create(struct ubi_volume_info *vi)
 	 * Create one workqueue per volume (per registered block device).
 	 * Rembember workqueues are cheap, they're not threads.
 	 */
-	dev->wq = alloc_workqueue("%s", 0, 0, gd->disk_name);
+
+	/* 
+	 * Qualcomm case: 06845887.
+	 * Fixed dump caused by nand suspended ubiblock io request during sleep wake up.
+	 */
+	dev->wq = alloc_workqueue("%s", WQ_FREEZABLE, 0, gd->disk_name);
 	if (!dev->wq) {
 		ret = -ENOMEM;
 		goto out_free_queue;
@@ -463,7 +473,21 @@ out_free_dev:
 
 	return ret;
 }
+#if 1 //Quectel-20180918 Ramos.zhang add for get ubi nub from gd_disk, for QUECTEL_restore function
+int get_ubi_num_from_gd(struct gendisk *gd)
+{
+    struct  ubiblock *ubiblock_dev;
+    int i=0;
+    if(NULL == gd->private_data)
+    {    
+        return -1;    
+    }
+    ubiblock_dev = gd->private_data;    
 
+    i = ubiblock_dev->ubi_num;
+    return i;
+}
+#endif
 static void ubiblock_cleanup(struct ubiblock *dev)
 {
 	/* Stop new requests to arrive */
@@ -612,6 +636,12 @@ static void __init ubiblock_create_from_param(void)
 			pr_err(
 			       "UBI: block: can't open volume on ubi%d_%d, err=%ld",
 			       p->ubi_num, p->vol_id, PTR_ERR(desc));
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+	{
+		printk("@Quectel0125 set file restore flag here 3333 p->ubi_num=%d\r\n",p->ubi_num);
+		Quectel_Set_Partition_RestoreFlag("", ubi_get_device(p->ubi_num)->mtd->index,3);
+	}
+#endif
 			continue;
 		}
 

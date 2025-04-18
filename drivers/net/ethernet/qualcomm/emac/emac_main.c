@@ -13,6 +13,14 @@
 /* Qualcomm Technologies, Inc. EMAC Ethernet Controller driver.
  */
 
+/*==========================================================================
+                          EDIT HISTORY FOR MODULE
+when         who         what, where, why
+11/07/2020   bowen gu    deadlock issue patch fixed by quectel
+11/27/2020   bowen gu    in order to avoid phy state machine can't startup, whatever any phy, 
+                         every time when mac up/down happens, re-start phy state machine.
+============================================================================*/
+
 #include <linux/gpio.h>
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
@@ -44,6 +52,8 @@
 #include "emac_ptp.h"
 #include "emac_sgmii.h"
 
+#define BCM89832_PHY_ID      0x35905048
+
 #define EMAC_MSG_DEFAULT (NETIF_MSG_DRV | NETIF_MSG_PROBE | NETIF_MSG_LINK |  \
 		NETIF_MSG_TIMER | NETIF_MSG_IFDOWN | NETIF_MSG_IFUP |         \
 		NETIF_MSG_RX_ERR | NETIF_MSG_TX_ERR | NETIF_MSG_TX_QUEUED |   \
@@ -70,6 +80,9 @@
 #define EMAC_PINCTRL_STATE_EPHY_ACTIVE "emac_ephy_active"
 #define EMAC_PINCTRL_STATE_EPHY_SLEEP  "emac_ephy_sleep"
 
+/* 202011107 bowen fix deadlock issue internally */
+#define EMAC_VERSION "1.0.6"
+
 struct emac_skb_cb {
 	u32           tpd_idx;
 	unsigned long jiffies;
@@ -88,6 +101,109 @@ module_param_named(msglvl, msm_emac_msglvl, int, S_IRUGO | S_IWUSR | S_IWGRP);
 static int msm_emac_intr_ext;
 module_param_named(intr_ext, msm_emac_intr_ext, int,
 		   S_IRUGO | S_IWUSR | S_IWGRP);
+
+#if 1 //add by carl for show phy register
+static ssize_t quectel_phy_regnum_show_ar8003(struct device *pdev, struct device_attribute *attr, char *buf) {
+    struct net_device *netdev = dev_get_drvdata(pdev);
+    struct emac_adapter *adpt = netdev_priv(netdev);
+    struct phy_device *phydev = adpt->phydev;
+
+    u16 reg_addr;
+    u16 phy_data;
+
+    u16 debug_reg[] = {0x0, 0x5, 0xB, 0x10, 0x11, 0x12, 0x1F, 0x29, 0x3D};
+    u16 mmd3_reg[] = {0x0, 0x1, 0x14, 0x16, 0x8003, 0x8009, 0x8012, 0x804a, 0x804b, 0x805a, 0x805b, 0x805c, 0x805d};
+    u16 mmd7_reg[] = {0x0, 0x3c, 0x3d, 0x8000, 0x8005, 0x8010, 0x8011, 0x8012, 0x8016};
+
+    dev_info(&phydev->dev, "\nMII registers\n");
+    for (reg_addr = 0; reg_addr <= 0x1f; reg_addr++) {
+        phy_data = mdiobus_read(phydev->bus, phydev->addr, reg_addr) & 0xFFFF;
+        dev_info(&phydev->dev, "reg[%x] = %x\n", reg_addr, phy_data);
+    }
+
+    dev_info(&phydev->dev, "\nDebug registers\n");
+    for (reg_addr = 0; reg_addr < (sizeof(mmd3_reg)/sizeof(u16)); reg_addr++) {
+        mdiobus_write(phydev->bus, phydev->addr, 0x1D, debug_reg[reg_addr]);
+        phy_data = mdiobus_read(phydev->bus, phydev->addr, 0x1E) & 0xFFFF;
+        //retval = emac_phy_write(adpt, phy->addr, 0x1E, phy_data);
+        dev_info(&phydev->dev, "reg[%x] = %x\n", debug_reg[reg_addr], phy_data);
+    }
+
+    dev_info(&phydev->dev, "\nMDD3 registers\n");
+    for (reg_addr = 0; reg_addr < (sizeof(mmd3_reg)/sizeof(u16)); reg_addr++) {
+        mdiobus_write(phydev->bus, phydev->addr, 0xD, 3);
+        mdiobus_write(phydev->bus, phydev->addr, 0xE, mmd3_reg[reg_addr]);
+        mdiobus_write(phydev->bus, phydev->addr, 0xD, 0x4003);
+        phy_data = mdiobus_read(phydev->bus, phydev->addr, 0xE) & 0xFFFF;
+        //retval = emac_phy_write(adpt, phy->addr, 0xE, phy_data);
+        dev_info(&phydev->dev, "reg[%x] = %x\n", mmd3_reg[reg_addr], phy_data);
+    }
+
+    dev_info(&phydev->dev, "\nMDD7 registers\n");
+    for (reg_addr = 0; reg_addr < (sizeof(mmd7_reg)/sizeof(u16)); reg_addr++) {
+        mdiobus_write(phydev->bus, phydev->addr, 0xD, 7);
+        mdiobus_write(phydev->bus, phydev->addr, 0xE, mmd3_reg[reg_addr]);
+        mdiobus_write(phydev->bus, phydev->addr, 0xD, 0x4007);
+        phy_data = mdiobus_read(phydev->bus, phydev->addr, 0xE) & 0xFFFF;
+        //retval = emac_phy_write(adpt, phy->addr, 0xE, phy_data);
+        dev_info(&phydev->dev, "reg[%x] = %x\n", mmd3_reg[reg_addr], phy_data);
+    }
+    
+    return sprintf(buf, "%d\n", phydev->phy_id);
+}
+
+static int phy_regnum;
+static int phy_regval;
+static ssize_t quectel_phy_regnum_show(struct device *pdev, struct device_attribute *attr, char *buf) {
+    struct net_device *netdev = dev_get_drvdata(pdev);
+    struct emac_adapter *adpt = netdev_priv(netdev);
+    struct phy_device *phydev = adpt->phydev;
+
+    if (phy_regnum == -1 && phydev->phy_id == 0x4dd074) {
+        return quectel_phy_regnum_show_ar8003(pdev, attr, buf);
+    }
+
+    dev_info(&phydev->dev, "mdiobus_read(addr=%d, regnum=0x%02x)=0x%04x\n", phydev->addr, phy_regnum, phy_regval);
+
+    return snprintf(buf, PAGE_SIZE, "0x%04x\n", phy_regval);
+}
+
+static ssize_t quectel_phy_regnum_store(struct device *pdev, struct device_attribute *attr, const char *buff, size_t size) {
+    struct net_device *netdev = dev_get_drvdata(pdev);
+    struct emac_adapter *adpt = netdev_priv(netdev);    
+    struct phy_device *phydev = adpt->phydev;
+    
+    int n;
+
+    if (buff[0] == '0' && buff[1] == 'x')
+        n = sscanf(buff, "0x%x 0x%x", &phy_regnum, &phy_regval);
+    else
+        n = sscanf(buff, "%d 0x%x", &phy_regnum, &phy_regval);
+    phy_regval = phy_regval & 0xFFFF;
+
+    pm_runtime_get_sync(pdev);
+    
+    if (n == 2) {
+        int ret = mdiobus_write(adpt->phydev->bus, adpt->phydev->addr, phy_regnum, phy_regval);
+        dev_info(&phydev->dev, "mdiobus_write(addr=%d, regnum=0x%02x, val=0x%04x)=%d\n",
+            adpt->phydev->addr, phy_regnum, phy_regval, ret);
+   } else if (n == 1){
+        phy_regval = mdiobus_read(adpt->phydev->bus, adpt->phydev->addr, phy_regnum) & 0xFFFF;
+        dev_info(&phydev->dev, "mdiobus_read(addr=%d, regnum=0x%02x)=0x%04x\n", adpt->phydev->addr, phy_regnum, phy_regval);
+   } else {
+        return -EINVAL;
+   }
+   
+    pm_runtime_mark_last_busy(pdev);
+    pm_runtime_put_autosuspend(pdev);
+	
+    return size;
+}
+
+//echo 3 > /sys/devices/7c40000.qcom,emac/phy_regnum ; cat /sys/devices/7c40000.qcom,emac/phy_regnum to read reg_3
+//echo -1 > /sys/devices/7c40000.qcom,emac/phy_regnum ; cat /sys/devices/7c40000.qcom,emac/phy_regnum to read all
+static DEVICE_ATTR(phy_regnum, S_IRUSR | S_IWUSR, quectel_phy_regnum_show, quectel_phy_regnum_store);
+#endif
 
 static irqreturn_t emac_isr(int irq, void *data);
 static irqreturn_t emac_wol_isr(int irq, void *data);
@@ -1807,15 +1923,23 @@ static void emac_adjust_link(struct net_device *netdev)
 	struct emac_hw *hw = &adpt->hw;
 	bool status_changed = false;
 
-	if (!TEST_FLAG(adpt, ADPT_TASK_LSC_REQ))
+	if (!TEST_FLAG(adpt, ADPT_TASK_LSC_REQ)) {
 		return;
+	}
 	CLR_FLAG(adpt, ADPT_TASK_LSC_REQ);
-
-	/* ensure that no reset is in progress while link task is running */
-	while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING))
+    
+    /* 202011107 bowen fix deadlock issue internally */
+	while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING)) {
+		if (TEST_FLAG(adpt, ADPT_STATE_DOWN)) {
+			printk("mac_down is ongoing and return directly\n");
+			return;
+		}
 		/* Reset might take few 10s of ms */
 		msleep(EMAC_ADPT_RESET_WAIT_TIME);
+	}
+	/* end */
 
+	/* ensure that no reset is in progress while link task is running */
 	if (TEST_FLAG(adpt, ADPT_STATE_DOWN))
 		goto link_task_done;
 
@@ -1985,19 +2109,24 @@ void emac_mac_down(struct emac_adapter *adpt, u32 ctrl)
 	 * an interrupt.
 	 */
 	emac_disable_intr(adpt);
+	/* 20201111 bowen fix panic issue 
+	 * wait emac thread to finish.
+	 */
+	msleep(10);
 	phy->ops.down(adpt);
 
 	for (i = 0; i < EMAC_NUM_CORE_IRQ; i++)
 		if (adpt->irq[i].irq)
 			free_irq(adpt->irq[i].irq, &adpt->irq[i]);
 
-	if (((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
-	     (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
-	     (ATH8035_PHY_ID == adpt->phydev->phy_id)) &&
-	   (adpt->phy.is_ext_phy_connect)) {
+    /* 20201107 bowen fix deadlock issue internally
+	 * 20201127 bowenthe phy state machine enters the wrong state, hence, whatever any phy,
+	 * every time when mac up/down happens, we need to disconnect phy state machine. */
+	if (adpt->phy.is_ext_phy_connect) {
 		phy_disconnect(adpt->phydev);
 		adpt->phy.is_ext_phy_connect = 0;
 	}
+	/* end */
 
 	CLR_FLAG(adpt, ADPT_TASK_LSC_REQ);
 	CLR_FLAG(adpt, ADPT_TASK_REINIT_REQ);
@@ -2072,7 +2201,8 @@ static int emac_close(struct net_device *netdev)
 	struct emac_adapter *adpt = netdev_priv(netdev);
 	struct emac_hw *hw = &adpt->hw;
 	struct emac_phy *phy = &adpt->phy;
-
+	
+    /* 202011107 bowen fix deadlock issue internally */
 	/* ensure no task is running and no reset is in progress */
 	while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING))
 		/* Reset might take few 10s of ms */
@@ -2261,6 +2391,12 @@ static void emac_work_thread(struct work_struct *work)
 
 	if (!TEST_FLAG(adpt, ADPT_STATE_WATCH_DOG))
 		emac_warn(adpt, timer, "flag STATE_WATCH_DOG doesn't set\n");
+	
+	/* 20201111 bowen fix panic issue */
+	if (TEST_FLAG(adpt, ADPT_TASK_REMOVING)) {
+		printk("%s %d removing emac is ongoing and return directly\n", __func__, __LINE__);
+		return;
+	}
 
 	emac_reinit_task_routine(adpt);
 
@@ -3042,6 +3178,8 @@ static int emac_probe(struct platform_device *pdev)
 	u8 i;
 	u32 hw_ver;
 
+	printk("emac driver version : %s\n", EMAC_VERSION);
+
 	/* The EMAC itself is capable of 64-bit DMA, so try that first. */
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (ret) {
@@ -3132,6 +3270,7 @@ static int emac_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_clk_init;
 
+	mdelay(20);
 	/* init external phy */
 	ret = emac_phy_config_external(pdev, adpt);
 	if (ret)
@@ -3169,6 +3308,8 @@ static int emac_probe(struct platform_device *pdev)
 
 	SET_FLAG(hw, HW_VLANSTRIP_EN);
 	SET_FLAG(adpt, ADPT_STATE_DOWN);
+	/* 20201111 bowen fix panic issue */
+	CLR_FLAG(adpt, ADPT_TASK_REMOVING);
 	strlcpy(netdev->name, "eth%d", sizeof(netdev->name));
 
 	pm_runtime_set_autosuspend_delay(&pdev->dev, EMAC_TRY_LINK_TIMEOUT);
@@ -3203,6 +3344,7 @@ static int emac_probe(struct platform_device *pdev)
 		 (hw_ver & MINOR_BMSK) >> MINOR_SHFT,
 		 (hw_ver & STEP_BMSK) >> STEP_SHFT);
 
+	device_create_file(&pdev->dev, &dev_attr_phy_regnum);
 	return 0;
 
 err_undo_napi:
@@ -3216,11 +3358,13 @@ err_init_mdio_gpio:
 err_clk_init:
 	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
+	    (BCM89832_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
 		emac_disable_clks(adpt);
 err_ldo_init:
 	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
+	    (BCM89832_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
 		emac_disable_regulator(adpt, EMAC_VREG1, EMAC_VREG5);
 err_get_resource:
@@ -3237,6 +3381,11 @@ static int emac_remove(struct platform_device *pdev)
 	struct emac_sgmii *sgmii = adpt->phy.private;
 	struct emac_phy *phy = &adpt->phy;
 	u32 i;
+
+	/* 20201111 bowen fix panic issue */
+	SET_FLAG(adpt, ADPT_TASK_REMOVING);
+
+	device_remove_file(&pdev->dev, &dev_attr_phy_regnum);
 
 	if (!pm_runtime_enabled(&pdev->dev) ||
 	    !pm_runtime_suspended(&pdev->dev)) {

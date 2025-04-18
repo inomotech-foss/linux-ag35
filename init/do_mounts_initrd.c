@@ -17,6 +17,7 @@
 #include <linux/sched.h>
 #include <linux/freezer.h>
 #include <linux/kmod.h>
+#include <linux/delay.h>
 
 #include "do_mounts.h"
 
@@ -24,7 +25,7 @@ unsigned long initrd_start, initrd_end;
 int initrd_below_start_ok;
 unsigned int real_root_dev;	/* do_proc_dointvec cannot handle kdev_t */
 static int __initdata mount_initrd = 1;
-
+extern char __initdata dm_root_name[64];
 static int __init no_initrd(char *str)
 {
 	mount_initrd = 0;
@@ -91,8 +92,16 @@ static void __init handle_initrd(void)
 
 	sys_chdir("/");
 	ROOT_DEV = new_decode_dev(real_root_dev);
+	have_dm_verity = 0;
+	if (dm_root_name[0]) {
+		if (!strncmp(dm_root_name, "mtd", 3) ||
+			!strncmp(dm_root_name, "ubi", 3)) {
+			mount_block_root(dm_root_name, root_mountflags);
+			goto out;
+		}
+	}
 	mount_root();
-
+out:
 	printk(KERN_NOTICE "Trying to move old root to /initrd ... ");
 	error = sys_mount("/old", "/root/initrd", NULL, MS_MOVE, NULL);
 	if (!error)
@@ -109,7 +118,12 @@ static void __init handle_initrd(void)
 		if (fd < 0) {
 			error = fd;
 		} else {
+retry:
 			error = sys_ioctl(fd, BLKFLSBUF, 0);
+			if (error == -EBUSY) {
+				msleep(50);
+				goto retry;
+			}
 			sys_close(fd);
 		}
 		printk(!error ? "okay\n" : "failed\n");

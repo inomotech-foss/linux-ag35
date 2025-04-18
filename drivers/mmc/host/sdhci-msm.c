@@ -3949,6 +3949,14 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	unsigned long flags;
 
 	pr_debug("%s: Enter %s\n", dev_name(&pdev->dev), __func__);
+#if 1 //add by carl, set WLAN_EN to output low, default state in in-pull up, 0.4v leak on WIFI_3v3 make cwifi hip up
+	if (!strcmp(dev_name(&pdev->dev), "7824900.sdhci")) {
+		if (!gpio_request(54, NULL)) {
+			gpio_direction_output(54, 0);
+			gpio_free(54);
+		}
+	}
+#endif
 	msm_host = devm_kzalloc(&pdev->dev, sizeof(struct sdhci_msm_host),
 				GFP_KERNEL);
 	if (!msm_host) {
@@ -4272,7 +4280,7 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	msm_host->mmc->caps2 |= msm_host->pdata->caps2;
 	msm_host->mmc->caps2 |= MMC_CAP2_BOOTPART_NOACC;
 	msm_host->mmc->caps2 |= MMC_CAP2_HS400_POST_TUNING;
-	msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE;
+	//msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE; //carl comment for emmc, maybe also suitable for wifi&sd, not sure by now
 	msm_host->mmc->caps2 |= MMC_CAP2_SANITIZE;
 	msm_host->mmc->caps2 |= MMC_CAP2_MAX_DISCARD_SIZE;
 	msm_host->mmc->caps2 |= MMC_CAP2_SLEEP_AWAKE;

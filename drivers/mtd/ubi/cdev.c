@@ -1036,8 +1036,17 @@ static long ctrl_cdev_ioctl(struct file *file, unsigned int cmd,
 			break;
 		}
 
+/******************************************************************************************
+who-2020/05/18:Description....
+Refer to [Issue-Depot].[IS0001191][Submitter:chongyu.zhao,Date:2020-05-18]
+******************************************************************************************/
+#define FORCE_UBI_DETACH
 		mutex_lock(&ubi_devices_mutex);
+#ifdef FORCE_UBI_DETACH
+		err = ubi_detach_mtd_dev(ubi_num, 1);
+#else
 		err = ubi_detach_mtd_dev(ubi_num, 0);
+#endif
 		mutex_unlock(&ubi_devices_mutex);
 		break;
 	}
