@@ -88,6 +88,109 @@ static int msm_emac_intr_ext;
 module_param_named(intr_ext, msm_emac_intr_ext, int,
 		   S_IRUGO | S_IWUSR | S_IWGRP);
 
+#if 1 //add by carl for show phy register
+static ssize_t quectel_phy_regnum_show_ar8003(struct device *pdev, struct device_attribute *attr, char *buf) {
+    struct net_device *netdev = dev_get_drvdata(pdev);
+    struct emac_adapter *adpt = netdev_priv(netdev);
+    struct phy_device *phydev = adpt->phydev;
+
+    u16 reg_addr;
+    u16 phy_data;
+
+    u16 debug_reg[] = {0x0, 0x5, 0xB, 0x10, 0x11, 0x12, 0x1F, 0x29, 0x3D};
+    u16 mmd3_reg[] = {0x0, 0x1, 0x14, 0x16, 0x8003, 0x8009, 0x8012, 0x804a, 0x804b, 0x805a, 0x805b, 0x805c, 0x805d};
+    u16 mmd7_reg[] = {0x0, 0x3c, 0x3d, 0x8000, 0x8005, 0x8010, 0x8011, 0x8012, 0x8016};
+
+    dev_info(&phydev->dev, "\nMII registers\n");
+    for (reg_addr = 0; reg_addr <= 0x1f; reg_addr++) {
+        phy_data = mdiobus_read(phydev->bus, phydev->addr, reg_addr) & 0xFFFF;
+        dev_info(&phydev->dev, "reg[%x] = %x\n", reg_addr, phy_data);
+    }
+
+    dev_info(&phydev->dev, "\nDebug registers\n");
+    for (reg_addr = 0; reg_addr < (sizeof(mmd3_reg)/sizeof(u16)); reg_addr++) {
+        mdiobus_write(phydev->bus, phydev->addr, 0x1D, debug_reg[reg_addr]);
+        phy_data = mdiobus_read(phydev->bus, phydev->addr, 0x1E) & 0xFFFF;
+        //retval = emac_phy_write(adpt, phy->addr, 0x1E, phy_data);
+        dev_info(&phydev->dev, "reg[%x] = %x\n", debug_reg[reg_addr], phy_data);
+    }
+
+    dev_info(&phydev->dev, "\nMDD3 registers\n");
+    for (reg_addr = 0; reg_addr < (sizeof(mmd3_reg)/sizeof(u16)); reg_addr++) {
+        mdiobus_write(phydev->bus, phydev->addr, 0xD, 3);
+        mdiobus_write(phydev->bus, phydev->addr, 0xE, mmd3_reg[reg_addr]);
+        mdiobus_write(phydev->bus, phydev->addr, 0xD, 0x4003);
+        phy_data = mdiobus_read(phydev->bus, phydev->addr, 0xE) & 0xFFFF;
+        //retval = emac_phy_write(adpt, phy->addr, 0xE, phy_data);
+        dev_info(&phydev->dev, "reg[%x] = %x\n", mmd3_reg[reg_addr], phy_data);
+    }
+
+    dev_info(&phydev->dev, "\nMDD7 registers\n");
+    for (reg_addr = 0; reg_addr < (sizeof(mmd7_reg)/sizeof(u16)); reg_addr++) {
+        mdiobus_write(phydev->bus, phydev->addr, 0xD, 7);
+        mdiobus_write(phydev->bus, phydev->addr, 0xE, mmd3_reg[reg_addr]);
+        mdiobus_write(phydev->bus, phydev->addr, 0xD, 0x4007);
+        phy_data = mdiobus_read(phydev->bus, phydev->addr, 0xE) & 0xFFFF;
+        //retval = emac_phy_write(adpt, phy->addr, 0xE, phy_data);
+        dev_info(&phydev->dev, "reg[%x] = %x\n", mmd3_reg[reg_addr], phy_data);
+    }
+    
+    return sprintf(buf, "%d\n", phydev->phy_id);
+}
+
+static int phy_regnum;
+static int phy_regval;
+static ssize_t quectel_phy_regnum_show(struct device *pdev, struct device_attribute *attr, char *buf) {
+    struct net_device *netdev = dev_get_drvdata(pdev);
+    struct emac_adapter *adpt = netdev_priv(netdev);
+    struct phy_device *phydev = adpt->phydev;
+
+    if (phy_regnum == -1 && phydev->phy_id == 0x4dd074) {
+        return quectel_phy_regnum_show_ar8003(pdev, attr, buf);
+    }
+
+    dev_info(&phydev->dev, "mdiobus_read(addr=%d, regnum=0x%02x)=0x%04x\n", phydev->addr, phy_regnum, phy_regval);
+
+    return snprintf(buf, PAGE_SIZE, "0x%04x\n", phy_regval);
+}
+
+static ssize_t quectel_phy_regnum_store(struct device *pdev, struct device_attribute *attr, const char *buff, size_t size) {
+    struct net_device *netdev = dev_get_drvdata(pdev);
+    struct emac_adapter *adpt = netdev_priv(netdev);    
+    struct phy_device *phydev = adpt->phydev;
+    
+    int n;
+
+    if (buff[0] == '0' && buff[1] == 'x')
+        n = sscanf(buff, "0x%x 0x%x", &phy_regnum, &phy_regval);
+    else
+        n = sscanf(buff, "%d 0x%x", &phy_regnum, &phy_regval);
+    phy_regval = phy_regval & 0xFFFF;
+
+    pm_runtime_get_sync(pdev);
+    
+    if (n == 2) {
+        int ret = mdiobus_write(adpt->phydev->bus, adpt->phydev->addr, phy_regnum, phy_regval);
+        dev_info(&phydev->dev, "mdiobus_write(addr=%d, regnum=0x%02x, val=0x%04x)=%d\n",
+            adpt->phydev->addr, phy_regnum, phy_regval, ret);
+   } else if (n == 1){
+        phy_regval = mdiobus_read(adpt->phydev->bus, adpt->phydev->addr, phy_regnum) & 0xFFFF;
+        dev_info(&phydev->dev, "mdiobus_read(addr=%d, regnum=0x%02x)=0x%04x\n", adpt->phydev->addr, phy_regnum, phy_regval);
+   } else {
+        return -EINVAL;
+   }
+   
+    pm_runtime_mark_last_busy(pdev);
+    pm_runtime_put_autosuspend(pdev);
+	
+    return size;
+}
+
+//echo 3 > /sys/devices/7c40000.qcom,emac/phy_regnum ; cat /sys/devices/7c40000.qcom,emac/phy_regnum to read reg_3
+//echo -1 > /sys/devices/7c40000.qcom,emac/phy_regnum ; cat /sys/devices/7c40000.qcom,emac/phy_regnum to read all
+static DEVICE_ATTR(phy_regnum, S_IRUSR | S_IWUSR, quectel_phy_regnum_show, quectel_phy_regnum_store);
+#endif
+
 static irqreturn_t emac_isr(int irq, void *data);
 static irqreturn_t emac_wol_isr(int irq, void *data);
 
@@ -3064,6 +3167,7 @@ static int emac_probe(struct platform_device *pdev)
 
 	/* Configure MDIO lines */
 	ret = adpt->gpio_on(adpt, true, true);
+	mdelay(20);
 	if (ret)
 		goto err_clk_init;
 
@@ -3075,7 +3179,6 @@ static int emac_probe(struct platform_device *pdev)
 	/* reset mac */
 	emac_hw_reset_mac(hw);
 
-	/* disable emac core and phy regulator */
 	emac_disable_clks(adpt);
 	emac_disable_regulator(adpt, EMAC_VREG1, EMAC_VREG2);
 
@@ -3141,6 +3244,7 @@ static int emac_probe(struct platform_device *pdev)
 		 (hw_ver & MINOR_BMSK) >> MINOR_SHFT,
 		 (hw_ver & STEP_BMSK) >> STEP_SHFT);
 
+	device_create_file(&pdev->dev, &dev_attr_phy_regnum);
 	return 0;
 
 err_undo_napi:
@@ -3169,6 +3273,8 @@ static int emac_remove(struct platform_device *pdev)
 	struct emac_sgmii *sgmii = adpt->phy.private;
 	struct emac_phy *phy = &adpt->phy;
 	u32 i;
+
+	device_remove_file(&pdev->dev, &dev_attr_phy_regnum);
 
 	if (!pm_runtime_enabled(&pdev->dev) ||
 	    !pm_runtime_suspended(&pdev->dev)) {

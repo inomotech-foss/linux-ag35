@@ -32,8 +32,13 @@
 #include <linux/nfs_fs.h>
 #include <linux/nfs_fs_sb.h>
 #include <linux/nfs_mount.h>
+#include <linux/qstart.h>
 
 #include "do_mounts.h"
+
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int where);
+#endif
 
 int __initdata rd_doload;	/* 1 = load RAM disk, 0 = don't load */
 
@@ -418,6 +423,16 @@ retry:
 		printk("DEBUG_BLOCK_EXT_DEVT is enabled, you need to specify "
 		       "explicit textual name for \"root=\" boot option.\n");
 #endif
+
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+		if (!get_bootmode(NULL))
+		{
+			printk("@Ramos set restore systemfs flag here 111 \r\n");
+			Quectel_Set_Partition_RestoreFlag("system",1);
+		}else{
+			Quectel_Set_Partition_RestoreFlag("recovery",1);
+		}
+#endif
 		panic("VFS: Unable to mount root fs on %s", b);
 	}
 
@@ -429,6 +444,16 @@ retry:
 	printk("\n");
 #ifdef CONFIG_BLOCK
 	__bdevname(ROOT_DEV, b);
+#endif
+
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+		if (!get_bootmode(NULL))
+		{
+			printk("@Ramos set restore systemfs flag here 222 \r\n");
+			Quectel_Set_Partition_RestoreFlag("system",2);
+		}else{
+			Quectel_Set_Partition_RestoreFlag("recovery",2);
+		}
 #endif
 	panic("VFS: Unable to mount root fs on %s", b);
 out:
