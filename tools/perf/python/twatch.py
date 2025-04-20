@@ -32,10 +32,10 @@ def main():
 			event = evlist.read_on_cpu(cpu)
 			if not event:
 				continue
-			print "cpu: %2d, pid: %4d, tid: %4d" % (event.sample_cpu,
+			print("cpu: %2d, pid: %4d, tid: %4d" % (event.sample_cpu,
 								event.sample_pid,
-								event.sample_tid),
-			print event
+								event.sample_tid), end=' ')
+			print(event)
 
 if __name__ == '__main__':
     main()

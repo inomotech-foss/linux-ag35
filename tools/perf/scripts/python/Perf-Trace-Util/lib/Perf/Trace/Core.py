@@ -32,7 +32,7 @@ def flag_str(event_name, field_name, value):
 
     if flag_fields[event_name][field_name]:
 	print_delim = 0
-        keys = flag_fields[event_name][field_name]['values'].keys()
+        keys = list(flag_fields[event_name][field_name]['values'].keys())
         keys.sort()
         for idx in keys:
             if not value and not idx:
@@ -51,7 +51,7 @@ def symbol_str(event_name, field_name, value):
     string = ""
 
     if symbolic_fields[event_name][field_name]:
-        keys = symbolic_fields[event_name][field_name]['values'].keys()
+        keys = list(symbolic_fields[event_name][field_name]['values'].keys())
         keys.sort()
         for idx in keys:
             if not value and not idx:
@@ -74,7 +74,7 @@ def trace_flag_str(value):
     string = ""
     print_delim = 0
 
-    keys = trace_flags.keys()
+    keys = list(trace_flags.keys())
 
     for idx in keys:
 	if not value and not idx:

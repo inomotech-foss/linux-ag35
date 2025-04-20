@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 #
 # rt-mutex tester
 #
@@ -60,19 +60,19 @@ test_opcodes = {
 
 # Print usage information
 def usage():
-    print "rt-tester.py <-c -h -q -t> <testfile>"
-    print " -c    display comments after first command"
-    print " -h    help"
-    print " -q    quiet mode"
-    print " -t    test mode (syntax check)"
-    print " testfile: read test specification from testfile"
-    print " otherwise from stdin"
+    print("rt-tester.py <-c -h -q -t> <testfile>")
+    print(" -c    display comments after first command")
+    print(" -h    help")
+    print(" -q    quiet mode")
+    print(" -t    test mode (syntax check)")
+    print(" testfile: read test specification from testfile")
+    print(" otherwise from stdin")
     return
 
 # Print progress when not in quiet mode
 def progress(str):
     if not quiet:
-        print str
+        print(str)
 
 # Analyse a status value
 def analyse(val, top, arg):
@@ -101,7 +101,7 @@ def analyse(val, top, arg):
 # Parse the commandline
 try:
     (options, arguments) = getopt.getopt(sys.argv[1:],'chqt')
-except getopt.GetoptError, ex:
+except getopt.GetoptError as ex:
     usage()
     sys.exit(1)
 
@@ -121,7 +121,7 @@ for option, value in options:
 if arguments:
     try:
         fd = open(arguments[0])
-    except Exception,ex:
+    except Exception as ex:
         sys.stderr.write("File not found %s\n" %(arguments[0]))
         sys.exit(1)
 else:
@@ -168,7 +168,7 @@ while 1:
 
             fname = "%s%s%s" %(sysfsprefix, tid, statusfile)
             if test:
-		print fname
+		print(fname)
                 continue
 
             while 1:
@@ -200,13 +200,13 @@ while 1:
             cmdstr = "%s:%s" %(cmdnr, dat)
             fname = "%s%s%s" %(sysfsprefix, tid, commandfile)
             if test:
-		print fname
+		print(fname)
                 continue
             fcmd = open(fname, 'w')
             fcmd.write(cmdstr)
             fcmd.close()
 
-    except Exception,ex:
+    except Exception as ex:
     	sys.stderr.write(str(ex))
         sys.stderr.write("\nSyntax error in line %d\n" %(linenr))
         if not test:
@@ -214,5 +214,5 @@ while 1:
             sys.exit(1)
 
 # Normal exit pass
-print "Pass"
+print("Pass")
 sys.exit(0)

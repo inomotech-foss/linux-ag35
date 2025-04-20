@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 #
 # Tool for analyzing suspend/resume timing
 # Copyright (c) 2013, Intel Corporation.
@@ -684,14 +684,14 @@ class FTraceLine:
 		return len(str)/2
 	def debugPrint(self, dev):
 		if(self.freturn and self.fcall):
-			print('%s -- %f (%02d): %s(); (%.3f us)' % (dev, self.time, \
-				self.depth, self.name, self.length*1000000))
+			print(('%s -- %f (%02d): %s(); (%.3f us)' % (dev, self.time, \
+				self.depth, self.name, self.length*1000000)))
 		elif(self.freturn):
-			print('%s -- %f (%02d): %s} (%.3f us)' % (dev, self.time, \
-				self.depth, self.name, self.length*1000000))
+			print(('%s -- %f (%02d): %s} (%.3f us)' % (dev, self.time, \
+				self.depth, self.name, self.length*1000000)))
 		else:
-			print('%s -- %f (%02d): %s() { (%.3f us)' % (dev, self.time, \
-				self.depth, self.name, self.length*1000000))
+			print(('%s -- %f (%02d): %s() { (%.3f us)' % (dev, self.time, \
+				self.depth, self.name, self.length*1000000)))
 
 # Class: FTraceCallGraph
 # Description:
@@ -741,11 +741,11 @@ class FTraceCallGraph:
 			id = 'task %s cpu %s' % (match.group('pid'), match.group('cpu'))
 			window = '(%f - %f)' % (self.start, line.time)
 			if(self.depth < 0):
-				print('Too much data for '+id+\
-					' (buffer overflow), ignoring this callback')
+				print(('Too much data for '+id+\
+					' (buffer overflow), ignoring this callback'))
 			else:
-				print('Too much data for '+id+\
-					' '+window+', ignoring this callback')
+				print(('Too much data for '+id+\
+					' '+window+', ignoring this callback'))
 			return False
 		self.list.append(line)
 		if(self.start < 0):
@@ -789,17 +789,17 @@ class FTraceCallGraph:
 		return False
 	def debugPrint(self, filename):
 		if(filename == 'stdout'):
-			print('[%f - %f]') % (self.start, self.end)
+			print(('[%f - %f]') % (self.start, self.end))
 			for l in self.list:
 				if(l.freturn and l.fcall):
-					print('%f (%02d): %s(); (%.3f us)' % (l.time, \
-						l.depth, l.name, l.length*1000000))
+					print(('%f (%02d): %s(); (%.3f us)' % (l.time, \
+						l.depth, l.name, l.length*1000000)))
 				elif(l.freturn):
-					print('%f (%02d): %s} (%.3f us)' % (l.time, \
-						l.depth, l.name, l.length*1000000))
+					print(('%f (%02d): %s} (%.3f us)' % (l.time, \
+						l.depth, l.name, l.length*1000000)))
 				else:
-					print('%f (%02d): %s() { (%.3f us)' % (l.time, \
-						l.depth, l.name, l.length*1000000))
+					print(('%f (%02d): %s() { (%.3f us)' % (l.time, \
+						l.depth, l.name, l.length*1000000)))
 			print(' ')
 		else:
 			fp = open(filename, 'w')
@@ -1570,7 +1570,7 @@ def parseTraceLog():
 		lp = data.phases[0]
 		for p in data.phases:
 			if(data.dmesg[p]['start'] < 0 and data.dmesg[p]['end'] < 0):
-				print('WARNING: phase "%s" is missing!' % p)
+				print(('WARNING: phase "%s" is missing!' % p))
 			if(data.dmesg[p]['start'] < 0):
 				data.dmesg[p]['start'] = data.dmesg[lp]['end']
 				if(p == 'resume_machine'):
@@ -1638,8 +1638,8 @@ def loadKernelLog():
 		if(m):
 			data.dmesgtext.append(line)
 			if(re.match('ACPI: resume from mwait', m.group('msg'))):
-				print('NOTE: This suspend appears to be freeze rather than'+\
-					' %s, it will be treated as such' % sysvals.suspendmode)
+				print(('NOTE: This suspend appears to be freeze rather than'+\
+					' %s, it will be treated as such' % sysvals.suspendmode))
 				sysvals.suspendmode = 'freeze'
 		else:
 			vprint('ignoring dmesg line: %s' % line.replace('\n', ''))
@@ -1895,10 +1895,10 @@ def parseKernelLog(data):
 	lp = data.phases[0]
 	for p in data.phases:
 		if(data.dmesg[p]['start'] < 0 and data.dmesg[p]['end'] < 0):
-			print('WARNING: phase "%s" is missing, something went wrong!' % p)
-			print('    In %s, this dmesg line denotes the start of %s:' % \
-				(sysvals.suspendmode, p))
-			print('        "%s"' % dm[p])
+			print(('WARNING: phase "%s" is missing, something went wrong!' % p))
+			print(('    In %s, this dmesg line denotes the start of %s:' % \
+				(sysvals.suspendmode, p)))
+			print(('        "%s"' % dm[p]))
 		if(data.dmesg[p]['start'] < 0):
 			data.dmesg[p]['start'] = data.dmesg[lp]['end']
 			if(p == 'resume_machine'):
@@ -2718,7 +2718,7 @@ def executeSuspend():
 			os.system('echo SUSPEND START > '+tp+'trace_marker')
 		if(sysvals.rtcwake):
 			print('SUSPEND START')
-			print('will autoresume in %d seconds' % sysvals.rtcwaketime)
+			print(('will autoresume in %d seconds' % sysvals.rtcwaketime))
 			sysvals.rtcWakeAlarm()
 		else:
 			print('SUSPEND START (press a key to resume)')
@@ -2734,7 +2734,7 @@ def executeSuspend():
 		# see if there's firmware timing data to be had
 		t = sysvals.postresumetime
 		if(t > 0):
-			print('Waiting %d seconds for POST-RESUME trace events...' % t)
+			print(('Waiting %d seconds for POST-RESUME trace events...' % t))
 			time.sleep(t)
 		# stop ftrace
 		if(sysvals.usecallgraph or sysvals.usetraceevents):
@@ -2839,7 +2839,7 @@ def setUSBDevicesAuto():
 				dirname).read().replace('\n', '')
 			ctrl = os.popen('cat %s/power/control 2>/dev/null' % \
 				dirname).read().replace('\n', '')
-			print('control is %s for %6s: %s' % (ctrl, name, desc))
+			print(('control is %s for %6s: %s' % (ctrl, name, desc)))
 
 # Function: yesno
 # Description:
@@ -2922,7 +2922,7 @@ def detectUSB(output):
 					first = '%-8s' % name
 				else:
 					first = '%8s' % name
-				print('%s [%s:%s] %-20s %-4s %1s %1s %1s %1s %1s %1s %1s %s %s %s %s' % \
+				print(('%s [%s:%s] %-20s %-4s %1s %1s %1s %1s %1s %1s %1s %s %s %s %s' % \
 					(first, field['idVendor'], field['idProduct'], \
 					field['product'][0:20], field['speed'], \
 					yesno(power['async']), \
@@ -2935,7 +2935,7 @@ def detectUSB(output):
 					ms2nice(power['runtime_active_time']), \
 					ms2nice(power['runtime_suspended_time']), \
 					ms2nice(power['active_duration']), \
-					ms2nice(power['connected_duration'])))
+					ms2nice(power['connected_duration']))))
 
 # Function: getModes
 # Description:
@@ -3002,16 +3002,16 @@ def getFPDT(output):
 	table = struct.unpack('4sIBB6s8sI4sI', buf[0:36])
 	if(output):
 		print('')
-		print('Firmware Performance Data Table (%s)' % table[0])
-		print('                  Signature : %s' % table[0])
-		print('               Table Length : %u' % table[1])
-		print('                   Revision : %u' % table[2])
-		print('                   Checksum : 0x%x' % table[3])
-		print('                     OEM ID : %s' % table[4])
-		print('               OEM Table ID : %s' % table[5])
-		print('               OEM Revision : %u' % table[6])
-		print('                 Creator ID : %s' % table[7])
-		print('           Creator Revision : 0x%x' % table[8])
+		print(('Firmware Performance Data Table (%s)' % table[0]))
+		print(('                  Signature : %s' % table[0]))
+		print(('               Table Length : %u' % table[1]))
+		print(('                   Revision : %u' % table[2]))
+		print(('                   Checksum : 0x%x' % table[3]))
+		print(('                     OEM ID : %s' % table[4]))
+		print(('               OEM Table ID : %s' % table[5]))
+		print(('               OEM Revision : %u' % table[6]))
+		print(('                 Creator ID : %s' % table[7]))
+		print(('           Creator Revision : 0x%x' % table[8]))
 		print('')
 
 	if(table[0] != 'FPDT'):
@@ -3041,15 +3041,15 @@ def getFPDT(output):
 		if(rechead[0] == 'FBPT'):
 			record = struct.unpack('HBBIQQQQQ', recdata)
 			if(output):
-				print('%s (%s)' % (rectype[header[0]], rechead[0]))
-				print('                  Reset END : %u ns' % record[4])
-				print('  OS Loader LoadImage Start : %u ns' % record[5])
-				print(' OS Loader StartImage Start : %u ns' % record[6])
-				print('     ExitBootServices Entry : %u ns' % record[7])
-				print('      ExitBootServices Exit : %u ns' % record[8])
+				print(('%s (%s)' % (rectype[header[0]], rechead[0])))
+				print(('                  Reset END : %u ns' % record[4]))
+				print(('  OS Loader LoadImage Start : %u ns' % record[5]))
+				print((' OS Loader StartImage Start : %u ns' % record[6]))
+				print(('     ExitBootServices Entry : %u ns' % record[7]))
+				print(('      ExitBootServices Exit : %u ns' % record[8]))
 		elif(rechead[0] == 'S3PT'):
 			if(output):
-				print('%s (%s)' % (rectype[header[0]], rechead[0]))
+				print(('%s (%s)' % (rectype[header[0]], rechead[0])))
 			j = 0
 			while(j < len(recdata)):
 				prechead = struct.unpack('HBB', recdata[j:j+4])
@@ -3059,24 +3059,24 @@ def getFPDT(output):
 					record = struct.unpack('IIQQ', recdata[j:j+prechead[1]])
 					fwData[1] = record[2]
 					if(output):
-						print('    %s' % prectype[prechead[0]])
-						print('               Resume Count : %u' % \
-							record[1])
-						print('                 FullResume : %u ns' % \
-							record[2])
-						print('              AverageResume : %u ns' % \
-							record[3])
+						print(('    %s' % prectype[prechead[0]]))
+						print(('               Resume Count : %u' % \
+							record[1]))
+						print(('                 FullResume : %u ns' % \
+							record[2]))
+						print(('              AverageResume : %u ns' % \
+							record[3]))
 				elif(prechead[0] == 1):
 					record = struct.unpack('QQ', recdata[j+4:j+prechead[1]])
 					fwData[0] = record[1] - record[0]
 					if(output):
-						print('    %s' % prectype[prechead[0]])
-						print('               SuspendStart : %u ns' % \
-							record[0])
-						print('                 SuspendEnd : %u ns' % \
-							record[1])
-						print('                SuspendTime : %u ns' % \
-							fwData[0])
+						print(('    %s' % prectype[prechead[0]]))
+						print(('               SuspendStart : %u ns' % \
+							record[0]))
+						print(('                 SuspendEnd : %u ns' % \
+							record[1]))
+						print(('                SuspendTime : %u ns' % \
+							fwData[0]))
 				j += prechead[1]
 		if(output):
 			print('')
@@ -3097,7 +3097,7 @@ def statusCheck():
 	if(sysvals.android):
 		print('Checking the android system ...')
 	else:
-		print('Checking this system (%s)...' % platform.node())
+		print(('Checking this system (%s)...' % platform.node()))
 
 	# check if adb is connected to a device
 	if(sysvals.android):
@@ -3105,7 +3105,7 @@ def statusCheck():
 		out = os.popen(sysvals.adb+' get-state').read().strip()
 		if(out == 'device'):
 			res = 'YES'
-		print('    is android device connected: %s' % res)
+		print(('    is android device connected: %s' % res))
 		if(res != 'YES'):
 			print('    Please connect the device before using this tool')
 			return False
@@ -3119,7 +3119,7 @@ def statusCheck():
 	else:
 		if(os.environ['USER'] == 'root'):
 			res = 'YES'
-	print('    have root access: %s' % res)
+	print(('    have root access: %s' % res))
 	if(res != 'YES'):
 		if(sysvals.android):
 			print('    Try running "adb root" to restart the daemon as root')
@@ -3137,7 +3137,7 @@ def statusCheck():
 	else:
 		if(os.path.exists(sysvals.powerfile)):
 			res = 'YES'
-	print('    is sysfs mounted: %s' % res)
+	print(('    is sysfs mounted: %s' % res))
 	if(res != 'YES'):
 		return False
 
@@ -3148,9 +3148,9 @@ def statusCheck():
 		res = 'YES'
 	else:
 		status = False
-	print('    is "%s" a valid power mode: %s' % (sysvals.suspendmode, res))
+	print(('    is "%s" a valid power mode: %s' % (sysvals.suspendmode, res)))
 	if(res == 'NO'):
-		print('      valid power modes are: %s' % modes)
+		print(('      valid power modes are: %s' % modes))
 		print('      please choose one with -m')
 
 	# check if the tool can unlock the device
@@ -3162,7 +3162,7 @@ def statusCheck():
 			' shell input').read().strip()
 		if(not out1.startswith('mScreenOn') or not out2.startswith('usage')):
 			res = 'NO (wake the android device up before running the test)'
-		print('    can I unlock the screen: %s' % res)
+		print(('    can I unlock the screen: %s' % res))
 
 	# check if ftrace is available
 	res = 'NO'
@@ -3171,7 +3171,7 @@ def statusCheck():
 		res = 'YES'
 	elif(sysvals.usecallgraph):
 		status = False
-	print('    is ftrace supported: %s' % res)
+	print(('    is ftrace supported: %s' % res))
 
 	# what data source are we using
 	res = 'DMESG'
@@ -3196,7 +3196,7 @@ def statusCheck():
 			res = 'FTRACE (all trace events found)'
 		elif(sysvals.usetraceevents):
 			res = 'DMESG and FTRACE (suspend_resume trace event found)'
-	print('    timeline data source: %s' % res)
+	print(('    timeline data source: %s' % res))
 
 	# check if rtcwake
 	res = 'NO'
@@ -3204,7 +3204,7 @@ def statusCheck():
 		res = 'YES'
 	elif(sysvals.rtcwake):
 		status = False
-	print('    is rtcwake supported: %s' % res)
+	print(('    is rtcwake supported: %s' % res))
 
 	return status
 
@@ -3217,7 +3217,7 @@ def statusCheck():
 def doError(msg, help):
 	if(help == True):
 		printHelp()
-	print('ERROR: %s\n') % msg
+	print(('ERROR: %s\n') % msg)
 	sys.exit()
 
 # Function: doWarning
@@ -3227,10 +3227,10 @@ def doError(msg, help):
 #	 msg: the warning message to print
 #	 file: If not empty, a filename to request be sent to the owner for debug
 def doWarning(msg, file):
-	print('/* %s */') % msg
+	print(('/* %s */') % msg)
 	if(file):
-		print('/* For a fix, please send this'+\
-			' %s file to <todd.e.brandt@intel.com> */' % file)
+		print(('/* For a fix, please send this'+\
+			' %s file to <todd.e.brandt@intel.com> */' % file))
 
 # Function: rootCheck
 # Description:
@@ -3244,7 +3244,7 @@ def rootCheck():
 #	 pull out an integer argument from the command line with checks
 def getArgInt(name, args, min, max):
 	try:
-		arg = args.next()
+		arg = next(args)
 	except:
 		doError(name+': no argument supplied', True)
 	try:
@@ -3336,20 +3336,20 @@ def runSummary(subdir, output):
 	testruns = []
 	for file in sorted(files):
 		if output:
-			print("Test found in %s" % os.path.dirname(file))
+			print(("Test found in %s" % os.path.dirname(file)))
 		sysvals.ftracefile = file
 		sysvals.dmesgfile = file.replace('_ftrace.txt', '_dmesg.txt')
 		doesTraceLogHaveTraceEvents()
 		sysvals.usecallgraph = False
 		if not sysvals.usetraceeventsonly:
 			if(not os.path.exists(sysvals.dmesgfile)):
-				print("Skipping %s: not a valid test input" % file)
+				print(("Skipping %s: not a valid test input" % file))
 				continue
 			else:
 				if output:
 					f = os.path.basename(sysvals.ftracefile)
 					d = os.path.basename(sysvals.dmesgfile)
-					print("\tInput files: %s and %s" % (f, d))
+					print(("\tInput files: %s and %s" % (f, d)))
 				testdata = loadKernelLog()
 				data = testdata[0]
 				parseKernelLog(data)
@@ -3357,7 +3357,7 @@ def runSummary(subdir, output):
 				appendIncompleteTraceLog(testdata)
 		else:
 			if output:
-				print("\tInput file: %s" % os.path.basename(sysvals.ftracefile))
+				print(("\tInput file: %s" % os.path.basename(sysvals.ftracefile)))
 			testdata = parseTraceLog()
 			data = testdata[0]
 		data.normalizeTime(data.tSuspended)
@@ -3375,7 +3375,7 @@ def printHelp():
 	modes = getModes()
 
 	print('')
-	print('AnalyzeSuspend v%.1f' % sysvals.version)
+	print(('AnalyzeSuspend v%.1f' % sysvals.version))
 	print('Usage: sudo analyze_suspend.py <options>')
 	print('')
 	print('Description:')
@@ -3399,7 +3399,7 @@ def printHelp():
 	print('    -verbose    Print extra information during execution and analysis')
 	print('    -status     Test to see if the system is enabled to run this tool')
 	print('    -modes      List available suspend modes')
-	print('    -m mode     Mode to initiate for suspend %s (default: %s)') % (modes, sysvals.suspendmode)
+	print(('    -m mode     Mode to initiate for suspend %s (default: %s)') % (modes, sysvals.suspendmode))
 	print('    -rtcwake t  Use rtcwake to autoresume after <t> seconds (default: disabled)')
 	print('  [advanced]')
 	print('    -f          Use ftrace to create device callgraphs (default: disabled)')
@@ -3435,13 +3435,13 @@ if __name__ == '__main__':
 	for arg in args:
 		if(arg == '-m'):
 			try:
-				val = args.next()
+				val = next(args)
 			except:
 				doError('No mode supplied', True)
 			sysvals.suspendmode = val
 		elif(arg == '-adb'):
 			try:
-				val = args.next()
+				val = next(args)
 			except:
 				doError('No adb binary supplied', True)
 			if(not os.path.exists(val)):
@@ -3481,7 +3481,7 @@ if __name__ == '__main__':
 		elif(arg == '-verbose'):
 			sysvals.verbose = True
 		elif(arg == '-v'):
-			print("Version %.1f" % sysvals.version)
+			print(("Version %.1f" % sysvals.version))
 			sys.exit()
 		elif(arg == '-rtcwake'):
 			sysvals.rtcwake = True
@@ -3492,7 +3492,7 @@ if __name__ == '__main__':
 			multitest['delay'] = getArgInt('-multi d (delay between tests)', args, 0, 3600)
 		elif(arg == '-dmesg'):
 			try:
-				val = args.next()
+				val = next(args)
 			except:
 				doError('No dmesg file supplied', True)
 			sysvals.notestrun = True
@@ -3501,7 +3501,7 @@ if __name__ == '__main__':
 				doError('%s doesnt exist' % sysvals.dmesgfile, False)
 		elif(arg == '-ftrace'):
 			try:
-				val = args.next()
+				val = next(args)
 			except:
 				doError('No ftrace file supplied', True)
 			sysvals.notestrun = True
@@ -3511,7 +3511,7 @@ if __name__ == '__main__':
 				doError('%s doesnt exist' % sysvals.ftracefile, False)
 		elif(arg == '-summary'):
 			try:
-				val = args.next()
+				val = next(args)
 			except:
 				doError('No directory supplied', True)
 			cmd = 'summary'
@@ -3521,7 +3521,7 @@ if __name__ == '__main__':
 				doError('%s isnt accesible' % val, False)
 		elif(arg == '-filter'):
 			try:
-				val = args.next()
+				val = next(args)
 			except:
 				doError('No devnames supplied', True)
 			sysvals.setDeviceFilter(val)
@@ -3546,11 +3546,11 @@ if __name__ == '__main__':
 			detectUSB(True)
 		elif(cmd == 'modes'):
 			modes = getModes()
-			print modes
+			print(modes)
 		elif(cmd == 'usbauto'):
 			setUSBDevicesAuto()
 		elif(cmd == 'summary'):
-			print("Generating a summary of folder \"%s\"" % cmdarg)
+			print(("Generating a summary of folder \"%s\"" % cmdarg))
 			runSummary(cmdarg, True)
 		sys.exit()
 
@@ -3580,11 +3580,11 @@ if __name__ == '__main__':
 		os.mkdir(subdir)
 		for i in range(multitest['count']):
 			if(i != 0):
-				print('Waiting %d seconds...' % (multitest['delay']))
+				print(('Waiting %d seconds...' % (multitest['delay'])))
 				time.sleep(multitest['delay'])
-			print('TEST (%d/%d) START' % (i+1, multitest['count']))
+			print(('TEST (%d/%d) START' % (i+1, multitest['count'])))
 			runTest(subdir)
-			print('TEST (%d/%d) COMPLETE' % (i+1, multitest['count']))
+			print(('TEST (%d/%d) COMPLETE' % (i+1, multitest['count'])))
 		runSummary(subdir, False)
 	else:
 		# run the test in the current directory

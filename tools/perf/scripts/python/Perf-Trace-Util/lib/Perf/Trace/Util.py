@@ -33,7 +33,7 @@ def nsecs_str(nsecs):
     return str
 
 def add_stats(dict, key, value):
-	if not dict.has_key(key):
+	if key not in dict:
 		dict[key] = (value, value, value, 1)
 	else:
 		min, max, avg, count = dict[key]
@@ -71,7 +71,7 @@ try:
 except:
 	if not audit_package_warned:
 		audit_package_warned = True
-		print "Install the audit-libs-python package to get syscall names"
+		print("Install the audit-libs-python package to get syscall names")
 
 def syscall_name(id):
 	try:

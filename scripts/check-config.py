@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#! /usr/bin/env python3
 
 # Copyright (c) 2015, The Linux Foundation. All rights reserved.
 #
@@ -69,7 +69,7 @@ def walk_config(name):
             if m:
                 continue
 
-            print "WARNING: Unknown .config line: ", line
+            print("WARNING: Unknown .config line: ", line)
 
 class Checker():
     def __init__(self):
@@ -97,7 +97,7 @@ class Checker():
 
         # Don't run this for mdm targets
         if re.search('mdm', path):
-            print "Not applicable to mdm targets... bypassing"
+            print("Not applicable to mdm targets... bypassing")
         else:
             for ent in walk_config(path):
                 # Go to the next iteration if this config is exempt
@@ -106,17 +106,17 @@ class Checker():
 
                 if type(ent) is Enabled:
                     if ent.name in self.forbidden:
-                        print "error: Config should not be present: %s" %ent.name
+                        print("error: Config should not be present: %s" %ent.name)
                         failure = True
 
                     if ent.name in self.required and ent.value != self.required[ent.name]:
-                        print "error: Config has wrong value: %s %s expecting: %s" \
-                                 %(ent.name, ent.value, self.required[ent.name])
+                        print("error: Config has wrong value: %s %s expecting: %s" \
+                                 %(ent.name, ent.value, self.required[ent.name]))
                         failure = True
 
                 elif type(ent) is Disabled:
                     if ent.name in self.required:
-                        print "error: Config should be present, but is disabled: %s" %ent.name
+                        print("error: Config should be present, but is disabled: %s" %ent.name)
                         failure = True
 
         if failure:
