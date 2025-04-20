@@ -49,6 +49,13 @@
  * set as well. However, UBIFS disables readahead.
  */
 
+#include "../../drivers/mtd/ubi/ubi.h" // quectel add
+#undef dbg_gen
+#undef dbg_eba
+#undef dbg_wl
+#undef dbg_io
+#undef dbg_bld
+
 #include "ubifs.h"
 #include <linux/aio.h>
 #include <linux/mount.h>
@@ -56,7 +63,7 @@
 #include <linux/slab.h>
 #include <linux/migrate.h>
 #include <linux/qstart.h>
-#include "../../drivers/mtd/ubi/ubi.h" // quectel add
+
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
 extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name,int mtd_nub, int where);
 // modify by [francis.huan] 20180417 ,for match mtd_nub to restore

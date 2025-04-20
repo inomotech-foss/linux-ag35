@@ -29,6 +29,13 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include "../../drivers/mtd/ubi/ubi.h" // quectel add
+#undef dbg_gen
+#undef dbg_eba
+#undef dbg_wl
+#undef dbg_io
+#undef dbg_bld
+
 #include <linux/fs.h>
 #include <linux/vfs.h>
 #include <linux/slab.h>
@@ -48,7 +55,6 @@
 #include  <linux/genhd.h> //Quectel add 20180918
 
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for restore funciton
-#include "../../drivers/mtd/ubi/ubi.h"
 extern int get_ubi_num_from_gd(struct gendisk *gd);
 extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
 #endif

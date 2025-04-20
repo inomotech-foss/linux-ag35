@@ -70,10 +70,16 @@
  * they are read from the flash media.
  */
 
+#include "../../drivers/mtd/ubi/ubi.h" // quectel add
+#undef dbg_gen
+#undef dbg_eba
+#undef dbg_wl
+#undef dbg_io
+#undef dbg_bld
+
 #include <linux/crc32.h>
 #include <linux/slab.h>
 #include <linux/qstart.h>
-#include "../../drivers/mtd/ubi/ubi.h" //quectel add
 #include "ubifs.h"
 
 #if 1 // def      // Ramos add for quectel for ubi restore
