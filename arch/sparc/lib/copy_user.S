@@ -19,7 +19,7 @@
 #include <asm/export.h>
 
 /* Work around cpp -rob */
-#define ALLOC #alloc
+#define ALLOC "a"
 #define EXECINSTR #execinstr
 #define EX(x,y,a,b) 				\
 98: 	x,y;					\
@@ -360,7 +360,7 @@ short_aligned_end:
 	b	copy_user_last7
 	 mov	%o2, %g1
 
-	.section .fixup,#alloc,#execinstr
+	.section .fixup,"ax"
 	.align	4
 97:
 	mov	%o2, %g3

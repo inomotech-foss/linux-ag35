@@ -150,13 +150,13 @@ __asm__ __volatile__(							\
 	"1:\t"	"st"#size " %1, %2\n\t"					\
 		"clr	%0\n"						\
 	"2:\n\n\t"							\
-		".section .fixup,#alloc,#execinstr\n\t"			\
+		".section .fixup,"ax"\n\t"			\
 		".align	4\n"						\
 	"3:\n\t"							\
 		"b	2b\n\t"						\
 		" mov	%3, %0\n\t"					\
 		".previous\n\n\t"					\
-		".section __ex_table,#alloc\n\t"			\
+		".section __ex_table,"a"\n\t"			\
 		".align	4\n\t"						\
 		".word	1b, 3b\n\t"					\
 		".previous\n\n\t"					\
@@ -218,14 +218,14 @@ __asm__ __volatile__(							\
 	"1:\t"	"ld"#size " %2, %1\n\t"					\
 		"clr	%0\n"						\
 	"2:\n\n\t"							\
-		".section .fixup,#alloc,#execinstr\n\t"			\
+		".section .fixup,"ax"\n\t"			\
 		".align	4\n"						\
 	"3:\n\t"							\
 		"clr	%1\n\t"						\
 		"b	2b\n\t"						\
 		" mov	%3, %0\n\n\t"					\
 		".previous\n\t"						\
-		".section __ex_table,#alloc\n\t"			\
+		".section __ex_table,"a"\n\t"			\
 		".align	4\n\t"						\
 		".word	1b, 3b\n\n\t"					\
 		".previous\n\t"						\
@@ -254,7 +254,7 @@ static inline unsigned long __clear_user(void __user *addr, unsigned long size)
 	unsigned long ret;
 
 	__asm__ __volatile__ (
-		".section __ex_table,#alloc\n\t"
+		".section __ex_table,"a"\n\t"
 		".align 4\n\t"
 		".word 1f,3\n\t"
 		".previous\n\t"

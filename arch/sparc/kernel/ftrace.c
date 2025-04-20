@@ -33,7 +33,7 @@ static int ftrace_modify_code(unsigned long ip, u32 old, u32 new)
 	"	flush	%[ip]\n"
 	"	mov	0, %[faulted]\n"
 	"2:\n"
-	"	.section .fixup,#alloc,#execinstr\n"
+	"	.section .fixup,"ax"\n"
 	"	.align	4\n"
 	"3:	sethi	%%hi(2b), %[faulted]\n"
 	"	jmpl	%[faulted] + %%lo(2b), %%g0\n"

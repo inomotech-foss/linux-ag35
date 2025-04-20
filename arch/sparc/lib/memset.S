@@ -13,7 +13,7 @@
 #include <asm/export.h>
 
 /* Work around cpp -rob */
-#define ALLOC #alloc
+#define ALLOC "a"
 #define EXECINSTR #execinstr
 #define EX(x,y,a,b) 				\
 98: 	x,y;					\
@@ -183,7 +183,7 @@ __bzero:
 	 clr	%o0
 __memset_end:
 
-	.section .fixup,#alloc,#execinstr
+	.section .fixup,"ax"
 	.align	4
 20:
 	cmp	%g2, 8

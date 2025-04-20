@@ -15,7 +15,7 @@
 	"	bne,pn	%%icc, 1b\n"			\
 	"	 mov	0, %0\n"			\
 	"3:\n"						\
-	"	.section .fixup,#alloc,#execinstr\n"	\
+	"	.section .fixup,"ax"\n"	\
 	"	.align	4\n"				\
 	"4:	sethi	%%hi(3b), %0\n"			\
 	"	jmpl	%0 + %%lo(3b), %%g0\n"		\
@@ -77,7 +77,7 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
 	__asm__ __volatile__(
 	"\n1:	casa	[%4] %%asi, %3, %1\n"
 	"2:\n"
-	"	.section .fixup,#alloc,#execinstr\n"
+	"	.section .fixup,"ax"\n"
 	"	.align	4\n"
 	"3:	sethi	%%hi(2b), %0\n"
 	"	jmpl	%0 + %%lo(2b), %%g0\n"

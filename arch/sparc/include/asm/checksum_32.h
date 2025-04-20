@@ -69,7 +69,7 @@ csum_partial_copy_from_user(const void __user *src, void *dst, int len,
 	register __wsum s asm("g7") = sum;
 
 	__asm__ __volatile__ (
-	".section __ex_table,#alloc\n\t"
+	".section __ex_table,"a"\n\t"
 	".align 4\n\t"
 	".word 1f,2\n\t"
 	".previous\n"
@@ -97,7 +97,7 @@ csum_partial_copy_to_user(const void *src, void __user *dst, int len,
 		register __wsum s asm("g7") = sum;
 
 		__asm__ __volatile__ (
-		".section __ex_table,#alloc\n\t"
+		".section __ex_table,"a"\n\t"
 		".align 4\n\t"
 		".word 1f,1\n\t"
 		".previous\n"

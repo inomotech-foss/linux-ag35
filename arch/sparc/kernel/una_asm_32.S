@@ -58,7 +58,7 @@ __do_int_store:
 0:	retl
 	 mov	0, %o0
 
-	.section __ex_table,#alloc
+	.section __ex_table,"a"
 	.word	4b, retl_efault
 	.word	5b, retl_efault
 	.word	6b, retl_efault
@@ -137,7 +137,7 @@ do_int_load:
 0:	retl
 	 mov	0, %o0
 
-	.section __ex_table,#alloc
+	.section __ex_table,"a"
 	.word	4b, retl_efault
 	.word	5b, retl_efault
 	.word	6b, retl_efault

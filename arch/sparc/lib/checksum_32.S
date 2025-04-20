@@ -148,7 +148,7 @@ cpout:	retl						! get outta here
 __csum_partial_copy_start:
 
 /* Work around cpp -rob */
-#define ALLOC #alloc
+#define ALLOC "a"
 #define EXECINSTR #execinstr
 #define EX(x,y,a,b)				\
 98:     x,y;                                    \
@@ -587,7 +587,7 @@ __csum_partial_copy_end:
 	ret
 	 restore
 
-        .section __ex_table,#alloc
+        .section __ex_table,"a"
         .align 4
         .word 5b,2
 	.word 6b,2

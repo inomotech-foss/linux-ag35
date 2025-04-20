@@ -120,7 +120,7 @@ __asm__ __volatile__(							\
 	"1:\t"	"st"#size "a %1, [%2] %%asi\n\t"			\
 		"clr	%0\n"						\
 	"2:\n\n\t"							\
-		".section .fixup,#alloc,#execinstr\n\t"			\
+		".section .fixup,"ax"\n\t"			\
 		".align	4\n"						\
 	"3:\n\t"							\
 		"sethi	%%hi(2b), %0\n\t"				\
@@ -159,7 +159,7 @@ __asm__ __volatile__(							\
 	"1:\t"	"ld"#size "a [%2] %%asi, %1\n\t"			\
 		"clr	%0\n"						\
 	"2:\n\n\t"							\
-		".section .fixup,#alloc,#execinstr\n\t"			\
+		".section .fixup,"ax"\n\t"			\
 		".align	4\n"						\
 	"3:\n\t"							\
 		"sethi	%%hi(2b), %0\n\t"				\
