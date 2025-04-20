@@ -1,0 +1,38 @@
+# See: <https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions>
+
+name: Kernel Build
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc \
+            gcc-arm-linux-gnueabihf \
+            make
+
+      - uses: ammaraskar/gcc-problem-matcher@0.3.0
+      - name: Build
+        run: |
+          export KBUILD_OUTPUT=build
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export KCFLAGS="-march=armv7-a -marm -mfloat-abi=hard -save-temps"
+          export KAFLAGS="$KCFLAGS"
+          CC="${CROSS_COMPILE}gcc"
+          LD="${CROSS_COMPILE}ld.bfd -z noexecstack --no-warn-rwx-segments"
+
+          make mdm9607-perf_defconfig
+          make -j"$(nproc)" CC="$CC" LD="$LD"
