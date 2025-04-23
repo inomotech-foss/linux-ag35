@@ -380,10 +380,10 @@ static void tcp_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 
 	if (type == NDISC_REDIRECT) {
 		if (!sock_owned_by_user(sk)) {
-		struct dst_entry *dst = __sk_dst_check(sk, np->dst_cookie);
+			struct dst_entry *dst = __sk_dst_check(sk, np->dst_cookie);
 
-		if (dst)
-			dst->ops->redirect(dst, sk, skb);
+			if (dst)
+				dst->ops->redirect(dst, sk, skb);
 		}
 		goto out;
 	}
@@ -1184,7 +1184,7 @@ static struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 		if (newnp->pktoptions) {
 			tcp_v6_restore_cb(newnp->pktoptions);
 			skb_set_owner_r(newnp->pktoptions, newsk);
-	}
+		}
 	}
 	newnp->opt	  = NULL;
 	newnp->mcast_oif  = tcp_v6_iif(skb);

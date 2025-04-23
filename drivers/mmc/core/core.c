@@ -56,6 +56,19 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(mmc_blk_erase_end);
 EXPORT_TRACEPOINT_SYMBOL_GPL(mmc_blk_rw_start);
 EXPORT_TRACEPOINT_SYMBOL_GPL(mmc_blk_rw_end);
 
+/*Quinn, Several eMMCs need delay to match powerup timing
+    0:Disable
+    1:Enable
+*/
+#define QUECTEL_ENABLE_DELAY_SCAN   1
+#define QUECTEL_DELAY_SCAN_HZ       2 /*2 seconds*/
+
+/*Quinn, whether switch signal voltage to 3.3v
+    0:switch to 3.3v
+    1:switch to 1.8v
+*/
+#define QUECTEL_DISABLE_SWITCH_SIGNAL_VOLTAGE_330 0
+
 /* If the device is not responding */
 #define MMC_CORE_TIMEOUT_MS	(10 * 60 * 1000) /* 10 minute timeout */
 
@@ -3922,6 +3935,14 @@ void mmc_rescan(struct work_struct *work)
 		return;
 	}
 	spin_unlock_irqrestore(&host->lock, flags);
+
+
+	if((host->caps & MMC_CAP_NEEDS_POLL) == 0 && (strncmp(mmc_hostname(host),"mmc0",4) == 0) && ((host->caps2 & MMC_CAP2_NONHOTPLUG) == 0 ))
+	{
+		printk("eyelyn   %s  disable polling\n",mmc_hostname(host));	
+		return;
+	}
+
 
 	/* If there is a non-removable card registered, only scan once */
 	if ((host->caps & MMC_CAP_NONREMOVABLE) && host->rescan_entered)

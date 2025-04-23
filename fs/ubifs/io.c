@@ -73,15 +73,12 @@
 #include <linux/crc32.h>
 #include <linux/slab.h>
 #include <linux/qstart.h>
+#include "../../drivers/mtd/ubi/ubi.h" //quectel add
 #include "ubifs.h"
-#include "../../drivers/mtd/ubi/ubi.h"
+
 #if 1 // def      // Ramos add for quectel for ubi restore
-/******************************************************************************************
-francis-2018/12/29:Description....
-Refer to [Issue-Depot].[IS0000416][Submitter:dawn.yang@quectel.com,Date:2018-12-28]
-<recovery妯″紡涓媢srdata 鐨剈bi璁惧鍙疯鏀逛负3锛屽鑷存鐜囨€ц鎿﹂櫎锛屽樊鍒嗗寘涓㈠け>
-******************************************************************************************/
-extern unsigned int Quectel_Restore(const char * partition_name, int where);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name,int mtd_nub,int where);
+// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
 #endif
 
 /**
@@ -125,9 +122,9 @@ francis-2018/10/24:Description....
 Refer to [Issue-Depot].[IS0000275][Submitter:francis.huan,Date:2018-08-28]
 <由于ubi文件系统损坏，低概率的出现读写分区变成只读分区导致部分功能无法使变砖（增加还原点规避
 ******************************************************************************************/
-        printk("@Quectel0125 UBI Error 6661111 ubifs_check_node vi.dev_num=%d, vi.vol_id=%d, restore removed!\r\n",  (c)->vi.ubi_num,(c)->vi.vol_id);
+		printk("@Quectel0125 UBI Error 6661111 ubifs_check_node vi.dev_num=%d, vi.vol_id=%d\r\n",  (c)->vi.ubi_num,(c)->vi.vol_id);
 #if 1 // def  QUECTEL_MODEM_BACKUP    //Ramos 20160801 add for modem file backup
-//        Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,6);
+		Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,6);
 // modify by [francis.huan] 20180417 ,for match mtd name  to restore
 #endif
 		dump_stack();
@@ -161,9 +158,11 @@ francis-2018/10/24:Description....
 Refer to [Issue-Depot].[IS0000275][Submitter:francis.huan,Date:2018-08-28]
 <由于ubi文件系统损坏，低概率的出现读写分区变成只读分区导致部分功能无法使变砖（增加还原点规避
 ******************************************************************************************/
-
-		printk("@Ramos UBI Error  6661111 ubifs_check_node vi.dev_num=%d, vi.vol_id=%d , \r\n",  (c)->vi.ubi_num,(c)->vi.vol_id);
-		Quectel_Restore(ubi_get_device(c->vi.ubi_num)->mtd->name,6);
+		printk("@Quectel0125 UBI Error 6661111 ubifs_check_node vi.dev_num=%d, vi.vol_id=%d\r\n",  (c)->vi.ubi_num,(c)->vi.vol_id);
+#if 1 // def  QUECTEL_MODEM_BACKUP    //Ramos 20160801 add for modem file backup
+		Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,6);
+// modify by [francis.huan] 20180417 ,for match mtd name  to restore
+#endif
 
 		ubifs_ro_mode(c, err);
 		dump_stack();
@@ -331,9 +330,9 @@ out:
 		ubifs_err(c, "bad node at LEB %d:%d", lnum, offs);
 		ubifs_dump_node(c, buf);
 
-        printk("@Quectel0125 UBI Error 6661111 ubifs_check_node vi.dev_num=%d, vi.vol_id=%d, restore removed!\r\n",  (c)->vi.ubi_num,(c)->vi.vol_id);
+		printk("@Quectel0125 UBI Error 6661111 ubifs_check_node vi.dev_num=%d, vi.vol_id=%d\r\n",  (c)->vi.ubi_num,(c)->vi.vol_id);
 #if 1 // def  QUECTEL_MODEM_BACKUP    //Ramos 20160801 add for modem file backup
-//        Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,6);
+		Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,6);
 // modify by [francis.huan] 20180417 ,for match mtd name  to restore
 #endif
 	}
@@ -1000,9 +999,9 @@ out:
 	ubifs_err(c, "bad node at LEB %d:%d", lnum, offs);
 	ubifs_dump_node(c, buf);
 
-    printk("@Quectel0125 UBI Error 6662222 ubifs_read_node_wbuf vi.dev_num=%d, vi.vol_id=%d resotore removed! \r\n",  (c)->vi.ubi_num,(c)->vi.vol_id);
+	printk("@Quectel0125 UBI Error 6662222 ubifs_read_node_wbuf vi.dev_num=%d, vi.vol_id=%dr\n",  (c)->vi.ubi_num,(c)->vi.vol_id);
 #if 1 // def  QUECTEL_MODEM_BACKUP    //Ramos 20160801 add for modem file backup
-//                Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,6);
+				Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,6);
 // modify by [francis.huan] 20180417 ,for match mtd name  to restore
 #endif	
 	return -EINVAL;
@@ -1062,9 +1061,9 @@ out:
 		   offs, ubi_is_mapped(c->ubi, lnum));
 	if (!c->probing) {
 		ubifs_dump_node(c, buf);
-          printk("@Quectel0125 UBI Error 6663333 ubifs_read_node vi.dev_num=%d, vi.vol_id=%d,mtd=%d restore removed!\r\n",  (c)->vi.ubi_num,(c)->vi.vol_id,ubi_get_device(c->vi.ubi_num)->mtd->index);
+	      printk("@Quectel0125 UBI Error 6663333 ubifs_read_node vi.dev_num=%d, vi.vol_id=%d,mtd=%d\r\n",  (c)->vi.ubi_num,(c)->vi.vol_id,ubi_get_device(c->vi.ubi_num)->mtd->index);
 #if 1 // def  QUECTEL_MODEM_BACKUP    //Ramos 20160801 add for modem file backup	
-//    Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,6);
+	Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,6);
 // modify by [francis.huan] 20180417 ,for match mtd name  to restore
 #endif	
 	}

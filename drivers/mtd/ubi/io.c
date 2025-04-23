@@ -93,12 +93,7 @@
 #include "ubi.h"
 
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
-/******************************************************************************************
-francis-2018/12/29:Description....
-Refer to [Issue-Depot].[IS0000416][Submitter:dawn.yang@quectel.com,Date:2018-12-28]
-<recovery模式下usrdata 的ubi设备号被改为3，导致概率性被擦除，差分包丢失>
-******************************************************************************************/
-extern unsigned int Quectel_Restore(const char * partition_name, int where);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub , int where);  // modify by [francis.huan] 20180417 ,for match mtd_nub to restore
 #endif
 
 static int self_check_not_bad(const struct ubi_device *ubi, int pnum);
@@ -191,8 +186,9 @@ retry:
 				pnum);
 			if(len != read)
 			{
-				printk("@Ramos UBI Error 999999 set restore UBI =%d,	\r\n", ubi->ubi_num);
-				Quectel_Restore(ubi->mtd->name,9);
+				printk("@Quectel0125 UBI Error 999999 set restore UBI =%d,	\r\n", ubi->ubi_num);
+				Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,9);
+				// modify by [francis.huan],20180417,for match mtd_nub who need to backup
 			}
 
 			ubi_assert(len == read);
@@ -208,25 +204,10 @@ retry:
 
 		ubi_err(ubi, "error %d%s while reading %d bytes from PEB %d:%d, read %zd bytes",
 			err, errstr, len, pnum, offset, read);
-#if 0 //remove by [francis],20180927,do not need to this check point 
-		printk("@Ramos UBI Error 8888 set restore UBI =%d,	\r\n", ubi->ubi_num);
-		if(1 == ubi->ubi_num)
-		{
-			Quectel_Set_Partition_RestoreFlag("modem",8);
-		}
-
-		if( 0 == ubi->ubi_num)
-		{
-		//按照加载顺序，Linux的system加载时是 ubi 0， 所以这里限制一下，避免modem ubi 加载出现这个错误也会进入这里。
-			if (!get_bootmode(NULL))
-			{
-				printk("@Ramos set restore systemfs flag here 8888\r\n");
-				Quectel_Set_Partition_RestoreFlag("system",8);
-			}else{
-				Quectel_Set_Partition_RestoreFlag("recovery",8);
-			}
-
-		}
+#if 1 // def  QUECTEL_BACKUP	  //Ramos 20170511 add for ubi read err 
+		//printk("@Quectel0125 UBI Error 8888 set restore UBI=%d\r\n", ubi->ubi_num);
+		//Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,8);
+		// modify by [francis.huan],20180417,for match mtd_nub who need to backup	
 #endif
 		dump_stack();
 
@@ -236,18 +217,20 @@ retry:
 		 * this, so we change it to -EIO.
 		 */
 		if (read != len && mtd_is_eccerr(err)) {
-				printk("@Ramos UBI Error 55555  set restore UBI =%d,  \r\n", ubi->ubi_num);
-				Quectel_Restore(ubi->mtd->name,5);
+#if 1 // def  QUECTEL_BACKUP   //Ramos 20160801 add for modem file backup
+		printk("@Quectel0125 UBI Error 555 set restore UBI=%d\r\n", ubi->ubi_num);
+		Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,5);
+		// modify by [francis.huan],20180417,for match mtd_nub who need to backup
+#endif
 			ubi_assert(0);
 			err = -EIO;
 		}
 	} else {
 		if(len != read)
 		{
-			printk("@Ramos UBI Error 555551122 set restore UBI =%d,  \r\n", ubi->ubi_num);
-			Quectel_Restore(ubi->mtd->name,5);
-
-			
+			printk("@Quectel0125 UBI Error 555551122 set restore UBI =%d\r\n", ubi->ubi_num);
+			Quectel_Set_Partition_RestoreFlag("",ubi->mtd->index,5);
+			// modify by [francis.huan],20180417,for match mtd_nub who need to backup
 		}
 		ubi_assert(len == read);
 

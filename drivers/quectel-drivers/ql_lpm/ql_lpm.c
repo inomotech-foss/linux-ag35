@@ -32,7 +32,7 @@
 #include <net/sock.h>
 
 //#define QL_LPM_NETLINK	26
-#define QL_LPM_NETLINK 28 //changed by javen:2018/10/23:avoiding conflict and consistency
+#define QL_LPM_NETLINK	28   //changed by javen:2018/10/23:avoiding conflict and consistency
 #define MAX_MSGSIZE	24
 
 static int wakeup_in_irq = 0;
@@ -67,6 +67,9 @@ int lpm_send_state(char* msg, int len)
     struct nlmsghdr *nlh;
 
     int ret;
+    /*IS0001668: If there is no process need notify, return -1*/
+    if(user_pid == -1)
+	return -1;
 
     skb = nlmsg_new(len, GFP_ATOMIC);
     if(!skb)
@@ -84,8 +87,6 @@ int lpm_send_state(char* msg, int len)
     }
  
     memcpy(nlmsg_data(nlh), msg, len);
-    if(user_pid == -1)
-	return -1;
     ret = netlink_unicast(nl_sk, skb, user_pid, MSG_DONTWAIT);
     pr_debug("[ql_lpm]: Send wakeupin state to user space, ret: %d\n", ret);
 

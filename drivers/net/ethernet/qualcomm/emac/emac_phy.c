@@ -29,6 +29,9 @@
 #include "emac_rgmii.h"
 #include "emac_sgmii.h"
 
+/*2022/09/17 jayden add ,disable auto poll*/
+#define AUTO_POLL 0
+
 /**
  * emac_phy_mdio_autopoll_disable() - disable mdio autopoll
  * @hw: the emac hardware
@@ -78,13 +81,15 @@ static int emac_mdio_read(struct mii_bus *bus, int addr, int regnum)
 	struct emac_phy *phy = &adpt->phy;
 	u32 reg = 0;
 	int ret = 0;
-
+	if (addr == 0 && quectel_phy_addr != PHY_MAX_ADDR)
+		addr = quectel_phy_addr;
+		
 	if (pm_runtime_enabled(adpt->netdev->dev.parent) &&
 	    pm_runtime_status_suspended(adpt->netdev->dev.parent)) {
 		emac_dbg(adpt, hw, "EMAC in suspended state\n");
 		return ret;
 	}
-
+#if AUTO_POLL
 	if (phy->external) {
 		ret = emac_phy_mdio_autopoll_disable(hw);
 		if (ret) {
@@ -93,7 +98,7 @@ static int emac_mdio_read(struct mii_bus *bus, int addr, int regnum)
 			return ret;
 		}
 	}
-
+#endif
 __retry:
 	emac_reg_update32(hw, EMAC, EMAC_PHY_STS, PHY_ADDR_BMSK,
 			  (addr << PHY_ADDR_SHFT));
@@ -126,7 +131,7 @@ __retry:
 
 
 			if (quectel_phy_addr == PHY_MAX_ADDR) {
-				if (ret != 0xFFFF) { //get phy id 
+				if (ret != 0xFFFF && ret != 0x0) { //get phy id 
 					quectel_phy_addr = addr;
 				} else if (addr == (PHY_MAX_ADDR - 1)) {
 					ret = (regnum == MII_PHYSID1) ? 0x1234 : 0x5678;
@@ -137,10 +142,10 @@ __retry:
 			}
 		}
 	}
-
+#if AUTO_POLL
 	if (phy->external)
 		emac_phy_mdio_autopoll_enable(hw);
-
+#endif
 	return ret;
 }
 
@@ -151,13 +156,16 @@ static int emac_mdio_write(struct mii_bus *bus, int addr, int regnum, u16 val)
 	struct emac_phy *phy = &adpt->phy;
 	u32 reg = 0;
 	int ret = 0;
-
+	if (addr == 0 && quectel_phy_addr != PHY_MAX_ADDR)
+		addr = quectel_phy_addr;
+		
+		
 	if (pm_runtime_enabled(adpt->netdev->dev.parent) &&
 	    pm_runtime_status_suspended(adpt->netdev->dev.parent)) {
 		emac_dbg(adpt, hw, "EMAC in suspended state\n");
 		return ret;
 	}
-
+#if AUTO_POLL
 	if (phy->external) {
 		ret = emac_phy_mdio_autopoll_disable(hw);
 		if (ret) {
@@ -166,7 +174,7 @@ static int emac_mdio_write(struct mii_bus *bus, int addr, int regnum, u16 val)
 			return ret;
 		}
 	}
-
+#endif
 	emac_reg_update32(hw, EMAC, EMAC_PHY_STS, PHY_ADDR_BMSK,
 			  (addr << PHY_ADDR_SHFT));
 	wmb(); /* ensure PHY address is set before we proceed */
@@ -191,10 +199,10 @@ static int emac_mdio_write(struct mii_bus *bus, int addr, int regnum, u16 val)
 	} else
 		emac_dbg(adpt, hw, "EMAC PHY Addr %d PHY WR 0x%02x <- 0x%04x\n",
 			 addr, regnum, val);
-
+#if AUTO_POLL
 	if (phy->external)
 		emac_phy_mdio_autopoll_enable(hw);
-
+#endif
 	return ret;
 }
 

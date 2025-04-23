@@ -64,8 +64,8 @@ armada_ovl_update_attr(struct armada_ovl_plane_properties *prop,
 
 	spin_lock_irq(&dcrtc->irq_lock);
 	armada_updatel(prop->colorkey_mode,
-		     CFG_CKMODE_MASK | CFG_ALPHAM_MASK | CFG_ALPHA_MASK,
-		     dcrtc->base + LCD_SPU_DMA_CTRL1);
+		       CFG_CKMODE_MASK | CFG_ALPHAM_MASK | CFG_ALPHA_MASK,
+		       dcrtc->base + LCD_SPU_DMA_CTRL1);
 	if (dcrtc->variant->has_spu_adv_reg)
 		armada_updatel(prop->colorkey_enable,
 			       ADV_GRACOLORKEY | ADV_VIDCOLORKEY,

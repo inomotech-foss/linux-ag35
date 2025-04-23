@@ -31,6 +31,7 @@
 
 #define QUECTEL_ODM_UPDATE_AUTOREPORT     0
 #endif//QUECTEL_OMA_DM
+#define QUECTEL_AT_AP_MODEM_NEW_VERSION //  2018/8/24 sync AP version to modem
 
 
 #define QUECTEL_AT_Q_VERSION //2017.12.04 add command AT+QVERSION by wayne.wei

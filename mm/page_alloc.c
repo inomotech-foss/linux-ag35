@@ -1229,6 +1229,8 @@ static int find_suitable_fallback(struct free_area *area, unsigned int order,
 
 		return fallback_mt;
 	}
+
+	return -1;
 }
 
 /* Remove an element from the buddy allocator from the fallback list */

@@ -1193,7 +1193,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 			if (ret) {
 				irq_release_resources(desc);
 				goto out_mask;
-		}
+			}
 		}
 
 		desc->istate &= ~(IRQS_AUTODETECT | IRQS_SPURIOUS_DISABLED | \

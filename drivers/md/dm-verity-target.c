@@ -39,6 +39,12 @@
 
 static unsigned dm_verity_prefetch_cluster = DM_VERITY_DEFAULT_PREFETCH_SIZE;
 
+/* add for quectel for linuxfs restore */
+#include "../drivers/mtd/ubi/ubi.h"
+extern int get_ubi_num_from_gd(struct gendisk *gd);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char
+			 *partition_name, int mtd_nub, int where);
+
 module_param_named(prefetch_cluster, dm_verity_prefetch_cluster, uint, S_IRUGO | S_IWUSR);
 
 struct dm_verity_prefetch_work {
@@ -232,6 +238,12 @@ static int verity_handle_err(struct dm_verity *v, enum verity_block_type type,
 	kobject_uevent_env(&disk_to_dev(dm_disk(md))->kobj, KOBJ_CHANGE, envp);
 
 out:
+	/* add for system restore function */
+	printk("@Quectel0125 func:%s, Line=%d, set mtd=%d,restore!\r\n", __func__, __LINE__, 
+		ubi_get_device(get_ubi_num_from_gd(v->data_dev->bdev->bd_disk))->mtd->index);
+	Quectel_Set_Partition_RestoreFlag("",
+		ubi_get_device(get_ubi_num_from_gd(v->data_dev->bdev->bd_disk))->mtd->index, 0);
+
 	if (v->mode == DM_VERITY_MODE_LOGGING)
 		return 0;
 
@@ -466,8 +478,7 @@ static int verity_verify_io(struct dm_verity_io *io)
 			if (v->validated_blocks)
 				set_bit(cur_block, v->validated_blocks);
 			continue;
-		}
-		else if (verity_fec_decode(v, io, DM_VERITY_BLOCK_TYPE_DATA,
+		} else if (verity_fec_decode(v, io, DM_VERITY_BLOCK_TYPE_DATA,
 					   cur_block, NULL, &start) == 0)
 			continue;
 		else if (verity_handle_err(v, DM_VERITY_BLOCK_TYPE_DATA,
@@ -548,7 +559,7 @@ static void verity_prefetch_io(struct work_struct *work)
 				hash_block_end = v->hash_blocks - 1;
 		}
 no_prefetch_cluster:
-		// for emmc, it is more efficient to send bigger read
+		/* for emmc, it is more efficient to send bigger read */
 		prefetch_size = max((sector_t)CONFIG_DM_VERITY_HASH_PREFETCH_MIN_SIZE,
 			hash_block_end - hash_block_start + 1);
 		if ((hash_block_start + prefetch_size) >= (v->hash_start + v->hash_blocks)) {

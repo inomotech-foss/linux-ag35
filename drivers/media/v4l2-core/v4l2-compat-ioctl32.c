@@ -43,12 +43,12 @@ static long native_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 struct v4l2_clip32 {
 	struct v4l2_rect        c;
-	compat_caddr_t 		next;
+	compat_caddr_t		next;
 };
 
 struct v4l2_window32 {
 	struct v4l2_rect        w;
-	__u32		  	field;	/* enum v4l2_field */
+	__u32			field;	/* enum v4l2_field */
 	__u32			chromakey;
 	compat_caddr_t		clips; /* actually struct v4l2_clip32 * */
 	__u32			clipcount;
@@ -60,9 +60,9 @@ static int get_v4l2_window32(struct v4l2_window __user *kp,
 			     struct v4l2_window32 __user *up,
 			     void __user *aux_buf, u32 aux_space)
 {
-		struct v4l2_clip32 __user *uclips;
-		struct v4l2_clip __user *kclips;
-		compat_caddr_t p;
+	struct v4l2_clip32 __user *uclips;
+	struct v4l2_clip __user *kclips;
+	compat_caddr_t p;
 	u32 clipcount;
 
 	if (!access_ok(VERIFY_READ, up, sizeof(*up)) ||
@@ -78,9 +78,9 @@ static int get_v4l2_window32(struct v4l2_window __user *kp,
 	if (!clipcount)
 		return put_user(NULL, &kp->clips);
 
-		if (get_user(p, &up->clips))
-			return -EFAULT;
-		uclips = compat_ptr(p);
+	if (get_user(p, &up->clips))
+		return -EFAULT;
+	uclips = compat_ptr(p);
 	if (aux_space < clipcount * sizeof(*kclips))
 		return -EFAULT;
 	kclips = aux_buf;
@@ -88,13 +88,13 @@ static int get_v4l2_window32(struct v4l2_window __user *kp,
 		return -EFAULT;
 
 	while (clipcount--) {
-			if (copy_in_user(&kclips->c, &uclips->c, sizeof(uclips->c)))
-				return -EFAULT;
+		if (copy_in_user(&kclips->c, &uclips->c, sizeof(uclips->c)))
+			return -EFAULT;
 		if (put_user(clipcount ? kclips + 1 : NULL, &kclips->next))
-				return -EFAULT;
+			return -EFAULT;
 		uclips++;
 		kclips++;
-		}
+	}
 	return 0;
 }
 
@@ -114,7 +114,7 @@ static int put_v4l2_window32(struct v4l2_window __user *kp,
 	    put_user(clipcount, &up->clipcount))
 		return -EFAULT;
 	if (!clipcount)
-	return 0;
+		return 0;
 
 	if (get_user(kclips, &kp->clips))
 		return -EFAULT;
@@ -123,7 +123,7 @@ static int put_v4l2_window32(struct v4l2_window __user *kp,
 	uclips = compat_ptr(p);
 	while (clipcount--) {
 		if (copy_in_user(&uclips->c, &kclips->c, sizeof(uclips->c)))
-		return -EFAULT;
+			return -EFAULT;
 		uclips++;
 		kclips++;
 	}
@@ -304,7 +304,7 @@ static int put_v4l2_create32(struct v4l2_create_buffers __user *kp,
 	    copy_in_user(up, kp,
 			 offsetof(struct v4l2_create_buffers32, format)) ||
 	    copy_in_user(up->reserved, kp->reserved, sizeof(kp->reserved)))
-			return -EFAULT;
+		return -EFAULT;
 	return __put_v4l2_format32(&kp->format, &up->format);
 }
 
@@ -338,7 +338,7 @@ static int put_v4l2_standard32(struct v4l2_standard __user *kp,
 			 sizeof(up->frameperiod)) ||
 	    assign_in_user(&up->framelines, &kp->framelines) ||
 	    copy_in_user(up->reserved, kp->reserved, sizeof(up->reserved)))
-			return -EFAULT;
+		return -EFAULT;
 	return 0;
 }
 
@@ -379,7 +379,7 @@ struct v4l2_buffer32 {
 
 static int get_v4l2_plane32(struct v4l2_plane __user *up,
 			    struct v4l2_plane32 __user *up32,
-				enum v4l2_memory memory)
+			    enum v4l2_memory memory)
 {
 	compat_ulong_t p;
 
@@ -415,7 +415,7 @@ static int get_v4l2_plane32(struct v4l2_plane __user *up,
 
 static int put_v4l2_plane32(struct v4l2_plane __user *up,
 			    struct v4l2_plane32 __user *up32,
-				enum v4l2_memory memory)
+			    enum v4l2_memory memory)
 {
 	unsigned long p;
 
@@ -494,7 +494,7 @@ static int get_v4l2_buffer32(struct v4l2_buffer __user *kp,
 	    put_user(memory, &kp->memory) ||
 	    get_user(length, &up->length) ||
 	    put_user(length, &kp->length))
-			return -EFAULT;
+		return -EFAULT;
 
 	if (V4L2_TYPE_IS_OUTPUT(type))
 		if (assign_in_user(&kp->bytesused, &up->bytesused) ||
@@ -502,7 +502,7 @@ static int get_v4l2_buffer32(struct v4l2_buffer __user *kp,
 		    assign_in_user(&kp->timestamp.tv_sec,
 				   &up->timestamp.tv_sec) ||
 		    assign_in_user(&kp->timestamp.tv_usec,
-					&up->timestamp.tv_usec))
+				   &up->timestamp.tv_usec))
 			return -EFAULT;
 
 	if (V4L2_TYPE_IS_MULTIPLANAR(type)) {
@@ -589,7 +589,7 @@ static int put_v4l2_buffer32(struct v4l2_buffer __user *kp,
 	    assign_in_user(&up->flags, &kp->flags) ||
 	    get_user(memory, &kp->memory) ||
 	    put_user(memory, &up->memory))
-			return -EFAULT;
+		return -EFAULT;
 
 	if (assign_in_user(&up->bytesused, &kp->bytesused) ||
 	    assign_in_user(&up->field, &kp->field) ||
@@ -601,7 +601,7 @@ static int put_v4l2_buffer32(struct v4l2_buffer __user *kp,
 	    assign_in_user(&up->reserved, &kp->reserved) ||
 	    get_user(length, &kp->length) ||
 	    put_user(length, &up->length))
-			return -EFAULT;
+		return -EFAULT;
 
 	if (V4L2_TYPE_IS_MULTIPLANAR(type)) {
 		u32 num_planes = length;
@@ -646,7 +646,7 @@ static int put_v4l2_buffer32(struct v4l2_buffer __user *kp,
 struct v4l2_framebuffer32 {
 	__u32			capability;
 	__u32			flags;
-	compat_caddr_t 		base;
+	compat_caddr_t		base;
 	struct {
 		__u32		width;
 		__u32		height;
@@ -665,12 +665,12 @@ static int get_v4l2_framebuffer32(struct v4l2_framebuffer __user *kp,
 	compat_caddr_t tmp;
 
 	if (!access_ok(VERIFY_READ, up, sizeof(*up)) ||
-		get_user(tmp, &up->base) ||
+	    get_user(tmp, &up->base) ||
 	    put_user((__force void *)compat_ptr(tmp), &kp->base) ||
 	    assign_in_user(&kp->capability, &up->capability) ||
 	    assign_in_user(&kp->flags, &up->flags) ||
 	    copy_in_user(&kp->fmt, &up->fmt, sizeof(kp->fmt)))
-			return -EFAULT;
+		return -EFAULT;
 	return 0;
 }
 
@@ -685,7 +685,7 @@ static int put_v4l2_framebuffer32(struct v4l2_framebuffer __user *kp,
 	    assign_in_user(&up->capability, &kp->capability) ||
 	    assign_in_user(&up->flags, &kp->flags) ||
 	    copy_in_user(&up->fmt, &kp->fmt, sizeof(kp->fmt)))
-			return -EFAULT;
+		return -EFAULT;
 	return 0;
 }
 
@@ -722,11 +722,11 @@ static inline int put_v4l2_input32(struct v4l2_input __user *kp,
 }
 
 struct v4l2_ext_controls32 {
-       __u32 ctrl_class;
-       __u32 count;
-       __u32 error_idx;
-       __u32 reserved[2];
-       compat_caddr_t controls; /* actually struct v4l2_ext_control32 * */
+	__u32 ctrl_class;
+	__u32 count;
+	__u32 error_idx;
+	__u32 reserved[2];
+	compat_caddr_t controls; /* actually struct v4l2_ext_control32 * */
 };
 
 struct v4l2_ext_control32 {
@@ -801,7 +801,7 @@ static int get_v4l2_ext_controls32(struct file *file,
 	    put_user(count, &kp->count) ||
 	    assign_in_user(&kp->error_idx, &up->error_idx) ||
 	    copy_in_user(kp->reserved, up->reserved, sizeof(kp->reserved)))
-			return -EFAULT;
+		return -EFAULT;
 
 	if (count == 0)
 		return put_user(NULL, &kp->controls);
@@ -860,7 +860,7 @@ static int put_v4l2_ext_controls32(struct file *file,
 	    assign_in_user(&up->error_idx, &kp->error_idx) ||
 	    copy_in_user(up->reserved, kp->reserved, sizeof(up->reserved)) ||
 	    get_user(kcontrols, &kp->controls))
-			return -EFAULT;
+		return -EFAULT;
 
 	if (!count || count > (U32_MAX/sizeof(*ucontrols)))
 		return 0;
@@ -925,7 +925,7 @@ static int put_v4l2_event32(struct v4l2_event __user *kp,
 	    assign_in_user(&up->timestamp.tv_nsec, &kp->timestamp.tv_nsec) ||
 	    assign_in_user(&up->id, &kp->id) ||
 	    copy_in_user(up->reserved, kp->reserved, sizeof(up->reserved)))
-			return -EFAULT;
+		return -EFAULT;
 	return 0;
 }
 
@@ -946,10 +946,10 @@ static int get_v4l2_edid32(struct v4l2_edid __user *kp,
 	    assign_in_user(&kp->pad, &up->pad) ||
 	    assign_in_user(&kp->start_block, &up->start_block) ||
 	    assign_in_user(&kp->blocks, &up->blocks) ||
-		get_user(tmp, &up->edid) ||
+	    get_user(tmp, &up->edid) ||
 	    put_user(compat_ptr(tmp), &kp->edid) ||
 	    copy_in_user(kp->reserved, up->reserved, sizeof(kp->reserved)))
-			return -EFAULT;
+		return -EFAULT;
 	return 0;
 }
 
@@ -965,7 +965,7 @@ static int put_v4l2_edid32(struct v4l2_edid __user *kp,
 	    get_user(edid, &kp->edid) ||
 	    put_user(ptr_to_compat(edid), &up->edid) ||
 	    copy_in_user(up->reserved, kp->reserved, sizeof(up->reserved)))
-			return -EFAULT;
+		return -EFAULT;
 	return 0;
 }
 
@@ -981,7 +981,7 @@ static int put_v4l2_edid32(struct v4l2_edid __user *kp,
 #define VIDIOC_ENUMINPUT32	_IOWR('V', 26, struct v4l2_input32)
 #define VIDIOC_G_EDID32		_IOWR('V', 40, struct v4l2_edid32)
 #define VIDIOC_S_EDID32		_IOWR('V', 41, struct v4l2_edid32)
-#define VIDIOC_TRY_FMT32      	_IOWR('V', 64, struct v4l2_format32)
+#define VIDIOC_TRY_FMT32	_IOWR('V', 64, struct v4l2_format32)
 #define VIDIOC_G_EXT_CTRLS32    _IOWR('V', 71, struct v4l2_ext_controls32)
 #define VIDIOC_S_EXT_CTRLS32    _IOWR('V', 72, struct v4l2_ext_controls32)
 #define VIDIOC_TRY_EXT_CTRLS32  _IOWR('V', 73, struct v4l2_ext_controls32)
@@ -1017,7 +1017,6 @@ static long do_video_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 	int compatible_arg = 1;
 	long err = 0;
 
-	memset(&karg, 0, sizeof(karg));
 	/* First, convert the command. */
 	switch (cmd) {
 	case VIDIOC_G_FMT32: cmd = VIDIOC_G_FMT; break;

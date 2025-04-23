@@ -3232,12 +3232,12 @@ static int set_ctrl_lock(struct v4l2_fh *fh, struct v4l2_ctrl *ctrl,
 {
 	int ret;
 
-		v4l2_ctrl_lock(ctrl);
+	v4l2_ctrl_lock(ctrl);
 	user_to_new(c, ctrl);
 	ret = set_ctrl(fh, ctrl, 0);
-		if (!ret)
-			cur_to_user(c, ctrl);
-		v4l2_ctrl_unlock(ctrl);
+	if (!ret)
+		cur_to_user(c, ctrl);
+	v4l2_ctrl_unlock(ctrl);
 	return ret;
 }
 

@@ -55,6 +55,8 @@
 
 #define PIL_NUM_DESC		10
 static void __iomem *pil_info_base;
+//erick.shen-2021406-add for modemfs restore
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub , int where);  // modify by [francis.huan] 20180417 ,for match mtd_nub to restore
 
 /**
  * proxy_timeout - Override for proxy vote timeouts
@@ -136,16 +138,7 @@ struct pil_priv {
 	size_t region_size;
 };
 
-#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
-void machine_restart(char *cmd);
-extern void quectel_set_system_reset_mode(int mode);
-#endif
 
-#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
-void machine_restart(char *cmd);
-extern void quectel_set_system_reset_mode(int mode);
-bool modem_file_lose = false;
-#endif
 
 /**
  * pil_do_ramdump() - Ramdump an image
@@ -691,9 +684,10 @@ static int pil_load_seg(struct pil_desc *desc, struct pil_seg *seg)
 		if (ret < 0) {
 			pil_err(desc, "Failed to locate blob %s or blob is too big.\n",
 				fw_name);
-#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
-			modem_file_lose = true;
-#endif 				
+			if(0 == strcmp(desc->fw_name, "modem")) {
+				printk("@Quectel0125 set restore modem flag here 666111 \r\n");
+				Quectel_Set_Partition_RestoreFlag("modem", -1, 6);
+			}
 			subsys_set_error(desc->subsys_dev, firmware_error_msg);
 			return ret;
 		}
@@ -809,9 +803,10 @@ int pil_boot(struct pil_desc *desc)
 	ret = request_firmware(&fw, fw_name, desc->dev);
 	if (ret) {
 		pil_err(desc, "Failed to locate %s\n", fw_name);
-#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
-	modem_file_lose = true;
-#endif 
+		if(0 == strcmp(desc->fw_name, "modem")) {
+			printk("@Quectel0125 set restore modem flag here 666222 \r\n");
+			Quectel_Set_Partition_RestoreFlag("modem", -1, 6);
+		}
 		goto out;
 	}
 
@@ -863,6 +858,10 @@ int pil_boot(struct pil_desc *desc)
 			priv->region_end - priv->region_start);
 	if (ret) {
 		pil_err(desc, "Invalid firmware metadata\n");
+		if(0 == strcmp(desc->fw_name, "modem")) {
+				printk("@Quectel0125 set restore modem flag here 666333 \r\n");
+				Quectel_Set_Partition_RestoreFlag("modem", -1, 6);
+		}
 		subsys_set_error(desc->subsys_dev, firmware_error_msg);
 		goto err_boot;
 	}
@@ -948,18 +947,6 @@ out:
 		}
 		pil_release_mmap(desc);
 
-#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
-		quectel_set_system_reset_mode(0);
-	 	machine_restart(NULL);
-#endif
-
-#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
-	if(false == modem_file_lose)
-	{
-		quectel_set_system_reset_mode(0);
-	 	machine_restart(NULL);
-	}
-#endif
 	}
 	return ret;
 }

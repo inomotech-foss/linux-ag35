@@ -2676,7 +2676,7 @@ static irqreturn_t tsens_irq_thread(int irq, void *data)
 			tsens_tz_get_temp(tm->sensor[i].tz_dev, &temp);
 			thermal_sensor_trip(tm->sensor[i].tz_dev, trip, temp);
 
-			pr_debug("sensor:%d trigger temp (%d degC)\n",
+			printk("sensor:%d trigger temp (%d degC)\n",
 				tm->sensor[i].sensor_hw_num,
 				tsens_tz_code_to_degc((status &
 				TSENS_SN_STATUS_TEMP_MASK),

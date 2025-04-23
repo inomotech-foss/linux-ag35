@@ -433,6 +433,11 @@ static int max9867_probe(struct snd_soc_codec *codec)
  	snd_soc_write(codec, MAX9867_LEFTMICGAIN, 0x54);
  	snd_soc_write(codec, MAX9867_RIGHTMICGAIN, 0x54);
  	snd_soc_write(codec, MAX9867_INPUTCONFIG, 0x50);
+	/*
+	Grady.quan-2019/01/16
+	Refer to [Issue-Depot].[IS0000438][modify the pcm config]
+	*/
+ 	snd_soc_write(codec, MAX9867_INTEN, 0x04);
 
 	return 0;
 }
@@ -516,21 +521,21 @@ static int max9867_i2c_probe(struct i2c_client *i2c,
 	}
 	ret = regmap_read(max9867->regmap,
 			MAX9867_REVISION, &reg);
-
 	if (ret < 0) {
 		dev_err(&i2c->dev, "Failed to read: %d\n", ret);
 		return ret;
 	}
 
-	// achang-20180607: add for codec compatible dynamically. (start)
+	// achang-20180622: add for codec compatible dynamically. (start)
 	if (reg == 0x42) {
-		quec_set_codec_info("max9867_tlv.4-0019", "max9867-aif1");	
+		quec_set_codec_info("max9867.4-0019", "max9867-aif1");	
 	} else {
 		dev_err(&i2c->dev, "Failed to read ID: %x\n", reg);
 		return -EINVAL;
 	}
-	// achang-20180607: add for codec compatible dynamically. (end)
+	// achang-20180622: add for codec compatible dynamically. (end)
 
+	dev_info(&i2c->dev, "device revision: %x\n", reg);
 	ret = snd_soc_register_codec(&i2c->dev, &max9867_codec,
 			max9867_dai, ARRAY_SIZE(max9867_dai));
 	if (ret < 0) {
@@ -547,14 +552,12 @@ static int max9867_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max9867_i2c_id[] = {
-	{ "max9867_tlv", 0 },
-	//{ "tlv320aic3x-codec", 0 },
+	{ "max9867", 0 },
 	{ }
 };
 
 static const struct of_device_id max9867_of_match[] = {
-	{ .compatible = "maxim,quec_max9867_tlv", },
-	//{ .compatible ="quec,quec-tlv320aic3x-i2c", },
+	{ .compatible = "maxim,max9867", },
 	{ }
 };
 
@@ -566,8 +569,7 @@ static const struct dev_pm_ops max9867_pm_ops = {
 
 static struct i2c_driver max9867_i2c_driver = {
 	.driver = {
-		.name = "max9867_tlv",
-		//.name = "tlv320aic3x-codec",
+		.name = "max9867",
 		.of_match_table = of_match_ptr(max9867_of_match),
 		.pm = &max9867_pm_ops,
 	},

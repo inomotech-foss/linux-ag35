@@ -953,7 +953,7 @@ static int smsc75xx_set_features(struct net_device *netdev,
 	ret = smsc75xx_write_reg(dev, RFE_CTL, pdata->rfe_ctl);
 	if (ret < 0) {
 		netdev_warn(dev->net, "Error writing RFE_CTL\n");
-	return ret;
+		return ret;
 	}
 	return 0;
 }

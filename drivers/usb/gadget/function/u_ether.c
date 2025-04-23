@@ -1943,7 +1943,11 @@ int gether_get_host_addr_cdc(struct net_device *net, char *host_addr, int len)
 		return -EINVAL;
 
 	dev = netdev_priv(net);
+#ifdef QUECTEL_ECM_FIX
 	snprintf(host_addr, len, "%pm", dev->host_mac);
+#else
+	snprintf(host_addr, len, "%pM", dev->host_mac);
+#endif
 
 	return strlen(host_addr);
 }

@@ -19,36 +19,11 @@
 //#endif
 
 
-#if defined(QL_G_PRODUCT_AG35CE)
+#if defined(QL_G_PRODUCT_MODEL_AG35)
 /******************* ReDefine FUNCS MACRO  ********************************/
 
 /******************* SPECIFIC FUNCS MACRO  ********************************/
 
-#elif defined(QL_G_PRODUCT_AG35J)
-/******************* ReDefine FUNCS MACRO  ********************************/
-
-/******************* SPECIFIC FUNCS MACRO  ********************************/
-
-#elif defined(QL_G_PRODUCT_AG35LA)
-/******************* ReDefine FUNCS MACRO  ********************************/
-
-/******************* SPECIFIC FUNCS MACRO  ********************************/
-
-#elif defined(QL_G_PRODUCT_AG35NA)
-/******************* ReDefine FUNCS MACRO  ********************************/
-
-/******************* SPECIFIC FUNCS MACRO  ********************************/
-
-#elif defined(QL_G_PRODUCT_AG35C)
-/******************* ReDefine FUNCS MACRO  ********************************/
-
-/******************* SPECIFIC FUNCS MACRO  ********************************/
-
-#elif defined(QL_G_PRODUCT_AG35E)
-/******************* ReDefine FUNCS MACRO  ********************************/
-
-/******************* SPECIFIC FUNCS MACRO  ********************************/
-#elif defined(__QUECTEL_PROJECT_AG35CEVBM__)
 #else //error
 //#error "<<<<<<<<<<<<<<<<<<Undefine PRODUCT NAME>>>>>>>>>>>>>>>>>>>>>>>>>>>"
 #endif

@@ -68,8 +68,8 @@ struct aio_ring {
 #define AIO_RING_PAGES	8
 
 struct kioctx_table {
-	struct rcu_head	rcu;
-	unsigned	nr;
+	struct rcu_head		rcu;
+	unsigned		nr;
 	struct kioctx __rcu	*table[];
 };
 
@@ -1007,7 +1007,7 @@ static struct kioctx *lookup_ioctx(unsigned long ctx_id)
 	ctx = rcu_dereference(table->table[id]);
 	if (ctx && ctx->user_id == ctx_id) {
 		if (percpu_ref_tryget_live(&ctx->users))
-		ret = ctx;
+			ret = ctx;
 	}
 out:
 	rcu_read_unlock();

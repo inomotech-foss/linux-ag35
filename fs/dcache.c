@@ -587,7 +587,7 @@ again:
 		spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
 		if (unlikely(dentry->d_lockref.count < 0)) {
 			spin_unlock(&parent->d_lock);
-		parent = NULL;
+			parent = NULL;
 		}
 	} else {
 		parent = NULL;
@@ -1858,7 +1858,7 @@ struct dentry *d_make_root(struct inode *root_inode)
 			d_instantiate(res, root_inode);
 		} else {
 			iput(root_inode);
-	}
+		}
 	}
 	return res;
 }

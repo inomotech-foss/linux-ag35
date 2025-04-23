@@ -329,14 +329,14 @@ int gport_setup(struct usb_configuration *c)
 
 	pr_debug("%s: no_tty_ports: %u no_smd_ports: %u no_hsic_sports: %u nr_ports: %u\n",
 		__func__, no_tty_ports, no_smd_ports, no_hsic_sports, nr_ports);
-
-	/* juson.zhang-2018/10/16:add usb tty */
+	
+	//javen-2019/04/30:add usb channel
 	if (no_tty_ports) {
 		for (i = 0; i < GSERIAL_NO_PORTS; i++) {
 			if(gserial_ports[i].transport == USB_GADGET_XPORT_TTY)
 			{
 				ret = gserial_alloc_line(
-					&gserial_ports[i].client_port_num);
+						&gserial_ports[i].client_port_num);
 				if (ret)
 					return ret;
 			}

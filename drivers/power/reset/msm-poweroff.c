@@ -599,14 +599,18 @@ static int msm_restart_probe(struct platform_device *pdev)
 
 	np = of_find_compatible_node(NULL, NULL,
 				"qcom,msm-imem-dload-type");
-	if (!np) {
-		pr_err("unable to find DT imem dload-type node\n");
-		//goto skip_sysfs_create;
+	if (!np) {		
+#ifdef CONFIG_QUECTEL_POWER_DRIVER
+	 		pr_err("unable to find DT imem dload-type node [QPOWD]continue create emmc_dload power_off dev\n");	
+#else
+			pr_err("unable to find DT imem dload-type node\n");
+			goto skip_sysfs_create;
+#endif		
 	} else {
 		dload_type_addr = of_iomap(np, 0);
 		if (!dload_type_addr) {
 			pr_err("unable to map imem dload-type offset\n");
-		//	goto skip_sysfs_create;
+			goto skip_sysfs_create;
 		}
 	}
 

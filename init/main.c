@@ -90,7 +90,9 @@
 #endif
 
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
-extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int where);
+#include "../drivers/mtd/ubi/ubi.h"
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+// modify by [francis.huan] 20180417 ,for match mtd_nub to restore
 #endif
 
 static int kernel_init(void *);
@@ -983,7 +985,7 @@ static inline void mark_readonly(void)
 static int __ref kernel_init(void *unused)
 {
 	int ret;
-#if 1 //def CONFIG_QUECTEL_MODEM_BOOT_TIME //
+#if 0//def CONFIG_QUECTEL_MODEM_BOOT_TIME //
 	char * temp_cmdLine = saved_command_line;
 #endif
 	kernel_init_freeable();
@@ -1017,7 +1019,7 @@ static int __ref kernel_init(void *unused)
 		pr_err("Failed to execute %s (error %d).  Attempting defaults...\n",
 			execute_command, ret);
 	}
-#if 1 //def CONFIG_QUECTEL_MODEM_BOOT_TIME //jun20160728
+#if 0 //def CONFIG_QUECTEL_MODEM_BOOT_TIME //jun20160728
     pr_notice("@Ramos Kernel command line: %s\n", temp_cmdLine);
     //if(strstr(temp_cmdLine, "ubi.mtd=19"))
     //add by len 2018-03-13
@@ -1036,9 +1038,9 @@ static int __ref kernel_init(void *unused)
         //modify end
     	{
     		 printk("quectel_mount failed \n");
-			          printk("@Ramos set restore modem flag here 444444 \r\n");
-	    	Quectel_Set_Partition_RestoreFlag("modem",4); // modem ޷أлԭ
-
+			          printk("@Quectel0125 set restore modem flag here 444444 \r\n");
+	    	Quectel_Set_Partition_RestoreFlag("modem",-1,4); // modem ޷أлԭ
+// modify by [francis.huan] 20180417 ,for match mtd name to restore
     	}
     	else
     	{
@@ -1058,13 +1060,9 @@ static int __ref kernel_init(void *unused)
 	}
 		printk("@Ramos kernel_init try_to_run_init_process EXIT panic 22222\r\n\r\n");	
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
-
-		if (!get_bootmode(NULL))
 		{
-			printk("@Ramos set restore systemfs flag here 444444 \r\n");
-		    Quectel_Set_Partition_RestoreFlag("system",4);
-		}else{
-		    Quectel_Set_Partition_RestoreFlag("recovery",4);
+		printk("@Quectel0125 set restore systemfs flag here 444444 \r\n");
+		Quectel_Set_Partition_RestoreFlag("", ubi_get_device(0)->mtd->index,4);// rootfs must be ubi0, so we usr ubi0 to get mtd
 		}
 #endif
 

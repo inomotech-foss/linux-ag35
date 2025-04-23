@@ -12,6 +12,8 @@ void  change_floppy(char *fmt, ...);
 void  mount_block_root(char *name, int flags);
 void  mount_root(void);
 extern int root_mountflags;
+extern char __initdata dm_root_name[];
+extern unsigned int __initdata have_dm_verity;
 
 static inline int create_dev(char *name, dev_t dev)
 {

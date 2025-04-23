@@ -412,14 +412,11 @@ static void __init dm_setup_drives(void)
 			goto setup_md_queue_fail;
 		}
 
-		/* Suspend the device so that we can bind it to the table. */
-		if (dm_suspend(md, 0)) {
-			DMDEBUG("failed to suspend the device pre-bind");
-			goto suspend_fail;
-		}
-
-	/* Bind the table to the device. This is the only way to associate
-	 * md->map with the table and set the disk capacity directly. */
+		/*
+		 * Bind the table to the device. This is the only way
+		 * to associate md->map with the table and set the disk
+		 * capacity directly.
+		 */
 		if (dm_swap_table(md, table)) {  /* should return NULL. */
 			DMDEBUG("failed to bind the device to the table");
 			goto table_bind_fail;

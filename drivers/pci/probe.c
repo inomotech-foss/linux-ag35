@@ -1387,7 +1387,7 @@ static void program_hpp_type1(struct pci_dev *dev, struct hpp_type1 *hpp)
 	if (!pos)
 		return;
 
-		dev_warn(&dev->dev, "PCI-X settings not supported\n");
+	dev_warn(&dev->dev, "PCI-X settings not supported\n");
 }
 
 static void program_hpp_type2(struct pci_dev *dev, struct hpp_type2 *hpp)

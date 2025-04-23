@@ -1062,7 +1062,7 @@ static int dev_alloc_name_ns(struct net *net,
 }
 
 int dev_get_valid_name(struct net *net, struct net_device *dev,
-			      const char *name)
+		       const char *name)
 {
 	BUG_ON(!net);
 
@@ -2451,7 +2451,7 @@ static inline bool skb_needs_check(struct sk_buff *skb, bool tx_path)
 		return skb->ip_summed != CHECKSUM_PARTIAL &&
 		       skb->ip_summed != CHECKSUM_UNNECESSARY;
 
-		return skb->ip_summed == CHECKSUM_NONE;
+	return skb->ip_summed == CHECKSUM_NONE;
 }
 
 /**
@@ -2848,7 +2848,7 @@ static void qdisc_pkt_len_init(struct sk_buff *skb)
 
 			if (skb_header_pointer(skb, skb_transport_offset(skb),
 					       sizeof(_udphdr), &_udphdr))
-			hdr_len += sizeof(struct udphdr);
+				hdr_len += sizeof(struct udphdr);
 		}
 
 		if (shinfo->gso_type & SKB_GSO_DODGY)

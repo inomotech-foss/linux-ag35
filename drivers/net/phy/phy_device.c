@@ -41,6 +41,73 @@ MODULE_DESCRIPTION("PHY library");
 MODULE_AUTHOR("Andy Fleming");
 MODULE_LICENSE("GPL");
 
+static int g_phyaddr;
+
+int mdio_clause45_read(struct mii_bus *bus, int addr, u32 phydevice,u32 regnum)                                                
+{
+	if ((regnum>>16)&0xFFFF) {
+		phydevice = (regnum>>16);
+	}   
+	/*
+	 * To register 0xd, write 00(address) to bit 15:14 and the device address to bit 4:0
+	 * If device address is 1, write 0x01 to register 0x0d
+	 */
+	
+	if(mdiobus_write(bus,addr,0xd,phydevice)) {
+		return -EBUSY;
+	}
+	/*
+	 * To register 0xe, write the address value(RegOffset parameter)
+	 */
+	if(mdiobus_write(bus,addr,0xe,regnum)) {
+		return -EBUSY;
+	}
+	/*
+	 * To register 0xd, write 01(Data,no post increment) to bit 15:14 and the device address to bit 4:0
+	 * If device address is 1, write 0x4001 to register 0x0d
+	 */
+	if(mdiobus_write(bus,addr,0xd,0x4000 + phydevice)) {
+		return -EBUSY;
+	}
+	/*
+	 * To register 0xe, read the content of selected register(RegOffset)
+	 */
+	return mdiobus_read(bus,addr,0xe);
+}
+
+
+static int get_c45_phy_id(struct mii_bus *bus, int addr, int *pid)
+{
+	int i = 0;
+
+	int phy_id [2] = {0};
+	
+	for(i = 0; i < 32; i++){
+		phy_id[0] = mdio_clause45_read(bus,i,0x01,0x2);
+		if(phy_id [0] < 0)
+			return -EIO;
+
+		phy_id[1] = mdio_clause45_read(bus,i,0x01,0x3);
+		if(phy_id [1] < 0)
+			return -EIO;
+
+		*pid = ((phy_id[0] & 0xffff) << 16) | phy_id[1];
+
+		if(*pid != 0xffffffff && *pid != 0) 
+			break;
+	}
+
+	printk("get clause45 phy id :%x,phyaddr:%d\n",*pid, i);
+
+	if(i == 32){
+		i = 0;
+		*pid = 0x12345678;
+	}
+	g_phyaddr = i;
+
+	return 0;
+}
+
 void phy_device_free(struct phy_device *phydev)
 {
 	put_device(&phydev->dev);
@@ -309,6 +376,11 @@ static int get_phy_id(struct mii_bus *bus, int addr, u32 *phy_id,
 		return -EIO;
 
 	*phy_id |= (phy_reg & 0xffff);
+	
+	if(*phy_id == 0 || *phy_id == 0x12345678){
+		printk("*******start detect clause45 phy**********\n");
+		return get_c45_phy_id(bus, addr, phy_id);
+	}
 
 	return 0;
 }
@@ -336,6 +408,8 @@ struct phy_device *get_phy_device(struct mii_bus *bus, int addr, bool is_c45)
 	/* If the phy_id is mostly Fs, there is no device there */
 	if ((phy_id & 0x1fffffff) == 0x1fffffff)
 		return NULL;
+	
+	addr = g_phyaddr;
 
 	return phy_device_create(bus, addr, phy_id, is_c45, &c45_ids);
 }

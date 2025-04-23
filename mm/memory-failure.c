@@ -1199,7 +1199,7 @@ int memory_failure(unsigned long pfn, int trapno, int flags)
 	if (PageHuge(p))
 		page_flags = hpage->flags;
 	else
-	page_flags = p->flags;
+		page_flags = p->flags;
 
 	/*
 	 * unpoison always clear PG_hwpoison inside page lock

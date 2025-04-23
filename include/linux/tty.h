@@ -235,6 +235,7 @@ struct tty_port {
 struct tty_operations;
 
 struct tty_struct {
+	int	uart_err;
 	int	magic;
 	struct kref kref;
 	struct device *dev;

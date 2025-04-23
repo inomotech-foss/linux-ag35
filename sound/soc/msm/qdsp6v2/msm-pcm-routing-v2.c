@@ -45,6 +45,7 @@
 #include "q6voice.h"
 #include "sound/q6lsm.h"
 
+#include <linux/kernel.h>
 #define QUECTEL_UAC_FEATURE
 
 static int get_cal_path(int path_type);
@@ -78,6 +79,8 @@ static struct msm_pcm_channel_mixer channel_mixer[MSM_FRONTEND_DAI_MM_SIZE];
 /* input BE for each FE */
 static int channel_input[MSM_FRONTEND_DAI_MM_SIZE][ADM_MAX_CHANNELS];
 
+// add by barry for at audio dsp cmd  
+static int at_audiodsp_set;
 enum {
 	MADNONE,
 	MADAUDIO,
@@ -590,8 +593,8 @@ static struct msm_pcm_routing_fdai_data
 	{{0, INVALID_SESSION, LEGACY_PCM_MODE, {NULL, NULL} },
 	 {0, INVALID_SESSION, LEGACY_PCM_MODE, {NULL, NULL} } },
 	/* VOWLAN */
-	{{0, INVALID_SESSION, LEGACY_PCM_MODE, {NULL, NULL} },
-	 {0, INVALID_SESSION, LEGACY_PCM_MODE, {NULL, NULL} } },
+	{{0, INVALID_SESSION,  LEGACY_PCM_MODE, {NULL, NULL} },
+	 {0, INVALID_SESSION,  LEGACY_PCM_MODE, {NULL, NULL} } },
 };
 
 static unsigned long session_copp_map[MSM_FRONTEND_DAI_MAX][2]
@@ -809,7 +812,7 @@ int msm_pcm_routing_get_stream_app_type_cfg(int fedai_id, int session_type,
 			__func__, session_type);
 		ret = -EINVAL;
 		goto done;
-	}
+}
 	*app_type = fe_dai_app_type_cfg[fedai_id][session_type].app_type;
 	*acdb_dev_id = fe_dai_app_type_cfg[fedai_id][session_type].acdb_dev_id;
 	*sample_rate = fe_dai_app_type_cfg[fedai_id][session_type].sample_rate;
@@ -1662,6 +1665,7 @@ static int msm_routing_get_audio_mixer(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+
 static int msm_routing_put_audio_mixer(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
@@ -1675,10 +1679,13 @@ static int msm_routing_put_audio_mixer(struct snd_kcontrol *kcontrol,
 	if (ucontrol->value.integer.value[0] &&
 	   msm_pcm_routing_route_is_set(mc->reg, mc->shift) == false) {
 		msm_pcm_routing_process_audio(mc->reg, mc->shift, 1);
+		if(at_audiodsp_set != 1)
 		snd_soc_dapm_mixer_update_power(widget->dapm, kcontrol, 1, update);
+		
 	} else if (!ucontrol->value.integer.value[0] &&
 		  msm_pcm_routing_route_is_set(mc->reg, mc->shift) == true) {
 		msm_pcm_routing_process_audio(mc->reg, mc->shift, 0);
+		if(at_audiodsp_set != 1)
 		snd_soc_dapm_mixer_update_power(widget->dapm, kcontrol, 0, update);
 	}
 
@@ -1854,9 +1861,11 @@ static int msm_routing_put_voice_mixer(struct snd_kcontrol *kcontrol,
 #endif
 	if (ucontrol->value.integer.value[0]) {
 		msm_pcm_routing_process_voice(mc->reg, mc->shift, 1);
+		if(at_audiodsp_set != 1)
 		snd_soc_dapm_mixer_update_power(widget->dapm, kcontrol, 1, update);
 	} else {
 		msm_pcm_routing_process_voice(mc->reg, mc->shift, 0);
+		if(at_audiodsp_set != 1)
 		snd_soc_dapm_mixer_update_power(widget->dapm, kcontrol, 0, update);
 	}
 
@@ -3398,7 +3407,7 @@ static int msm_routing_ext_ec_put(struct snd_kcontrol *kcontrol,
 }
 
 static const char * const ext_ec_ref_rx[] = {"NONE", "PRI_MI2S_TX",
-					"SEC_MI2S_TX", "TERT_MI2S_TX",
+					     "SEC_MI2S_TX", "TERT_MI2S_TX",
 					"QUAT_MI2S_TX", "QUIN_MI2S_TX",
 					"SLIM_1_TX"};
 
@@ -7472,6 +7481,9 @@ static const struct snd_kcontrol_new tx_volte_mixer_controls[] = {
 	MSM_FRONTEND_DAI_VOLTE, 1, 0, msm_routing_get_voice_mixer,
 	msm_routing_put_voice_mixer),
 	SOC_SINGLE_EXT("PRI_MI2S_TX_VoLTE", MSM_BACKEND_DAI_PRI_MI2S_TX,
+	MSM_FRONTEND_DAI_VOLTE, 1, 0, msm_routing_get_voice_mixer,
+	msm_routing_put_voice_mixer),
+	SOC_SINGLE_EXT("SEC_MI2S_TX_VoLTE", MSM_BACKEND_DAI_SECONDARY_MI2S_TX,
 	MSM_FRONTEND_DAI_VOLTE, 1, 0, msm_routing_get_voice_mixer,
 	msm_routing_put_voice_mixer),
 	SOC_SINGLE_EXT("PRI_TDM_TX_3_VoLTE", MSM_BACKEND_DAI_PRI_TDM_TX_3,
@@ -12712,6 +12724,7 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"VOICE2_UL", NULL, "Voice2_Tx Mixer"},
 
 	{"VoLTE_Tx Mixer", "PRI_TX_VoLTE", "PRI_I2S_TX"},
+	{"VoLTE_Tx Mixer", "SEC_MI2S_TX_VoLTE", "SEC_MI2S_TX"},
 	{"VoLTE_Tx Mixer", "SLIM_0_TX_VoLTE", "SLIMBUS_0_TX"},
 	{"VoLTE_Tx Mixer", "INTERNAL_BT_SCO_TX_VoLTE", "INT_BT_SCO_TX"},
 	{"VoLTE_Tx Mixer", "AFE_PCM_TX_VoLTE", "PCM_TX"},
@@ -14025,11 +14038,43 @@ static struct snd_soc_platform_driver msm_soc_routing_platform = {
 	.pcm_new	= msm_routing_pcm_new,
 	.pcm_free	= msm_routing_pcm_free,
 };
+// add by barry for at audio dsp cmd
+static ssize_t at_audio_dsp_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    
+    
+            return sprintf(buf, "%d\n",at_audiodsp_set);
+    
+}
+    
+    
 
+static ssize_t at_audio_dsp_store(struct device *dev, struct device_attribute *attr,
+                    const char *buf, size_t size)
+{
+     
+            unsigned long val;
+
+    
+     //       ret = strict_strtoul(buf, 0, &val);
+	    sscanf(buf, "%d", &val);
+            at_audiodsp_set = val;
+          
+  
+            return size;
+ }
+ static DEVICE_ATTR(at_audio_dsp, S_IRUGO | S_IWUSR, at_audio_dsp_show,at_audio_dsp_store);
 static int msm_routing_pcm_probe(struct platform_device *pdev)
 {
+   int ret;
 
 	dev_dbg(&pdev->dev, "dev name %s\n", dev_name(&pdev->dev));
+    ret =device_create_file(&pdev->dev,&dev_attr_at_audio_dsp);
+    if(ret < 0)
+    {
+        printk("at_audio_dsp create failed!\n");
+
+    }
 	return snd_soc_register_platform(&pdev->dev,
 				  &msm_soc_routing_platform);
 }

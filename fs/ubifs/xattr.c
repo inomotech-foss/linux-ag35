@@ -314,7 +314,7 @@ static int setxattr(struct inode *host, const char *name, const void *value,
 	union ubifs_key key;
 	int err, type;
 
-	ubifs_assert(mutex_is_locked(&host->i_mutex));
+	//ubifs_assert(mutex_is_locked(&host->i_mutex));
 
 	if (size > UBIFS_MAX_INO_DATA)
 		return -ERANGE;
