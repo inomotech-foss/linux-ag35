@@ -630,6 +630,10 @@
 	status = "okay";
 };
 
+&venus {
+	status = "okay";
+};
+
 &watchdog {
 	clocks = <&sleep_clk>;
 };
