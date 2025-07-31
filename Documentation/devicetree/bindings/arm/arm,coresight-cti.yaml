@@ -84,7 +84,9 @@ properties:
           - const: arm,coresight-cti
           - const: arm,primecell
       - items:
-          - const: arm,coresight-cti-v8-arch
+          - enum:
+              - arm,coresight-cti-v8-arch
+              - qcom,coresight-cti-extended
           - const: arm,coresight-cti
           - const: arm,primecell
 
@@ -97,6 +99,10 @@ properties:
 
   power-domains:
     maxItems: 1
+
+  label:
+    description:
+      Description of a coresight device.
 
   arm,cti-ctm-id:
     $ref: /schemas/types.yaml#/definitions/uint32
