@@ -26,6 +26,8 @@
  * @dma: pointer to dma data
  * @burst_size: the crypto burst size
  * @pipe_pair_id: which pipe pair id the device using
+ * @base_dma: base DMA address
+ * @dma_size: size of memory mapped for DMA
  * @async_req_enqueue: invoked by every algorithm to enqueue a request
  * @async_req_done: invoked by every algorithm to finish its request
  */
@@ -42,6 +44,8 @@ struct qce_device {
 	struct qce_dma_data dma;
 	int burst_size;
 	unsigned int pipe_pair_id;
+	dma_addr_t base_dma;
+	size_t dma_size;
 	int (*async_req_enqueue)(struct qce_device *qce,
 				 struct crypto_async_request *req);
 	void (*async_req_done)(struct qce_device *qce, int ret);
@@ -60,5 +64,8 @@ struct qce_algo_ops {
 	void (*unregister_algs)(struct qce_device *qce);
 	int (*async_req_handle)(struct crypto_async_request *async_req);
 };
+
+void qce_bam_lock(struct qce_device *qce);
+void qce_bam_unlock(struct qce_device *qce);
 
 #endif /* _CORE_H_ */

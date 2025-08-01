@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+// // Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+
 
 #include <linux/acpi.h>
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
@@ -67,6 +70,7 @@ enum geni_i2c_err_code {
 	GENI_TIMEOUT,
 };
 
+#define I2C_DMA_TX_IRQ_MASK	GENMASK(12, 5)
 #define DM_I2C_CB_ERR		((BIT(NACK) | BIT(BUS_PROTO) | BIT(ARB_LOST)) \
 									<< 5)
 
@@ -99,6 +103,7 @@ struct geni_i2c_dev {
 	struct dma_chan *rx_c;
 	bool gpi_mode;
 	bool abort_done;
+	struct gpi_i2c_result i2c_result;
 };
 
 struct geni_i2c_desc {
@@ -498,9 +503,18 @@ static int geni_i2c_tx_one_msg(struct geni_i2c_dev *gi2c, struct i2c_msg *msg,
 
 static void i2c_gpi_cb_result(void *cb, const struct dmaengine_result *result)
 {
-	struct geni_i2c_dev *gi2c = cb;
+	struct gpi_i2c_result *i2c_res = cb;
+	struct geni_i2c_dev *gi2c = container_of(i2c_res, struct geni_i2c_dev, i2c_result);
+	u32 status;
 
-	if (result->result != DMA_TRANS_NOERROR) {
+	status = FIELD_GET(I2C_DMA_TX_IRQ_MASK, i2c_res->status);
+	if (status == BIT(NACK)) {
+		geni_i2c_err(gi2c, NACK);
+	} else if (status == BIT(BUS_PROTO)) {
+		geni_i2c_err(gi2c, BUS_PROTO);
+	} else if (status == BIT(ARB_LOST)) {
+		geni_i2c_err(gi2c, ARB_LOST);
+	} else if (result->result != DMA_TRANS_NOERROR) {
 		dev_err(gi2c->se.dev, "DMA txn failed:%d\n", result->result);
 		gi2c->err = -EIO;
 	} else if (result->residue) {
@@ -582,7 +596,7 @@ static int geni_i2c_gpi(struct geni_i2c_dev *gi2c, struct i2c_msg *msg,
 	}
 
 	desc->callback_result = i2c_gpi_cb_result;
-	desc->callback_param = gi2c;
+	desc->callback_param = &gi2c->i2c_result;
 
 	dmaengine_submit(desc);
 	*buf = dma_buf;
@@ -616,6 +630,7 @@ static int geni_i2c_gpi_xfer(struct geni_i2c_dev *gi2c, struct i2c_msg msgs[], i
 	peripheral.clk_div = itr->clk_div;
 	peripheral.set_config = 1;
 	peripheral.multi_msg = false;
+	peripheral.shared_se = gi2c->se.shared_geni_se;
 
 	for (i = 0; i < num; i++) {
 		gi2c->cur = &msgs[i];
@@ -626,6 +641,8 @@ static int geni_i2c_gpi_xfer(struct geni_i2c_dev *gi2c, struct i2c_msg msgs[], i
 		if (i < num - 1)
 			peripheral.stretch = 1;
 
+		peripheral.first_msg = (i == 0);
+		peripheral.last_msg = (i == num - 1);
 		peripheral.addr = msgs[i].addr;
 
 		ret =  geni_i2c_gpi(gi2c, &msgs[i], &config,
@@ -694,17 +711,31 @@ static int geni_i2c_xfer(struct i2c_adapter *adap,
 			 int num)
 {
 	struct geni_i2c_dev *gi2c = i2c_get_adapdata(adap);
+	struct device *dev = gi2c->se.dev;
 	int ret;
 
 	gi2c->err = 0;
 	reinit_completion(&gi2c->done);
-	ret = pm_runtime_get_sync(gi2c->se.dev);
-	if (ret < 0) {
-		dev_err(gi2c->se.dev, "error turning SE resources:%d\n", ret);
-		pm_runtime_put_noidle(gi2c->se.dev);
-		/* Set device in suspended since resume failed */
-		pm_runtime_set_suspended(gi2c->se.dev);
-		return ret;
+	/* During early resume stage, runtime PM is disabled and pm_runtime_get_sync()
+	 * returns error Hence use force_resume() and serve transfer.
+	 */
+	if (!pm_runtime_enabled(dev) && gi2c->suspended) {
+		#if (!IS_ENABLED(CONFIG_PM))
+		dev_dbg(dev, "Forced power ON, pm_usage_count: %d\n",
+				atomic_read(&dev->power.usage_count));
+		#endif
+		ret = pm_runtime_force_resume(dev);
+		if (ret)
+			return ret;
+	} else {
+		ret = pm_runtime_get_sync(gi2c->se.dev);
+		if (ret < 0) {
+			dev_err(gi2c->se.dev, "Error turning resources: %d\n", ret);
+			pm_runtime_put_noidle(gi2c->se.dev);
+			/* Set device in suspended since resume failed */
+			pm_runtime_set_suspended(gi2c->se.dev);
+			return ret;
+		}
 	}
 
 	qcom_geni_i2c_conf(gi2c);
@@ -714,8 +745,20 @@ static int geni_i2c_xfer(struct i2c_adapter *adap,
 	else
 		ret = geni_i2c_fifo_xfer(gi2c, msgs, num);
 
-	pm_runtime_mark_last_busy(gi2c->se.dev);
-	pm_runtime_put_autosuspend(gi2c->se.dev);
+	/* if Runtime PM is disabled, do force_suspend() else autosuspend the driver */
+	if (!pm_runtime_enabled(dev) && !gi2c->suspended) {
+		ret = pm_runtime_force_suspend(dev);
+		#if (!IS_ENABLED(CONFIG_PM))
+		dev_dbg(dev, "Forced power OFF, pm_usage_count: %d\n",
+			atomic_read(&dev->power.usage_count));
+		#endif
+		if (ret)
+			return ret;
+	} else {
+		pm_runtime_mark_last_busy(gi2c->se.dev);
+		pm_runtime_put_autosuspend(gi2c->se.dev);
+	}
+
 	gi2c->cur = NULL;
 	gi2c->err = 0;
 	return ret;
@@ -814,6 +857,11 @@ static int geni_i2c_probe(struct platform_device *pdev)
 		gi2c->clk_freq_out = I2C_MAX_STANDARD_MODE_FREQ;
 	}
 
+	if (of_property_read_bool(pdev->dev.of_node, "qcom,shared-se")) {
+		gi2c->se.shared_geni_se = true;
+		dev_dbg(&pdev->dev, "I2C is shared between subsystems\n");
+	}
+
 	if (has_acpi_companion(dev))
 		ACPI_COMPANION_SET(&gi2c->adap.dev, ACPI_COMPANION(dev));
 
@@ -832,7 +880,8 @@ static int geni_i2c_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, gi2c);
 
 	/* Keep interrupts disabled initially to allow for low-power modes */
-	ret = devm_request_irq(dev, gi2c->irq, geni_i2c_irq, IRQF_NO_AUTOEN,
+	ret = devm_request_irq(dev, gi2c->irq, geni_i2c_irq,
+			       IRQF_NO_AUTOEN | IRQF_EARLY_RESUME | IRQF_NO_SUSPEND,
 			       dev_name(dev), gi2c);
 	if (ret)
 		return dev_err_probe(dev, ret,
@@ -870,7 +919,13 @@ static int geni_i2c_probe(struct platform_device *pdev)
 		goto err_clk;
 	}
 	proto = geni_se_read_proto(&gi2c->se);
-	if (proto != GENI_SE_I2C) {
+	if (proto == GENI_SE_INVALID_PROTO) {
+		ret = geni_load_se_firmware(&gi2c->se, GENI_SE_I2C);
+		if (ret) {
+			dev_err_probe(dev, ret, "i2c firmware load failed ret: %d\n", ret);
+			goto err_resources;
+		}
+	} else if (proto != GENI_SE_I2C) {
 		ret = dev_err_probe(dev, -ENXIO, "Invalid proto %d\n", proto);
 		goto err_resources;
 	}
@@ -880,8 +935,11 @@ static int geni_i2c_probe(struct platform_device *pdev)
 	else
 		fifo_disable = readl_relaxed(gi2c->se.base + GENI_IF_DISABLE_RO) & FIFO_IF_DISABLE;
 
-	if (fifo_disable) {
-		/* FIFO is disabled, so we can only use GPI DMA */
+	if (fifo_disable || gi2c->se.shared_geni_se) {
+		/*
+		 * FIFO is disabled, so we can only use GPI DMA.
+		 * SE can be shared in GSI mode between subsystems, each SS owns a GPII.
+		 */
 		gi2c->gpi_mode = true;
 		ret = setup_gpi_dma(gi2c);
 		if (ret)
@@ -890,6 +948,12 @@ static int geni_i2c_probe(struct platform_device *pdev)
 		dev_dbg(dev, "Using GPI DMA mode for I2C\n");
 	} else {
 		gi2c->gpi_mode = false;
+
+		if (gi2c->se.shared_geni_se) {
+			dev_err(dev, "I2C sharing is not supported in non GSI mode\n");
+			return -EINVAL;
+		}
+
 		tx_depth = geni_se_get_tx_fifo_depth(&gi2c->se);
 
 		/* I2C Master Hub Serial Elements doesn't have the HW_PARAM_0 register */
