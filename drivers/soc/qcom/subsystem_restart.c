@@ -39,6 +39,7 @@
 
 #include <asm/current.h>
 
+#define QUECTEL_RESET_SYSTEM
 #include "peripheral-loader.h"
 
 #define DISABLE_SSR 0x9889deed
@@ -236,6 +237,7 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
 {
 	enum subsys_state state = to_subsys(dev)->track.state;
+	pr_info("[%p]: state %s\n", current, subsys_states[state]);
 	return snprintf(buf, PAGE_SIZE, "%s\n", subsys_states[state]);
 }
 
@@ -245,10 +247,32 @@ static ssize_t crash_count_show(struct device *dev,
 	return snprintf(buf, PAGE_SIZE, "%d\n", to_subsys(dev)->crash_count);
 }
 
+#ifdef QUECTEL_RESET_SYSTEM
+static int system_reset_mode = 1; //0 - dload, 1 - reset
+extern void quectel_set_system_reset_mode(int mode);
+static ssize_t
+system_reset_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+        return snprintf(buf, PAGE_SIZE, "%d\n", system_reset_mode);
+}
+
+static ssize_t system_reset_mode_store(struct device *dev,
+                struct device_attribute *attr, const char *buf, size_t count)
+{
+	sscanf(buf, "%d", &system_reset_mode);
+
+	quectel_set_system_reset_mode((system_reset_mode == 0) ? 1 : 0);
+
+        return count;
+}
+#endif
+
 static ssize_t
 restart_level_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	int level = to_subsys(dev)->restart_level;
+	
+	pr_info("[%p]: level %d\n", current, level);
 	return snprintf(buf, PAGE_SIZE, "%s\n", restart_levels[level]);
 }
 
@@ -365,6 +389,8 @@ static void subsys_set_state(struct subsys_device *subsys,
 			     enum subsys_state state)
 {
 	unsigned long flags;
+	
+	pr_info("[%p]: subsys_set_state %d\n", current, state);
 
 	spin_lock_irqsave(&subsys->track.s_lock, flags);
 	if (subsys->track.state != state) {
@@ -418,6 +444,9 @@ static struct device_attribute subsys_attrs[] = {
 	__ATTR(restart_level, 0644, restart_level_show, restart_level_store),
 	__ATTR(firmware_name, 0644, firmware_name_show, firmware_name_store),
 	__ATTR(system_debug, 0644, system_debug_show, system_debug_store),
+#ifdef QUECTEL_RESET_SYSTEM	
+	__ATTR(system_reset_mode, 0644, system_reset_mode_show, system_reset_mode_store),
+#endif
 	__ATTR(keep_alive, 0644, keep_alive_show, keep_alive_store),
 	__ATTR_NULL,
 };

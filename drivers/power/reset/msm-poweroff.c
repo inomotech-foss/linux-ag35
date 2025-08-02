@@ -45,6 +45,8 @@
 #define SCM_EDLOAD_MODE			0X01
 #define SCM_DLOAD_CMD			0x10
 
+#define QUECTEL_RESET_SYSTEM
+#define QUECTEL_POWER_DOWN
 
 static int restart_mode;
 static void *restart_reason;
@@ -60,7 +62,11 @@ static void scm_disable_sdi(void);
 * There is no API from TZ to re-enable the registers.
 * So the SDI cannot be re-enabled when it already by-passed.
 */
+#ifdef QUECTEL_RESET_SYSTEM
+static int download_mode = 0;
+#else
 static int download_mode = 1;
+#endif
 #else
 static const int download_mode;
 #endif
@@ -264,6 +270,14 @@ static void halt_spmi_pmic_arbiter(void)
 	}
 }
 
+#ifdef QUECTEL_RESET_SYSTEM
+void quectel_set_system_reset_mode(int mode)
+{
+	download_mode = mode;
+	set_dload_mode(download_mode);
+}
+#endif
+
 static void msm_restart_prepare(const char *cmd)
 {
 	bool need_warm_reset = false;
@@ -274,9 +288,13 @@ static void msm_restart_prepare(const char *cmd)
 	 * Write download mode flags if restart_mode says so
 	 * Kill download mode if master-kill switch is set
 	 */
-
+#ifndef QUECTEL_RESET_SYSTEM
 	set_dload_mode(download_mode &&
 			(in_panic || restart_mode == RESTART_DLOAD));
+#else
+	set_dload_mode((restart_mode == RESTART_DLOAD) || (in_panic && download_mode));
+#endif
+
 #endif
 
 	if (qpnp_pon_check_hard_reset_stored()) {
@@ -502,6 +520,32 @@ RESET_ATTR(power_off, 0644, NULL, store_power_off);
 #endif
 //end jun.wu
 
+#ifdef QUECTEL_POWER_DOWN
+static int system_power_downed = 0;
+
+int quec_system_power_downed(void) {
+
+	return system_power_downed;
+}
+
+static ssize_t system_power_downed_show(struct kobject *kobj, struct attribute *attr,
+				char *buf) {
+
+	return snprintf(buf, sizeof(system_power_downed), "%u\n", system_power_downed);
+}
+
+static ssize_t system_power_downed_store(struct device *dev,
+                struct device_attribute *attr, const char *buf, size_t count) {
+
+	sscanf(buf, "%d", &system_power_downed);
+
+    return count;
+}
+
+RESET_ATTR(power_downed, 0644, system_power_downed_show, system_power_downed_store);
+
+#endif
+
 static struct attribute *reset_attrs[] = {
 	&reset_attr_emmc_dload.attr,
 //2016-04-04, add by jun.wu
@@ -509,6 +553,11 @@ static struct attribute *reset_attrs[] = {
 	&reset_attr_power_off.attr,
 #endif
 //end jun.wu
+
+#ifdef QUECTEL_POWER_DOWN
+	&reset_attr_power_downed.attr,
+#endif
+
 	NULL
 };
 
