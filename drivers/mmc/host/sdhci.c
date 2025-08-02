@@ -4105,6 +4105,11 @@ int sdhci_add_host(struct sdhci_host *host)
 	    !(mmc->caps2 & MMC_CAP2_NONHOTPLUG))
 		mmc->caps |= MMC_CAP_NEEDS_POLL;
 
+	if(strncmp(mmc_hostname(mmc),"mmc0",4) == 0){
+		printk("quectel %s Polling is disabled on the first sdio port by default \r\n",__func__);
+		mmc->caps &= ~MMC_CAP_NEEDS_POLL;
+	}
+
 	/* If there are external regulators, get them */
 	if (mmc_regulator_get_supply(mmc) == -EPROBE_DEFER)
 		return -EPROBE_DEFER;
