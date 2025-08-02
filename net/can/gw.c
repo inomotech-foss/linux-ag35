@@ -454,7 +454,7 @@ static void can_can_gw_rcv(struct sk_buff *skb, void *data)
 
 	return;
 
-out_delete:
+ out_delete:
 	/* delete frame due to misconfiguration */
 	gwj->deleted_frames++;
 	kfree_skb(nskb);

@@ -3,8 +3,8 @@
 
 #include <net/net_namespace.h>
 
-static inline u32 net_hash_mix(const struct net *net)
+static inline unsigned int net_hash_mix(struct net *net)
 {
-       return net->hash_mix;
+	return net->hash_mix;
 }
 #endif
