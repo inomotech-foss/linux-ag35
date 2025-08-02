@@ -1788,7 +1788,7 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 	struct msm_nand_chip *chip = &info->nand_chip;
 	struct flash_identification *flash_dev = &info->flash_dev;
 	uint32_t cwperpage = (mtd->writesize >> 9);
-	int err, pageerr = 0, rawerr = 0, submitted_num_desc = 0, count = 0;
+	int err, pageerr = 0, rawerr = 0, submitted_num_desc = 0;
 	uint32_t n = 0, pages_read = 0;
 	uint32_t ecc_errors = 0, total_ecc_errors = 0, ecc_capability;
 	struct msm_nand_rw_params rw_params;
@@ -1843,7 +1843,9 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 	cmd_list = (struct msm_nand_rw_cmd_desc *)&dma_buffer->cmd_list;
 
 	ecc_capability = flash_dev->ecc_capability;
-
+	/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start (fixed 1)*/
+	uint32_t fix_page_count = 0;
+	/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 	while (rw_params.page_count-- > 0) {
 		uint32_t cw_desc_cnt = 0;
 
@@ -2036,7 +2038,10 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 			 * and this will only handle about 64 pages being read
 			 * at a time i.e. one erase block worth of pages.
 			 */
-			fix_data_in_pages |= BIT(pages_read);
+			/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start (fixed 2)*/
+			//fix_data_in_pages |= BIT(rw_params.page_count);
+			fix_data_in_pages |= BIT(fix_page_count);
+			/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 		}
 		/* check for correctable errors */
 		if (!rawerr) {
@@ -2083,6 +2088,9 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 			goto free_dma;
 		pages_read++;
 		rw_params.page++;
+		/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start (fixed 3)*/
+		fix_page_count++;
+		/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 	}
 	goto free_dma;
 put_dev:
@@ -2103,9 +2111,14 @@ free_dma:
 	 * it is most likely that the data is not all 0xff. So memset that
 	 * page to all 0xff.
 	 */
+	/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start(fixed 4)*/
+	int count = 0;
+	/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 	while (fix_data_in_pages) {
 		int temp_page = 0, oobsize = rw_params.cwperpage << 2;
+		/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start(fixed 5)*/
 		int offset = 0;
+		/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 
 		temp_page = fix_data_in_pages & BIT_MASK(0);
 		fix_data_in_pages = fix_data_in_pages >> 1;
@@ -2857,9 +2870,12 @@ static int msm_nand_block_isbad(struct mtd_info *mtd, loff_t ofs)
 		goto out;
 	}
 	if (ofs & (mtd->erasesize - 1)) {
-		pr_err("unsupported block address, 0x%x\n", (uint32_t)ofs);
-		bad_block = -EINVAL;
-		goto out;
+		//modified by baker.liu@20220401: support the page address is not aligned by block size. --- start ---
+		//pr_err("unsupported block address, 0x%x\n", (uint32_t)ofs);
+		//bad_block = -EINVAL;
+		//goto out;
+		page = (page / (mtd->erasesize / mtd->writesize)) * (mtd->erasesize / mtd->writesize);
+		//modified by baker.liu@20220401: support the page address is not aligned by block size. --- end ---
 	}
 
 	wait_event(chip->dma_wait_queue, (dma_buffer = msm_nand_get_dma_buffer(
