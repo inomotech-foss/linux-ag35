@@ -37,6 +37,12 @@
 	{.reg = xreg, .rreg = xreg, .shift = shift_left, \
 	.rshift = shift_right, .max = xmax, .platform_max = xmax, \
 	.invert = xinvert, .autodisable = xautodisable})
+//add yang start 2017-12-28
+#define SOC_SINGLE_VALUE_4(xreg, xshift, xmax, xinvert) \
+	((unsigned long)&(struct soc_mixer_control) \
+	{.reg = xreg, .shift = xshift, .rshift = xshift, .max = xmax, \
+	.platform_max = xmax, .invert = xinvert})
+//add yang  end 2017-12-28
 #define SOC_SINGLE_VALUE(xreg, xshift, xmax, xinvert, xautodisable) \
 	SOC_DOUBLE_VALUE(xreg, xshift, xshift, xmax, xinvert, xautodisable)
 #define SOC_SINGLE_VALUE_EXT(xreg, xmax, xinvert) \
@@ -538,6 +544,8 @@ struct snd_kcontrol *snd_soc_cnew(const struct snd_kcontrol_new *_template,
 				  const char *prefix);
 struct snd_kcontrol *snd_soc_card_get_kcontrol(struct snd_soc_card *soc_card,
 					       const char *name);
+int snd_soc_add_controls_1(struct snd_soc_codec *codec,
+const struct snd_kcontrol_new *controls, int num_controls);						   
 int snd_soc_add_component_controls(struct snd_soc_component *component,
 	const struct snd_kcontrol_new *controls, unsigned int num_controls);
 int snd_soc_add_codec_controls(struct snd_soc_codec *codec,
@@ -836,6 +844,13 @@ struct snd_soc_codec {
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *debugfs_reg;
 #endif
+//yang add 2017-12-28
+	struct snd_soc_card *card;
+	const char *name_prefix;
+	const char *name;
+	u32 cache_only;  /* Suppress writes to hardware */
+	unsigned int (*hw_read)(struct snd_soc_codec *, unsigned int);
+	//yang add end 2017-12-28
 };
 
 /* codec driver */
@@ -1243,6 +1258,10 @@ struct soc_enum {
 	unsigned int mask;
 	const char * const *texts;
 	const unsigned int *values;
+};
+enum snd_soc_control_type{
+	SND_SOC_I2C = 1,
+	SND_SOC_SPI,
 };
 
 /**

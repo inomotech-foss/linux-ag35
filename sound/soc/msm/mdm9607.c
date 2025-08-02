@@ -210,6 +210,9 @@ static atomic_t sec_tdm_ref_count;
 
 static int clk_users;
 
+/* achang-20180622, for using MCLK */
+static int quec_enable_mclk;
+
 static inline int param_is_mask(int p)
 {
 	return (p >= SNDRV_PCM_HW_PARAM_FIRST_MASK) &&
@@ -1650,6 +1653,13 @@ static void mdm_sec_auxpcm_shutdown(struct snd_pcm_substream *substream)
 	struct mdm_machine_data *pdata = snd_soc_card_get_drvdata(card);
 
 	if (atomic_dec_return(&sec_aux_ref_count) == 0) {
+		/* achang-20180622, for using MCLK*/
+		if (quec_enable_mclk) {
+			ret = mdm_sec_mi2s_clk_ctl(rtd, false, 0, pdata->sec_auxpcm_mode);
+			if (ret < 0)
+				pr_err("%s Clock disable failed\n", __func__);
+		}
+
 		if (pdata->sec_auxpcm_mode == 1)
 			ret = wcd_gpio_ctrl_select_sleep_state
 						(pdata->sec_master_p);
@@ -1695,12 +1705,27 @@ static int mdm_sec_auxpcm_startup(struct snd_pcm_substream *substream)
 				ret = -EINVAL;
 				goto err;
 			}
+			/* achang-20180622, for using MCLK*/
+			if (quec_enable_mclk) {
+				mdm_gpio_set_mux_ctl(pdata);
+			}
 		} else {
 			pr_err("%s lpaif_sec_muxsel_virt_addr is NULL\n",
 			       __func__);
 			ret = -EINVAL;
 			goto done;
 		}
+
+		/* achang-20180622, for using MCLK*/
+		if (quec_enable_mclk && pdata->sec_auxpcm_mode == 1) {
+			ret = mdm_sec_mi2s_clk_ctl(rtd, true,
+						mdm_auxpcm_rate, pdata->sec_auxpcm_mode);
+			if (ret < 0) {
+				pr_err("%s clock enable failed\n", __func__);
+				goto err;
+			}
+		}
+
 		if (pdata->sec_auxpcm_mode == 1) {
 			ret = wcd_gpio_ctrl_select_active_state
 						(pdata->sec_master_p);
@@ -1725,6 +1750,109 @@ done:
 	return ret;
 }
 
+/* achang-20180611, add to configure clock and fmt of codecs */
+static int mdm_sec_auxpcm_hw_params(struct snd_pcm_substream *substream,
+		struct snd_pcm_hw_params *params)
+
+{
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_codec *codec = rtd->codec;
+	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct snd_soc_card *card = rtd->card;
+	struct mdm_machine_data *pdata = snd_soc_card_get_drvdata(card);
+	char *codec_dev_driver_name = (char *)codec->dev->driver->name;
+	unsigned int fmt;
+	int ret = 0;
+
+	pr_info("%s dev driver name:%s\n", __func__,
+			codec_dev_driver_name);
+
+	if (!strcmp(codec_dev_driver_name, "nau8810")) {
+		/* set codec DAI configuration */
+		if (pdata->sec_auxpcm_mode == 1) {
+			fmt = SND_SOC_DAIFMT_CBS_CFS|
+				SND_SOC_DAIFMT_IB_NF|
+				SND_SOC_DAIFMT_DSP_A;
+		} else {
+			fmt = SND_SOC_DAIFMT_CBM_CFM|
+				SND_SOC_DAIFMT_IB_NF|
+				SND_SOC_DAIFMT_DSP_A;
+		}
+		ret = snd_soc_dai_set_fmt(codec_dai, fmt);
+		if (ret < 0)
+			return ret;
+
+		/* set the codec system clock */
+		ret = snd_soc_dai_set_sysclk(codec_dai, 0,
+				params_rate(params) * 256,
+				SND_SOC_CLOCK_IN);
+		if (ret < 0)
+			return ret;
+	} else if (!strcmp(codec_dev_driver_name, "rt5616")) {
+		if (pdata->sec_auxpcm_mode == 1) {
+			fmt = SND_SOC_DAIFMT_CBS_CFS|
+				SND_SOC_DAIFMT_IB_NF|
+				SND_SOC_DAIFMT_DSP_A;
+		} else {
+			fmt = SND_SOC_DAIFMT_CBM_CFM|
+				SND_SOC_DAIFMT_IB_NF|
+				SND_SOC_DAIFMT_DSP_A;
+		}
+		ret = snd_soc_dai_set_fmt(codec_dai, fmt);
+		if (ret < 0)
+			return ret;
+
+		/* set the codec FLL */
+		ret = snd_soc_dai_set_pll(codec_dai, 0, 1, 2048000,
+				params_rate(params) * 256);
+		if (ret < 0)
+			return ret;
+
+		/* set the codec system clock */
+		ret = snd_soc_dai_set_sysclk(codec_dai, 1,
+				params_rate(params) * 256, SND_SOC_CLOCK_IN);
+		if (ret < 0)
+			return ret;
+	} else if (!strcmp(codec_dev_driver_name, "tlv320aic3x-codec")) {
+		if (pdata->sec_auxpcm_mode == 1) {
+			fmt = SND_SOC_DAIFMT_CBS_CFS|
+				SND_SOC_DAIFMT_IB_NF|
+				SND_SOC_DAIFMT_DSP_A;
+		} else {
+			fmt = SND_SOC_DAIFMT_CBM_CFM|
+				SND_SOC_DAIFMT_IB_NF|
+				SND_SOC_DAIFMT_DSP_A;
+		}
+		ret = snd_soc_dai_set_fmt(codec_dai, fmt);
+		if (ret < 0)
+			return ret;
+
+		/* set the codec system clock */
+		ret = snd_soc_dai_set_sysclk(codec_dai, 2,
+				params_rate(params) * 256, SND_SOC_CLOCK_IN);
+		if (ret < 0)
+			return ret;
+	} else if (!strcmp(codec_dev_driver_name, "max9867")) {
+		if (pdata->sec_auxpcm_mode == 1) {
+			fmt |= SND_SOC_DAIFMT_CBS_CFS;
+		} else if (pdata->sec_auxpcm_mode == 0) {
+			fmt |= SND_SOC_DAIFMT_CBM_CFM;
+		}
+
+		fmt |= SND_SOC_DAIFMT_NB_NF;
+		fmt |= SND_SOC_DAIFMT_DSP_A;
+		ret = snd_soc_dai_set_fmt(codec_dai, fmt);
+		if (ret < 0)
+			return ret;
+
+		ret = snd_soc_dai_set_sysclk(codec_dai, 0, pdata->mclk_freq, 0);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}
+
 static struct snd_soc_ops mdm_auxpcm_be_ops = {
 	.startup = mdm_auxpcm_startup,
 	.shutdown = mdm_auxpcm_shutdown,
@@ -1733,6 +1861,8 @@ static struct snd_soc_ops mdm_auxpcm_be_ops = {
 static struct snd_soc_ops mdm_sec_auxpcm_be_ops = {
 	.startup = mdm_sec_auxpcm_startup,
 	.shutdown = mdm_sec_auxpcm_shutdown,
+	/* achang-20180611, add to configure clock and fmt of codecs */
+	.hw_params = mdm_sec_auxpcm_hw_params,
 };
 
 static int mdm_auxpcm_rate_get(struct snd_kcontrol *kcontrol,
@@ -3236,6 +3366,133 @@ static struct snd_soc_dai_link mdm_9306_dai[] = {
 	},
 };
 
+/* achang-20180622, for audio bring up , (start)*/
+static int mdm_sec_auxpcm_init(struct snd_soc_pcm_runtime *rtd)
+{
+	int ret = 0;
+	struct snd_soc_codec *codec = rtd->codec;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+
+	pr_debug("%s dev_name %s\n", __func__, dev_name(cpu_dai->dev));
+
+	pr_info("%s: codec driver name = %s\n", __func__, codec->dev->driver->name);
+	if(!strcmp(codec->dev->driver->name, "max9867")) {
+		quec_enable_mclk = 1;	
+	} else {
+		quec_enable_mclk = 0;	
+	}
+
+	rtd->pmdown_time = 0;
+	ret = snd_soc_add_codec_controls(codec, mdm_snd_controls,
+					 ARRAY_SIZE(mdm_snd_controls));
+	if (ret < 0) {
+		pr_err("%s: add_codec_controls failed, %d\n",
+			__func__, ret);
+		goto done;
+	}
+
+done:
+	return ret;
+}
+static struct snd_soc_dai_link mdm_quectel_dai[] = {
+	/* Backend DAI Links */
+	{
+		.name = LPASS_BE_SEC_AUXPCM_RX,
+		.stream_name = "Sec AUX PCM Playback",
+		.cpu_dai_name = "msm-dai-q6-auxpcm.2",
+		.platform_name = "msm-pcm-routing",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-rx",
+		.no_pcm = 1,
+		.dpcm_playback = 1,
+		.be_id = MSM_BACKEND_DAI_SEC_AUXPCM_RX,
+		.init  = &mdm_sec_auxpcm_init,
+		.be_hw_params_fixup = mdm_auxpcm_be_params_fixup,
+		.ops = &mdm_sec_auxpcm_be_ops,
+		.ignore_pmdown_time = 1,
+		.ignore_suspend = 1,
+	},
+	{
+		.name = LPASS_BE_SEC_AUXPCM_TX,
+		.stream_name = "Sec AUX PCM Capture",
+		.cpu_dai_name = "msm-dai-q6-auxpcm.2",
+		.platform_name = "msm-pcm-routing",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-tx",
+		.no_pcm = 1,
+		.dpcm_capture = 1,
+		.be_id = MSM_BACKEND_DAI_SEC_AUXPCM_TX,
+		.be_hw_params_fixup = mdm_auxpcm_be_params_fixup,
+		.ops = &mdm_sec_auxpcm_be_ops,
+		.ignore_suspend = 1,
+	},
+	{
+		.name = LPASS_BE_SEC_MI2S_RX,
+		.stream_name = "Secondary MI2S Playback",
+		.cpu_dai_name = "msm-dai-q6-mi2s.1",
+		.platform_name = "msm-pcm-routing",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-rx",
+		.no_pcm = 1,
+		.dpcm_playback = 1,
+		.be_id = MSM_BACKEND_DAI_SECONDARY_MI2S_RX,
+//		.init = &mdm_sec_i2s_init,
+		.be_hw_params_fixup = &mdm_sec_mi2s_rx_be_hw_params_fixup,
+		.ops = &mdm_sec_mi2s_be_ops,
+		.ignore_pmdown_time = 1,
+		.ignore_suspend = 1,
+	},
+	{
+		.name = LPASS_BE_SEC_MI2S_TX,
+		.stream_name = "Secondary MI2S Capture",
+		.cpu_dai_name = "msm-dai-q6-mi2s.1",
+		.platform_name = "msm-pcm-routing",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-tx",
+		.no_pcm = 1,
+		.dpcm_capture = 1,
+		.be_id = MSM_BACKEND_DAI_SECONDARY_MI2S_TX,
+		.be_hw_params_fixup = &mdm_sec_mi2s_tx_be_hw_params_fixup,
+		.ops = &mdm_sec_mi2s_be_ops,
+		.ignore_pmdown_time = 1,
+		.ignore_suspend = 1,
+	},
+};
+static char quec_codec_name[32];
+static char quec_rx_dai_name[32];
+static char quec_tx_dai_name[32];
+void quec_set_codec_info(const char* codec_name, const char* dai_name)
+{
+	if((codec_name == NULL) || (dai_name == NULL)) {
+		pr_err("%s: codec_name or dai_name is NULL\n", __func__);
+		return;
+	}
+
+	if((strlen(codec_name) >= sizeof(quec_codec_name)) || 
+			(strlen(dai_name) >= sizeof(quec_rx_dai_name))) {
+		pr_err("%s:codec_name or dai_name is itoo long\n", __func__);
+	
+	}
+
+	pr_info("%s: codec = %s, dai = %s\n", __func__, codec_name, dai_name);
+
+	strlcpy(quec_codec_name, codec_name, sizeof(quec_codec_name));
+	strlcpy(quec_rx_dai_name, dai_name, sizeof(quec_rx_dai_name));
+	strlcpy(quec_tx_dai_name, dai_name, sizeof(quec_tx_dai_name));
+
+	mdm_quectel_dai[0].codec_name = quec_codec_name;
+	mdm_quectel_dai[0].codec_dai_name = quec_rx_dai_name;
+	mdm_quectel_dai[1].codec_name = quec_codec_name;
+	mdm_quectel_dai[1].codec_dai_name = quec_tx_dai_name;
+
+	mdm_quectel_dai[2].codec_name = quec_codec_name;
+	mdm_quectel_dai[2].codec_dai_name = quec_rx_dai_name;
+	mdm_quectel_dai[3].codec_name = quec_codec_name;
+	mdm_quectel_dai[3].codec_dai_name = quec_rx_dai_name;
+}
+EXPORT_SYMBOL_GPL(quec_set_codec_info);
+/* achang-20180622, for audio bring up , (end)*/
+
 static struct snd_soc_dai_link mdm_tomtom_dai_links[
 				ARRAY_SIZE(mdm_dai) +
 				ARRAY_SIZE(mdm_9330_dai)];
@@ -3365,6 +3622,8 @@ static struct snd_soc_card *populate_snd_card_dailinks(struct device *dev)
 	}
 
 	if (!strcmp(match->data, "tomtom_codec")) {
+/* achang-20180622, for audio bring up , (start)*/
+#if 0
 		card = &snd_soc_card_mdm_9330;
 		len_1 = ARRAY_SIZE(mdm_dai);
 		len_2 = len_1 + ARRAY_SIZE(mdm_9330_dai);
@@ -3374,6 +3633,31 @@ static struct snd_soc_card *populate_snd_card_dailinks(struct device *dev)
 		memcpy(mdm_tomtom_dai_links + len_1, mdm_9330_dai,
 			   sizeof(mdm_9330_dai));
 		dailink = mdm_tomtom_dai_links;
+#else
+		int i;
+		card = &snd_soc_card_mdm_9330;
+		len_1 = len_2 = ARRAY_SIZE(mdm_dai);
+		for (i = 0; i < len_1; i++) {
+			if (!strcmp(mdm_dai[i].name, mdm_quectel_dai[0].name)) {
+				memcpy(&mdm_dai[i], &mdm_quectel_dai[0], 
+				sizeof(struct snd_soc_dai_link));
+			} else if (!strcmp(mdm_dai[i].name, mdm_quectel_dai[1].name)) {
+				memcpy(&mdm_dai[i], &mdm_quectel_dai[1], 
+				sizeof(struct snd_soc_dai_link));
+			}else if( !strcmp(mdm_dai[i].name, mdm_quectel_dai[2].name))
+			{
+				memcpy(&mdm_dai[i], &mdm_quectel_dai[2], 
+				sizeof(struct snd_soc_dai_link)); 
+			}
+			else if(!strcmp(mdm_dai[i].name, mdm_quectel_dai[3].name))
+           		{
+				memcpy(&mdm_dai[i], &mdm_quectel_dai[3], 
+				sizeof(struct snd_soc_dai_link));
+			}
+		}
+		dailink = mdm_dai;
+#endif
+/* achang-20180622, for audio bring up , (end)*/
 
 	} else if (!strcmp(match->data, "tapan_codec")) {
 		card = &snd_soc_card_mdm_9306;
@@ -3394,6 +3678,131 @@ static struct snd_soc_card *populate_snd_card_dailinks(struct device *dev)
 
 	return card;
 }
+
+/* achang-20180622, some attrs, (start)*/
+static ssize_t quec_codec_name_show(struct device *pdev,
+		struct device_attribute *attr, char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%s\n", quec_codec_name);
+}
+static ssize_t quec_codec_name_store(struct device *pdev, 
+		struct device_attribute *attr, const char *buff, size_t size)
+{
+
+    return size;
+}
+static ssize_t quec_rx_dai_name_show(struct device *pdev, 
+		struct device_attribute *attr, char *buf)
+{
+    return snprintf(buf, PAGE_SIZE, "%s\n", quec_rx_dai_name);
+}
+static ssize_t quec_rx_dai_name_store(struct device *pdev, 
+		struct device_attribute *attr, const char *buff, size_t size)
+{
+    return size;
+}
+static ssize_t quec_tx_dai_name_show(struct device *pdev, 
+		struct device_attribute *attr, char *buf)
+{
+    return snprintf(buf, PAGE_SIZE, "%s\n", quec_tx_dai_name);
+}
+static ssize_t quec_tx_dai_name_store(struct device *pdev, 
+		struct device_attribute *attr, const char *buff, size_t size)
+{
+    return size;
+}
+static ssize_t quec_pcm_mode_select_show(struct device *pdev, 
+		struct device_attribute *attr, char *buf)
+{
+    return snprintf(buf, PAGE_SIZE, "%d\n", mdm_sec_auxpcm_mode);
+}
+static ssize_t quec_pcm_mode_select_store(struct device *pdev, 
+		struct device_attribute *attr, const char *buff, size_t size)
+{
+    int mode = 0;
+
+    sscanf(buff, "%d", &mode);
+
+    pr_info("%s, mode: %d\n",__func__, mode);
+    if(mode == I2S_PCM_SLAVE_MODE || mode == I2S_PCM_MASTER_MODE)
+    {
+        mdm_sec_auxpcm_mode = (u16)mode;
+    }
+    else
+    {
+        pr_err("mode error");
+    }
+
+    return size;
+}
+static ssize_t quec_quec_auxpcm_rate_show(struct device *pdev, 
+		struct device_attribute *attr, char *buf)
+{
+    return snprintf(buf, PAGE_SIZE, "%d\n", mdm_auxpcm_rate);
+}
+static ssize_t quec_quec_auxpcm_rate_store(struct device *pdev, 
+		struct device_attribute *attr, const char *buff, size_t size)
+{
+    sscanf(buff, "%d", &mdm_auxpcm_rate);
+    pr_info("%s,mdm_auxpcm_rate=%d\n", __FUNCTION__, mdm_auxpcm_rate);
+    return size;
+}
+static ssize_t quec_i2s_mclk_en_show(struct device *pdev, 
+		struct device_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%d\n", quec_enable_mclk);
+}
+static ssize_t quec_i2s_mclk_en_store(struct device *pdev, 
+		struct device_attribute *attr, const char *buff, size_t size)
+{
+    int val;
+
+    if (size <= 0)
+	return -EINVAL;
+
+    val = buff[0] - '0'; // we only care the first char
+    if (val == 0)
+	quec_enable_mclk = 0;
+    else if (val == 1)
+	quec_enable_mclk = 1;
+
+    pr_info("%s,%d\n", __FUNCTION__, quec_enable_mclk);
+    return size;
+}
+static DEVICE_ATTR(codec_name, S_IRUGO | S_IWUSR, 
+		quec_codec_name_show, quec_codec_name_store);
+static DEVICE_ATTR(rx_dai_name,  S_IRUGO | S_IWUSR,
+		quec_rx_dai_name_show, quec_rx_dai_name_store);
+static DEVICE_ATTR(tx_dai_name,  S_IRUGO | S_IWUSR, 
+		quec_tx_dai_name_show, quec_tx_dai_name_store);
+static DEVICE_ATTR(pcm_mode_select,  S_IRUGO | S_IWUSR, 
+		quec_pcm_mode_select_show, quec_pcm_mode_select_store);
+static DEVICE_ATTR(quec_auxpcm_rate,  S_IRUGO | S_IWUSR, 
+		quec_quec_auxpcm_rate_show, quec_quec_auxpcm_rate_store);
+static DEVICE_ATTR(i2s_mclk,  S_IRUGO | S_IWUSR, 
+		quec_i2s_mclk_en_show, quec_i2s_mclk_en_store);
+static struct device_attribute *quec_sysfs_attributes[] = {
+    &dev_attr_codec_name,
+    &dev_attr_rx_dai_name,
+    &dev_attr_tx_dai_name,
+    &dev_attr_pcm_mode_select,
+    &dev_attr_quec_auxpcm_rate,
+    &dev_attr_i2s_mclk,
+};
+static int quectel_create_sysfs_interface(struct device *dev)
+{
+    int i, err;
+
+	for (i = 0; i < ARRAY_SIZE(quec_sysfs_attributes); i++) {
+		err = device_create_file(dev, quec_sysfs_attributes[i]);
+		if (err) {
+			pr_err("%s: fail, error: %d\n", __func__, err);
+			return err;
+		}
+	}
+    return 0;
+}
+/* achang-20180622, some attrs, (end)*/
 
 static int mdm_asoc_machine_probe(struct platform_device *pdev)
 {
@@ -3485,9 +3894,11 @@ static int mdm_asoc_machine_probe(struct platform_device *pdev)
 	ret = snd_soc_of_parse_card_name(card, "qcom,model");
 	if (ret)
 		goto err;
+#if 0 // achang-20180622, for audio bring up
 	ret = snd_soc_of_parse_audio_routing(card, "qcom,audio-routing");
 	if (ret)
 		goto err;
+#endif
 	ret = mdm_populate_dai_link_component_of_node(card);
 	if (ret) {
 		ret = -EPROBE_DEFER;
@@ -3550,6 +3961,9 @@ static int mdm_asoc_machine_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "snd_soc_register_card failed (%d)\n", ret);
 		goto err7;
 	}
+
+	/* achang-20180622, create some attrs interfaces */
+	quectel_create_sysfs_interface(card->dev);
 
 	return 0;
 err7:

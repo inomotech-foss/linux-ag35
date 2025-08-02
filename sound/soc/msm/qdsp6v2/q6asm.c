@@ -2513,14 +2513,16 @@ EXPORT_SYMBOL(q6asm_open_read_v3);
  * @format: encoder format
  * @bits_per_sample: bit width of capture session
  */
+// 20190805-larryzhang: add qcom patch for 8k-record network downlink sound
 int q6asm_open_read_v4(struct audio_client *ac, uint32_t format,
-			uint16_t bits_per_sample)
+			uint16_t bits_per_sample, bool ts_mode)
 {
 	return __q6asm_open_read(ac, format, bits_per_sample,
 				 PCM_MEDIA_FORMAT_V4 /*media fmt block ver*/,
-				 true/*ts_mode*/);
+				 ts_mode);
 }
 EXPORT_SYMBOL(q6asm_open_read_v4);
+//end
 
 int q6asm_open_write_compressed(struct audio_client *ac, uint32_t format,
 				uint32_t passthrough_flag)

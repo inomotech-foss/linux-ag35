@@ -466,7 +466,7 @@ static int msm_pcm_capture_prepare(struct snd_pcm_substream *substream)
 		case (Q6_SUBSYS_AVS2_8):
 			ret = q6asm_open_read_v4(prtd->audio_client,
 					FORMAT_LINEAR_PCM,
-					bits_per_sample);
+					bits_per_sample, false);    //2019-08-05-larryzhang: add qcom patch for 8k-record network downlink sound
 
 			break;
 		case (Q6_SUBSYS_INVALID):
