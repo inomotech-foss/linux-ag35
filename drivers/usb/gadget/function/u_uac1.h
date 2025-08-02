@@ -23,6 +23,8 @@
 
 #include "gadget_chips.h"
 
+#define QUECTEL_UAC_FEATURE //add yang.yang 2018-01-05 uac
+
 #define FILE_PCM_PLAYBACK	"/dev/snd/pcmC0D5p"
 #define FILE_PCM_CAPTURE	"/dev/snd/pcmC0D6c"
 #define FILE_CONTROL		"/dev/snd/controlC0"
@@ -61,6 +63,11 @@ struct gaudio {
 
 	bool				audio_reinit_capture;
 	bool				audio_reinit_playback;
+#ifdef QUECTEL_UAC_FEATURE
+	int					usb_snd_opened;
+	int					usb_snd_setuped;
+#endif
+
 	/* TODO */
 };
 

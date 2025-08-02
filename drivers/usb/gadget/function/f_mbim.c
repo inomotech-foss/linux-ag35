@@ -457,7 +457,11 @@ static struct usb_descriptor_header *mbim_ss_function[] = {
 #define STRING_DATA_IDX	1
 
 static struct usb_string mbim_string_defs[] = {
+#if 0 //will.shao, for quectel mbim discriptor
 	[STRING_CTRL_IDX].s = "MBIM Control",
+#else
+	[STRING_CTRL_IDX].s = "LTE Module",
+#endif
 	[STRING_DATA_IDX].s = "MBIM Data",
 	{  } /* end of list */
 };
@@ -874,10 +878,18 @@ fmbim_cmd_complete(struct usb_ep *ep, struct usb_request *req)
 	 * However don't drop first command during bootup as file may not be
 	 * opened by now. Queue the command in this case.
 	 */
-	if (!atomic_read(&dev->open_excl) && first_command_sent) {
+	#if 0
+	if (!atomic_read(&dev->open_excl)/**Deleted by Yonglin Tan for MBIM issue** && first_command_sent*/) {
 		pr_err("mbim not opened yet, dropping cmd pkt = %d\n", len);
 		return;
 	}
+    #else
+	if (!atomic_read(&dev->open_excl)&& first_command_sent) {
+		pr_err("mbim not opened yet, dropping cmd pkt = %d\n", len);
+		return;
+	}
+    #endif
+    
 	if (!first_command_sent)
 		first_command_sent = true;
 
