@@ -479,8 +479,36 @@ static size_t store_emmc_dload(struct kobject *kobj, struct attribute *attr,
 }
 RESET_ATTR(emmc_dload, 0644, show_emmc_dload, store_emmc_dload);
 
+//2016-04-04, add by jun.wu
+#ifdef CONFIG_QUECTEL_POWER_DRIVER
+static size_t store_power_off(struct kobject *kobj, struct attribute *attr,
+				const char *buf, size_t count)
+{
+	uint32_t power_off;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &power_off);
+	if (ret < 0)
+		return ret;
+
+	if (power_off != 1)
+		return -EINVAL;
+
+	do_msm_poweroff();
+
+	return count;
+}
+RESET_ATTR(power_off, 0644, NULL, store_power_off);
+#endif
+//end jun.wu
+
 static struct attribute *reset_attrs[] = {
 	&reset_attr_emmc_dload.attr,
+//2016-04-04, add by jun.wu
+#ifdef CONFIG_QUECTEL_POWER_DRIVER
+	&reset_attr_power_off.attr,
+#endif
+//end jun.wu
 	NULL
 };
 
@@ -522,8 +550,12 @@ static int msm_restart_probe(struct platform_device *pdev)
 	np = of_find_compatible_node(NULL, NULL,
 				"qcom,msm-imem-dload-type");
 	if (!np) {
+#ifdef CONFIG_QUECTEL_POWER_DRIVER
+	 	pr_err("unable to find DT imem dload-type node [QPOWD]continue create emmc_dload power_off dev\n");	
+#else
 		pr_err("unable to find DT imem dload-type node\n");
 		goto skip_sysfs_create;
+#endif
 	} else {
 		dload_type_addr = of_iomap(np, 0);
 		if (!dload_type_addr) {
