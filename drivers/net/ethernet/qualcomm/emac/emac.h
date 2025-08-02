@@ -220,6 +220,10 @@ enum emac_adapter_flags {
 	EMAC_FLAG_ADPT_TASK_REINIT_REQ,
 	EMAC_FLAG_ADPT_TASK_LSC_REQ,
 	EMAC_FLAG_ADPT_TASK_CHK_SGMII_REQ,
+	/* 20201111 bowen fix panic issue 
+	 * mac driver is handling interrupt, meanwhile,
+	 * mac driver is removing, add a flag to avoid panic */
+	EMAC_FLAG_ADPT_TASK_REMOVING,
 };
 
 /* emac shorthand bitops macros */

@@ -13,6 +13,12 @@
  *
  */
 
+/*===========================================================================
+    WHEN          WHO                      WHY
+------------   -----------  -----------------------------------------------
+2019/10/30      Mars.chen    pull down and up reticle,ping peer fail
+============================================================================*/
+
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
@@ -37,6 +43,8 @@
 #include <linux/atomic.h>
 
 #include <asm/irq.h>
+
+#include "../ethernet/qualcomm/emac/emac.h"
 
 static const char *phy_speed_to_str(int speed)
 {
@@ -102,6 +110,13 @@ static int phy_clear_interrupt(struct phy_device *phydev)
  */
 static int phy_config_interrupt(struct phy_device *phydev, u32 interrupts)
 {
+	/* 202011107 bowen fix deadlock issue internally */
+	if(!phydev->drv || !phydev->attached_dev) {
+		printk("attached dev is null\n");
+		return -1;
+	}
+	/* end */
+
 	phydev->interrupts = interrupts;
 	if (phydev->drv->config_intr)
 		return phydev->drv->config_intr(phydev);
@@ -664,6 +679,12 @@ void phy_change(struct work_struct *work)
 {
 	struct phy_device *phydev =
 		container_of(work, struct phy_device, phy_queue);
+	
+	/* 202011107 bowen fix deadlock issue internally */                                                                                                             
+	if (!phydev || !phydev->drv) {
+		printk("phydev or phydev->drv NULL\n");
+		return;
+	}
 
 	if (phydev->drv->did_interrupt &&
 	    !phydev->drv->did_interrupt(phydev))
@@ -771,9 +792,17 @@ void phy_state_machine(struct work_struct *work)
 {
 	struct delayed_work *dwork = to_delayed_work(work);
 	struct phy_device *phydev =
-			container_of(dwork, struct phy_device, state_queue);
+	                        	container_of(dwork, struct phy_device, state_queue);
+	struct emac_adapter *adpt = netdev_priv(phydev->attached_dev);
 	bool needs_aneg = false, do_suspend = false, do_resume = false;
-	int err = 0;
+	int old_link,err = 0;
+
+	/* 202011107 bowen fix deadlock issue internally */
+	if(!phydev->drv || !phydev->attached_dev){
+		printk("attached dev is null  \n");
+		return -1;
+	}
+	/* end */
 
 	mutex_lock(&phydev->lock);
 
@@ -864,6 +893,7 @@ void phy_state_machine(struct work_struct *work)
 			phydev->state = PHY_CHANGELINK;
 		break;
 	case PHY_CHANGELINK:
+            old_link = phydev->link;
 		err = phy_read_status(phydev);
 		if (err)
 			break;
@@ -875,6 +905,9 @@ void phy_state_machine(struct work_struct *work)
 			phydev->state = PHY_NOLINK;
 			netif_carrier_off(phydev->attached_dev);
 		}
+
+		if(old_link != phydev->link)            //2019-10-30 add by Mars.chen,if link state change,reset ADPT_TASK_LSC_REQ
+			SET_FLAG(adpt,ADPT_TASK_LSC_REQ);   //avoid phy link up but MAC not start,cause sgmii clean isr fail
 
 		phydev->adjust_link(phydev->attached_dev);
 
@@ -958,9 +991,19 @@ void phy_state_machine(struct work_struct *work)
 
 void phy_mac_interrupt(struct phy_device *phydev, int new_link)
 {
+	struct emac_adapter *adpt;
 	cancel_work_sync(&phydev->phy_queue);
 	phydev->link = new_link;
-	schedule_work(&phydev->phy_queue);
+    
+	/* 202011107 bowen fix deadlock issue internally */
+	if (!phydev->attached_dev) {
+		printk("attached device has been released\n");
+		return;
+	}
+
+	adpt = netdev_priv(phydev->attached_dev);  //2019-10-30 add by Mars.chen,if link state change,reset ADPT_TASK_LSC_REQ
+	SET_FLAG(adpt,ADPT_TASK_LSC_REQ);          //avoid phy link up but MAC not start,cause sgmii clean isr fail
+	schedule_work(&phydev->phy_queue); 
 }
 EXPORT_SYMBOL(phy_mac_interrupt);
 
