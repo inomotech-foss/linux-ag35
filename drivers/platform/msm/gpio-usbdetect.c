@@ -24,6 +24,12 @@
 #include <linux/power_supply.h>
 #include <linux/regulator/consumer.h>
 
+#define QUECTEL_SLEEP_CTRL
+
+#ifdef QUECTEL_SLEEP_CTRL
+#include <linux/delay.h>
+#endif
+
 #define VBUS_ON_DEBOUNCE_MS		400
 #define WAKEUP_SRC_TIMEOUT_MS		1000
 
@@ -47,6 +53,45 @@ struct gpio_usbdetect {
 
 	int			dpdm_switch_gpio;
 };
+
+//add by ron.zhang:2019-07-29:increase the api to set vbus state
+static ssize_t quectel_vbus_state_show(struct device *pdev, struct device_attribute *attr, char *buf) 
+{
+    struct gpio_usbdetect *usb = dev_get_drvdata(pdev);
+
+    return snprintf(buf, PAGE_SIZE, "%d\n", usb->vbus);
+}
+
+static ssize_t quectel_vbus_state_store(struct device *pdev, struct device_attribute *attr, const char *buff, size_t size) 
+{
+    int vbus_state;
+    struct gpio_usbdetect *usb = dev_get_drvdata(pdev);
+
+    sscanf(buff, "%d", &vbus_state);
+    vbus_state = (vbus_state != 0);
+    printk(KERN_ERR "%s,%s,%d\n",__FILE__,__FUNCTION__,__LINE__); 
+    if (usb->vbus != vbus_state) {
+        printk(KERN_ERR "%s,%s,%d\n",__FILE__,__FUNCTION__,__LINE__); 
+        unsigned long flags;
+        usb->vbus = vbus_state;
+        
+        local_irq_save(flags);
+        if (vbus_state){
+            printk(KERN_ERR "%s,%s,%d\n",__FILE__,__FUNCTION__,__LINE__); 
+            power_supply_set_supply_type(usb->usb_psy, POWER_SUPPLY_TYPE_USB);
+        } else {
+            printk(KERN_ERR "%s,%s,%d\n",__FILE__,__FUNCTION__,__LINE__); 
+            power_supply_set_supply_type(usb->usb_psy, POWER_SUPPLY_TYPE_UNKNOWN);
+        }
+        power_supply_set_present(usb->usb_psy, vbus_state);
+        local_irq_restore(flags);
+    }
+
+    return size;
+}
+
+static DEVICE_ATTR(vbus_state, 0664, quectel_vbus_state_show, quectel_vbus_state_store);
+//add by ron.zhang end
 
 static int gpio_enable_ldos(struct gpio_usbdetect *usb, int on)
 {
@@ -279,6 +324,10 @@ static int gpio_usbdetect_probe(struct platform_device *pdev)
 	int rc;
 	unsigned long flags;
 
+#ifdef QUECTEL_SLEEP_CTRL
+	mdelay(200);	
+#endif
+
 	usb_psy = power_supply_get_by_name("usb");
 	if (!usb_psy) {
 		dev_dbg(&pdev->dev, "USB power_supply not found, deferring probe\n");
@@ -380,6 +429,9 @@ static int gpio_usbdetect_probe(struct platform_device *pdev)
 	gpio_usbdetect_irq(usb->vbus_det_irq, usb);
 	local_irq_restore(flags);
 
+	/*add by ron.zhang:2019/07/29:for set vbus state*/
+	device_create_file(&pdev->dev, &dev_attr_vbus_state);
+	
 	return 0;
 
 disable_ldo:
@@ -391,6 +443,9 @@ disable_ldo:
 static int gpio_usbdetect_remove(struct platform_device *pdev)
 {
 	struct gpio_usbdetect *usb = dev_get_drvdata(&pdev->dev);
+
+	/*add by ron.zhang:2019/07/29*/
+	device_remove_file(&pdev->dev, &dev_attr_vbus_state);
 
 	device_wakeup_disable(&usb->pdev->dev);
 	disable_irq_wake(usb->vbus_det_irq);
