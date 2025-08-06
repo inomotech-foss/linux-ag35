@@ -9,7 +9,7 @@
 
 #include "gpiolib.h"
 
-//#include <quectel-features-config.h>	//version control need this header file
+#include <quectel-features-config.h>	//version control need this header file
 
 static DEFINE_IDR(dirent_idr);
 

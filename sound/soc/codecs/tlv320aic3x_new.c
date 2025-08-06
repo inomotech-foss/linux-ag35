@@ -1881,6 +1881,19 @@ static int aic3x_i2c_probe(struct i2c_client *i2c,
 	if (!aic3x)
 		return -ENOMEM;
 
+	ret = of_get_named_gpio(np, "quec,codec-reset-gpio", 0);
+	if (ret >= 0) {
+		aic3x->gpio_reset = ret;
+		ret = gpio_request(aic3x->gpio_reset, "tlv320aic3x reset");
+		if (ret != 0)
+			return -EIO;
+		gpio_direction_output(aic3x->gpio_reset, 0);
+		msleep(10);
+		gpio_direction_output(aic3x->gpio_reset, 1);
+		dev_info(&i2c->dev, "codec reset pin: %d\n", aic3x->gpio_reset);
+	} else 
+		aic3x->gpio_reset = -1;
+	
 	aic3x->regmap = devm_regmap_init_i2c(i2c, &aic3x_regmap);
 	if (IS_ERR(aic3x->regmap)) {
 		ret = PTR_ERR(aic3x->regmap);

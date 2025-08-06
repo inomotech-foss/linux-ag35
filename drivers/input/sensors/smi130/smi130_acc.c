@@ -1339,7 +1339,7 @@
 
 #define MAX_FIFO_F_LEVEL 32
 #define MAX_FIFO_F_BYTES 6
-#define SMI_ACC_MAX_RETRY_I2C_XFER (100)
+#define SMI_ACC_MAX_RETRY_I2C_XFER (2)
 
 #ifdef CONFIG_DOUBLE_TAP
 #define DEFAULT_TAP_JUDGE_PERIOD 1000    /* default judge in 1 second */

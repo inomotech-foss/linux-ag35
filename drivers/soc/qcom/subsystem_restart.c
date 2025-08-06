@@ -1739,10 +1739,13 @@ struct subsys_device *subsys_register(struct subsys_desc *desc)
     if(strncasecmp("modem", desc->name, sizeof("modem")) == 0)
     {
 		init_waitqueue_head(&quectel_check_modem_state_wait);
-		/*set default restart levle to 1, restart modem only */
-		pr_info("@Ramosr  set modem restart level 1");
-        subsys->restart_level = 0;//modify by dawn 2018-8-29 
-    }
+
+		/* Modify the default value of ModemRstLevel, the default action is changed to restart 
+		 * the whole module rather than resart the modem, it is necessary for Open solution that 
+		 * no external mcu, gale-2018-07-23*/
+		pr_info("@Ramosr  set modem restart level 0");
+        	subsys->restart_level = 0; 
+    	}
 #endif
 #endif
 

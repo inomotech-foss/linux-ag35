@@ -11,8 +11,8 @@
 #include "ql_branch_config.h"       // Priority Level: Medium2      |
 #include "ql_openlinux_config.h"    // Priority Level: Medium1      |
 #include "ql_custom_config.h"       // Priority Level: High         V
-#define QUECTEL_MEND_DTR_QCRMCALL //haroldcodeflag20190520
 
+#define QUECTEL_MEND_DTR_QCRMCALL //haroldcodeflag20190520
 #endif
 
 

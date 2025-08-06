@@ -479,6 +479,11 @@ void u_audio_clear(struct gaudio *card)
 	card->audio_reinit_capture = false;
 }
 
+#define PLAYBACK_FAILED 5
+#define CAPTURE_FAILED 5
+static int playback_failed = 0 ;
+static int capture_failed = 0 ;
+
 /**
  * Playback audio buffer data by ALSA PCM device
  */
@@ -523,6 +528,12 @@ size_t u_audio_playback(struct gaudio *card, void *buf, size_t count)
 	}
 
 try_again:
+    if(playback_failed == PLAYBACK_FAILED){
+        ERROR(card, "Playback error: playback_failed =  %d\n", playback_failed);
+        playback_failed = 0;
+        return 0;
+    }
+
 	if (runtime->status->state == SNDRV_PCM_STATE_XRUN ||
 		runtime->status->state == SNDRV_PCM_STATE_SUSPENDED ||
 		runtime->status->state == SNDRV_PCM_STATE_SETUP) {
@@ -550,6 +561,7 @@ try_again:
 	if (result != frames) {
 		ERROR(card, "Playback error: %d\n", (int)result);
 		set_fs(old_fs);
+        playback_failed++;
 		goto try_again;
 	}
 	set_fs(old_fs);
@@ -591,6 +603,12 @@ size_t u_audio_capture(struct gaudio *card, void *buf, size_t count)
 	}
 
 try_again:
+    if(capture_failed == CAPTURE_FAILED){
+        ERROR(card, "capture error: capture_failed =  %d\n", capture_failed);
+        capture_failed = 0;
+        return 0;
+    }
+
 	if (runtime->status->state == SNDRV_PCM_STATE_XRUN ||
 		runtime->status->state == SNDRV_PCM_STATE_SUSPENDED ||
 		runtime->status->state == SNDRV_PCM_STATE_SETUP) {
@@ -614,6 +632,7 @@ try_again:
 	if (result != frames) {
 		pr_err("Capture error: %d\n", (int)result);
 		set_fs(old_fs);
+		capture_failed++;
 		goto try_again;
 	}
 

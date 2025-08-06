@@ -3936,6 +3936,14 @@ void mmc_rescan(struct work_struct *work)
 	}
 	spin_unlock_irqrestore(&host->lock, flags);
 
+
+	if((host->caps & MMC_CAP_NEEDS_POLL) == 0 && (strncmp(mmc_hostname(host),"mmc0",4) == 0) && ((host->caps2 & MMC_CAP2_NONHOTPLUG) == 0 ))
+	{
+		printk("eyelyn   %s  disable polling\n",mmc_hostname(host));	
+		return;
+	}
+
+
 	/* If there is a non-removable card registered, only scan once */
 	if ((host->caps & MMC_CAP_NONREMOVABLE) && host->rescan_entered)
 		return;

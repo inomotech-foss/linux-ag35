@@ -13,6 +13,14 @@
 /* Qualcomm Technologies, Inc. EMAC Ethernet Controller driver.
  */
 
+/*==========================================================================
+                          EDIT HISTORY FOR MODULE
+when         who         what, where, why
+11/07/2020   bowen gu    deadlock issue patch fixed by quectel
+11/27/2020   bowen gu    in order to avoid phy state machine can't startup, whatever any phy, 
+                         every time when mac up/down happens, re-start phy state machine.
+============================================================================*/
+
 #include <linux/gpio.h>
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
@@ -44,6 +52,8 @@
 #include "emac_ptp.h"
 #include "emac_sgmii.h"
 
+#define BCM89832_PHY_ID      0x35905048
+
 #define EMAC_MSG_DEFAULT (NETIF_MSG_DRV | NETIF_MSG_PROBE | NETIF_MSG_LINK |  \
 		NETIF_MSG_TIMER | NETIF_MSG_IFDOWN | NETIF_MSG_IFUP |         \
 		NETIF_MSG_RX_ERR | NETIF_MSG_TX_ERR | NETIF_MSG_TX_QUEUED |   \
@@ -69,6 +79,9 @@
 #define EMAC_PINCTRL_STATE_MDIO_SLEEP  "emac_mdio_sleep"
 #define EMAC_PINCTRL_STATE_EPHY_ACTIVE "emac_ephy_active"
 #define EMAC_PINCTRL_STATE_EPHY_SLEEP  "emac_ephy_sleep"
+
+/* 202011107 bowen fix deadlock issue internally */
+#define EMAC_VERSION "1.0.6"
 
 struct emac_skb_cb {
 	u32           tpd_idx;
@@ -1910,15 +1923,23 @@ static void emac_adjust_link(struct net_device *netdev)
 	struct emac_hw *hw = &adpt->hw;
 	bool status_changed = false;
 
-	if (!TEST_FLAG(adpt, ADPT_TASK_LSC_REQ))
+	if (!TEST_FLAG(adpt, ADPT_TASK_LSC_REQ)) {
 		return;
+	}
 	CLR_FLAG(adpt, ADPT_TASK_LSC_REQ);
-
-	/* ensure that no reset is in progress while link task is running */
-	while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING))
+    
+    /* 202011107 bowen fix deadlock issue internally */
+	while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING)) {
+		if (TEST_FLAG(adpt, ADPT_STATE_DOWN)) {
+			printk("mac_down is ongoing and return directly\n");
+			return;
+		}
 		/* Reset might take few 10s of ms */
 		msleep(EMAC_ADPT_RESET_WAIT_TIME);
+	}
+	/* end */
 
+	/* ensure that no reset is in progress while link task is running */
 	if (TEST_FLAG(adpt, ADPT_STATE_DOWN))
 		goto link_task_done;
 
@@ -2088,19 +2109,24 @@ void emac_mac_down(struct emac_adapter *adpt, u32 ctrl)
 	 * an interrupt.
 	 */
 	emac_disable_intr(adpt);
+	/* 20201111 bowen fix panic issue 
+	 * wait emac thread to finish.
+	 */
+	msleep(10);
 	phy->ops.down(adpt);
 
 	for (i = 0; i < EMAC_NUM_CORE_IRQ; i++)
 		if (adpt->irq[i].irq)
 			free_irq(adpt->irq[i].irq, &adpt->irq[i]);
 
-	if (((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
-	     (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
-	     (ATH8035_PHY_ID == adpt->phydev->phy_id)) &&
-	   (adpt->phy.is_ext_phy_connect)) {
+    /* 20201107 bowen fix deadlock issue internally
+	 * 20201127 bowenthe phy state machine enters the wrong state, hence, whatever any phy,
+	 * every time when mac up/down happens, we need to disconnect phy state machine. */
+	if (adpt->phy.is_ext_phy_connect) {
 		phy_disconnect(adpt->phydev);
 		adpt->phy.is_ext_phy_connect = 0;
 	}
+	/* end */
 
 	CLR_FLAG(adpt, ADPT_TASK_LSC_REQ);
 	CLR_FLAG(adpt, ADPT_TASK_REINIT_REQ);
@@ -2175,7 +2201,8 @@ static int emac_close(struct net_device *netdev)
 	struct emac_adapter *adpt = netdev_priv(netdev);
 	struct emac_hw *hw = &adpt->hw;
 	struct emac_phy *phy = &adpt->phy;
-
+	
+    /* 202011107 bowen fix deadlock issue internally */
 	/* ensure no task is running and no reset is in progress */
 	while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING))
 		/* Reset might take few 10s of ms */
@@ -2364,6 +2391,12 @@ static void emac_work_thread(struct work_struct *work)
 
 	if (!TEST_FLAG(adpt, ADPT_STATE_WATCH_DOG))
 		emac_warn(adpt, timer, "flag STATE_WATCH_DOG doesn't set\n");
+	
+	/* 20201111 bowen fix panic issue */
+	if (TEST_FLAG(adpt, ADPT_TASK_REMOVING)) {
+		printk("%s %d removing emac is ongoing and return directly\n", __func__, __LINE__);
+		return;
+	}
 
 	emac_reinit_task_routine(adpt);
 
@@ -3145,6 +3178,8 @@ static int emac_probe(struct platform_device *pdev)
 	u8 i;
 	u32 hw_ver;
 
+	printk("emac driver version : %s\n", EMAC_VERSION);
+
 	/* The EMAC itself is capable of 64-bit DMA, so try that first. */
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (ret) {
@@ -3232,10 +3267,10 @@ static int emac_probe(struct platform_device *pdev)
 
 	/* Configure MDIO lines */
 	ret = adpt->gpio_on(adpt, true, true);
-	mdelay(20);
 	if (ret)
 		goto err_clk_init;
 
+	mdelay(20);
 	/* init external phy */
 	ret = emac_phy_config_external(pdev, adpt);
 	if (ret)
@@ -3273,6 +3308,8 @@ static int emac_probe(struct platform_device *pdev)
 
 	SET_FLAG(hw, HW_VLANSTRIP_EN);
 	SET_FLAG(adpt, ADPT_STATE_DOWN);
+	/* 20201111 bowen fix panic issue */
+	CLR_FLAG(adpt, ADPT_TASK_REMOVING);
 	strlcpy(netdev->name, "eth%d", sizeof(netdev->name));
 
 	pm_runtime_set_autosuspend_delay(&pdev->dev, EMAC_TRY_LINK_TIMEOUT);
@@ -3321,11 +3358,13 @@ err_init_mdio_gpio:
 err_clk_init:
 	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
+	    (BCM89832_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
 		emac_disable_clks(adpt);
 err_ldo_init:
 	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
+	    (BCM89832_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
 		emac_disable_regulator(adpt, EMAC_VREG1, EMAC_VREG5);
 err_get_resource:
@@ -3342,6 +3381,9 @@ static int emac_remove(struct platform_device *pdev)
 	struct emac_sgmii *sgmii = adpt->phy.private;
 	struct emac_phy *phy = &adpt->phy;
 	u32 i;
+
+	/* 20201111 bowen fix panic issue */
+	SET_FLAG(adpt, ADPT_TASK_REMOVING);
 
 	device_remove_file(&pdev->dev, &dev_attr_phy_regnum);
 

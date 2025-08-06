@@ -12,12 +12,6 @@ config QUECTEL_DRIVER
 
 if QUECTEL_DRIVER
 
-config LOW_POWER_CONSUME
-	bool "low power consume driver(Not Recommend)"
-	default n
-	---help---
-	  Low power consume driver, refer to KBA document.
-
 config LOW_POWER_CONSUME_V2
 	tristate "low power consume driver v2(Not Recommend)"
 	default m
@@ -30,15 +24,14 @@ config QL_LPM
 	---help---
 	  Quectel lpm driver, refer to document.
 
-config QL_SECURITY
-	tristate "quectel security features"
-	default y
+config QTZONE
+	bool "quectel trust zone support"
+	default n
 	---help---
-	  quectel security features, consult quectel engineer further.
+	  Trust zone function, consult quectel engineer further.
 
-config QL_TZONE
-	tristate "quectel trust zone support"
-	depends on QL_SECURITY
+config QTEE
+	bool "Quectel QTEE Driver"
 	default y
 	---help---
 	  Trust zone function, consult quectel engineer further.

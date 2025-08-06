@@ -31,6 +31,8 @@
 #include "rmnet_data_vnd.h"
 #include "rmnet_data_stats.h"
 #include "rmnet_data_trace.h"
+#include <linux/ip.h>
+#include <linux/inetdevice.h>
 
 RMNET_LOG_MODULE(RMNET_DATA_LOGMASK_VND);
 
@@ -172,6 +174,7 @@ static netdev_tx_t rmnet_vnd_start_xmit(struct sk_buff *skb,
 					struct net_device *dev)
 {
 	struct rmnet_vnd_private_s *dev_conf;
+	int ip_type;
 	trace_rmnet_vnd_start_xmit(skb);
 	dev_conf = (struct rmnet_vnd_private_s *) netdev_priv(dev);
 	if (dev_conf->local_ep.egress_dev) {
@@ -180,6 +183,25 @@ static netdev_tx_t rmnet_vnd_start_xmit(struct sk_buff *skb,
 			rmnet_vnd_add_qos_header(skb,
 						 dev,
 						 dev_conf->qos_version);
+		ip_type = (ip_hdr(skb)->version == 4) ?
+			AF_INET : AF_INET6;
+		/*Add by Quectel@20231210 start:for snat failed*/
+		if (ip_type == AF_INET && dev->ip_ptr &&
+				dev->ip_ptr->ifa_list) {
+			if (dev->ip_ptr->ifa_list->ifa_address == 0 ||
+					ip_hdr(skb)->saddr == 0 ||
+					ip_hdr(skb)->saddr !=
+					dev->ip_ptr->ifa_list->ifa_address) {
+				pr_debug("Quectel debug:ifname:%s, %x:%x drop\n",
+						dev->name,
+						dev->ip_ptr->ifa_list->ifa_address,
+						ip_hdr(skb)->saddr);
+				dev->stats.tx_dropped++;
+				rmnet_kfree_skb(skb, RMNET_STATS_SKBFREE_VND_NO_EGRESS);
+				return NETDEV_TX_OK;
+			}
+		}
+		/*Add by Quectel@20231210 end*/
 		rmnet_egress_handler(skb, &dev_conf->local_ep);
 	} else {
 		dev->stats.tx_dropped++;

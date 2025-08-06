@@ -394,7 +394,7 @@ int __genl_register_family(struct genl_family *family)
 					sizeof(struct nlattr *), GFP_KERNEL);
 		if (family->attrbuf == NULL) {
 			err = -ENOMEM;
-			goto errout_locked;
+			goto errout_free;
 		}
 	} else
 		family->attrbuf = NULL;
@@ -414,6 +414,8 @@ int __genl_register_family(struct genl_family *family)
 
 	return 0;
 
+errout_free:
+	kfree(family->attrbuf);
 errout_locked:
 	genl_unlock_all();
 errout:

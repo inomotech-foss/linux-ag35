@@ -483,6 +483,10 @@ void ubifs_dump_node(const struct ubifs_info *c, const void *node)
 		       (int)le16_to_cpu(dn->compr_type));
 		pr_err("\tdata size      %d\n", dlen);
 		pr_err("\tdata:\n");
+		/* If dlen is a negative value, it means that the data node size is 0 and will not to dump the node data. -- start --*/
+		if (dlen < 0)
+			break;
+		/* -- end --*/
 		print_hex_dump(KERN_ERR, "\t", DUMP_PREFIX_OFFSET, 32, 1,
 			       (void *)&dn->data, dlen, 0);
 		break;

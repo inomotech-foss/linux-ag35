@@ -41,6 +41,13 @@
 #include "decompressor.h"
 #include "page_actor.h"
 
+#include  <linux/genhd.h> //Quectel add 20180918
+#if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
+#include "../../drivers/mtd/ubi/ubi.h"
+extern int get_ubi_num_from_gd(struct gendisk *gd);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name, int mtd_nub,int where);
+#endif
+
 static struct workqueue_struct *squashfs_read_wq;
 
 struct squashfs_read_request {
@@ -160,6 +167,12 @@ static void squashfs_process_blocks(struct squashfs_read_request *req)
 			req->offset, req->length, actor);
 		if (req->length < 0) {
 			error = -EIO;
+			#if 1 //Ramos.zhang-20180918 add for system restore function  QUECTEL_SYSTEM_BACKUP
+			{
+				printk("@Quectel0125,func:%s,Line=%d, set mtd=%d,restore \r\n",__func__,__LINE__,ubi_get_device(get_ubi_num_from_gd(req->sb->s_bdev->bd_disk))->mtd->index);
+				Quectel_Set_Partition_RestoreFlag("", ubi_get_device(get_ubi_num_from_gd(req->sb->s_bdev->bd_disk))->mtd->index,6);
+			}
+                        #endif
 			goto cleanup;
 		}
 	}
@@ -236,10 +249,11 @@ static int actor_getblks(struct squashfs_read_request *req, u64 block)
 		 * contains NULL pages. There's no need to read the buffers
 		 * associated with these pages.
 		 */
-		if (!req->compressed && bh_is_optional(req, i)) {
-			req->bh[i] = NULL;
-			continue;
-		}
+		// Comment by Noah Dai: Some cases can cause squashfs not to mount properly
+		// if (!req->compressed && bh_is_optional(req, i)) {
+		// 	req->bh[i] = NULL;
+		// 	continue;
+		// }
 		req->bh[i] = sb_getblk(req->sb, block + i);
 		if (!req->bh[i]) {
 			while (--i) {
@@ -452,6 +466,12 @@ static int __squashfs_read_data(struct super_block *sb, u64 index, int length,
 	if (length < 0) {
 		ERROR("squashfs_read_data failed to read block 0x%llx\n",
 		      (unsigned long long)index);
+		#if 1 //Ramos.zhang-20180918 add for system restore function  QUECTEL_SYSTEM_BACKUP
+		{
+			printk("@Quectel0125,func:%s,Line=%d, set mtd=%d,restore \r\n",__func__,__LINE__,ubi_get_device(get_ubi_num_from_gd(sb->s_bdev->bd_disk))->mtd->index);
+			Quectel_Set_Partition_RestoreFlag("", ubi_get_device(get_ubi_num_from_gd(sb->s_bdev->bd_disk))->mtd->index,6);
+		}
+                #endif
 		return -EIO;
 	}
 

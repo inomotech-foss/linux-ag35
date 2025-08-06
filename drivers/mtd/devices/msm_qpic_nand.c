@@ -2870,9 +2870,12 @@ static int msm_nand_block_isbad(struct mtd_info *mtd, loff_t ofs)
 		goto out;
 	}
 	if (ofs & (mtd->erasesize - 1)) {
-		pr_err("unsupported block address, 0x%x\n", (uint32_t)ofs);
-		bad_block = -EINVAL;
-		goto out;
+		//modified by baker.liu@20220401: support the page address is not aligned by block size. --- start ---
+		//pr_err("unsupported block address, 0x%x\n", (uint32_t)ofs);
+		//bad_block = -EINVAL;
+		//goto out;
+		page = (page / (mtd->erasesize / mtd->writesize)) * (mtd->erasesize / mtd->writesize);
+		//modified by baker.liu@20220401: support the page address is not aligned by block size. --- end ---
 	}
 
 	wait_event(chip->dma_wait_queue, (dma_buffer = msm_nand_get_dma_buffer(

@@ -32,16 +32,8 @@
 #if 1 // def  QUECTEL_SYSTEM_BACKUP    // Ramos add for quectel for linuxfs restore
 #include "../../drivers/mtd/ubi/ubi.h"
 #include <linux/qstart.h> //quectel add
-extern unsigned int Quectel_Restore(const char * partition_name, int where);
-/******************************************************************************************
-francis-2018/12/29:Description....
-Refer to [Issue-Depot].[IS0000416][Submitter:dawn.yang@quectel.com,Date:2018-12-28]
-<recovery模式下usrdata 的ubi设备号被改为3，导致概率性被擦除，差分包丢失>
-******************************************************************************************/
-
-extern void Quectel_Erase_Partition(const char * partition_name);
+extern unsigned int Quectel_Set_Partition_RestoreFlag(const char * partition_name,int mtd_nub,int where);
 #endif
-
 /**
  * scan_padding_bytes - scan for padding bytes.
  * @buf: buffer to scan
@@ -364,8 +356,8 @@ corrupted:
 		ubifs_err(c, "LEB %d scanning failed", lnum);
 	}
 #if 1
-      ubifs_err(c, "@quetel  add for backup in 101010 ,scan LEB failed for corrupted, restore removed\n");
-      //Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,10);
+      	ubifs_err(c, "@quetel  add for backup in 101010 ,scan LEB failed for corrupted\n");
+      Quectel_Set_Partition_RestoreFlag("",ubi_get_device(c->vi.ubi_num)->mtd->index,10);
 //add by [francis],20180927,add backup check point
 #endif
 

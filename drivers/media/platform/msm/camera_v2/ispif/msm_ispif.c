@@ -234,28 +234,28 @@ static long msm_ispif_cmd_ext(struct v4l2_subdev *sd,
 
 	if (is_compat_task()) {
 #ifdef CONFIG_COMPAT
-		struct ispif_cfg_data_ext_32 *pcdata32 =
-			(struct ispif_cfg_data_ext_32 *)arg;
+	struct ispif_cfg_data_ext_32 *pcdata32 =
+		(struct ispif_cfg_data_ext_32 *)arg;
 
-		if (pcdata32 == NULL) {
-			pr_err("Invalid params passed from user\n");
-			return -EINVAL;
-		}
-		pcdata.cfg_type  = pcdata32->cfg_type;
-		pcdata.size = pcdata32->size;
-		pcdata.data = compat_ptr(pcdata32->data);
+	if (pcdata32 == NULL) {
+		pr_err("Invalid params passed from user\n");
+		return -EINVAL;
+	}
+	pcdata.cfg_type  = pcdata32->cfg_type;
+	pcdata.size = pcdata32->size;
+	pcdata.data = compat_ptr(pcdata32->data);
 #endif
 	} else {
-		struct ispif_cfg_data_ext *pcdata64 =
+	struct ispif_cfg_data_ext *pcdata64 =
 		(struct ispif_cfg_data_ext *)arg;
 
-		if (pcdata64 == NULL) {
-			pr_err("Invalid params passed from user\n");
-			return -EINVAL;
-		}
-		pcdata.cfg_type  = pcdata64->cfg_type;
-		pcdata.size = pcdata64->size;
-		pcdata.data = pcdata64->data;
+	if (pcdata64 == NULL) {
+		pr_err("Invalid params passed from user\n");
+		return -EINVAL;
+	}
+	pcdata.cfg_type  = pcdata64->cfg_type;
+	pcdata.size = pcdata64->size;
+	pcdata.data = pcdata64->data;
 	}
 	if (pcdata.size != sizeof(struct msm_ispif_param_data_ext)) {
 		pr_err("%s: payload size mismatch\n", __func__);

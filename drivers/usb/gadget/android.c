@@ -2048,9 +2048,10 @@ static struct android_usb_function qdss_function = {
 	.bind_config	= qdss_function_bind_config,
 	.attributes	= qdss_function_attributes,
 };
-
+//javen-2019/04/30:add usb channel
 /* SERIAL */
-#define MAX_SERIAL_INSTANCES 5	//juson.zhang-2018/10/16:add usb channel
+//#define MAX_SERIAL_INSTANCES 4
+#define MAX_SERIAL_INSTANCES 5
 struct serial_function_config {
 	int instances_on;
 	bool serial_initialized;
@@ -4199,11 +4200,7 @@ static int android_bind(struct usb_composite_dev *cdev)
 	strlcpy(product_string, "LTE Module", sizeof(product_string) - 1);
 	strlcpy(serial_string, "0123456789ABCDEF", sizeof(serial_string) - 1);
 
-#ifdef QUECTEL_USB_CONFIG
-	id = 0;
-#else
 	id = usb_string_id(cdev);
-#endif
 	if (id < 0)
 		return id;
 	strings_dev[STRING_SERIAL_IDX].id = id;

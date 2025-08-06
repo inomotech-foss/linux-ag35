@@ -1418,10 +1418,12 @@ void tx_timeout_handler(unsigned long arg)
 {
 	struct msm_hs_port *msm_uport = (struct msm_hs_port *) arg;
 	struct uart_port *uport = &msm_uport->uport;
+	struct tty_struct *tty = uport->state->port.tty;
 	int isr;
 
 	if (msm_uport->pm_state != MSM_HS_PM_ACTIVE) {
 		MSM_HS_WARN("%s(): clocks are off", __func__);
+		tty->uart_err = 1;
 		return;
 	}
 
@@ -3258,15 +3260,6 @@ static int msm_hs_pm_resume(struct device *dev)
 		goto exit_pm_resume;
 	if (!atomic_read(&msm_uport->client_req_state))
 		disable_wakeup_interrupt(msm_uport);
-
-	/* For OBS, don't use wakeup interrupt, set gpio to active state */
-	if (msm_uport->obs) {
-		ret = pinctrl_select_state(msm_uport->pinctrl,
-				msm_uport->gpio_state_active);
-		if (ret)
-			MSM_HS_ERR("%s():Error selecting active state",
-				 __func__);
-	}
 
 	ret = msm_hs_clk_bus_vote(msm_uport);
 	if (ret) {
