@@ -893,25 +893,6 @@ fmbim_cmd_complete(struct usb_ep *ep, struct usb_request *req)
 		pr_err("Unable to allocate ctrl pkt\n");
 		return;
 	}
-        
-    if((len>0)&&(open_status == 0)) 
-    { 
-        spin_lock(&dev->lock);
-        if(0x01 == *(u8 *)(req->buf)) 
-        { 
-            pr_info("MODEM get MBIM_OPEN_MSG when notify_count is %d\n", atomic_read(&dev->not_port.notify_count)); 
-            list_for_each_safe(act, tmp, &dev->cpkt_resp_q) { 
-                tempCpkt = list_entry(act, struct ctrl_pkt, list); 
-                pr_info("del a response node in cpkt_resp_q\n"); 
-                list_del(&tempCpkt->list); 
-                mbim_free_ctrl_pkt(tempCpkt); 
-            } 
-            
-            atomic_set(&dev->not_port.notify_count, 0); 
-			dev->notify_wait_for_get_encap = false;
-        } 
-        spin_unlock(&dev->lock);
-    } 
 
 	pr_debug("Add to cpkt_req_q packet with len = %d\n", len);
 

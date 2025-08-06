@@ -39,13 +39,13 @@
 		modem_adsp_mem: modem_adsp_region@0 {
 			compatible = "removed-dma-pool";
 			no-map-fixup;
-			reg = <0x82400000 0x5800000>;
+			reg = <0x82c00000 0x5000000>;
 		};
 
 		cnss_debug_mem: cnss_debug_region@0 {
 			compatible = "removed-dma-pool";
 			no-map;
-			reg = <0x82200000 0x200000>;
+			reg = <0x82a00000 0x200000>;
 		};
 
 		external_image_mem: external_image_region@0 {
@@ -506,7 +506,7 @@
 				<86 512 500 800>;
 		status = "disabled";
 	};
-	
+
 	dma_blsp1: qcom,sps-dma@7884000 { /* BLSP1 */
 		#dma-cells = <4>;
 		compatible = "qcom,sps-dma";
@@ -569,7 +569,7 @@
 			smi130_acc,gpio_irq = <&tlmm_pinmux 74 0x2002>;
 			status = "ok"; 
 		};
-};
+	};
 
 	i2c_4: i2c@78b8000 { /* BLSP1 QUP4 */
 		compatible = "qcom,i2c-msm-v2";
@@ -756,6 +756,19 @@
 			status = "disabled"; /* achang-20180622, not use */
 		};
 
+		bmi160@68{
+			compatible = "bosch-sensortec,bmi160";
+			reg = <0x68>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&sensor_int1_default &sensor_int2_default>;
+			interrupt-parent = <&tlmm_pinmux>;
+			interrupts = <78 0x2002>;
+			bmi,init-interval = <200>;
+			bmi,place = <1>;
+			bmi,gpio_irq = <&tlmm_pinmux 78 0x2002>;
+			status = "disabled"; /* achang-20180622, not use */
+		};
+
 		iam20680@69{
 			compatible = "inven,iam20680";
 			reg = <0x69>;
@@ -787,7 +800,7 @@
 
 	cnss_sdio: qcom,cnss-sdio {
 		compatible = "qcom,cnss_sdio";
-		reg = <0x82200000 0x200000>;
+		reg = <0x82a00000 0x200000>;
 		reg-names = "ramdump";
 		subsys-name = "AR6320";
 		/* To enable PIN PM_ENABLE_WIFI dynamicly in dbgfs /sys/kernel/debug/regulator/rome_vreg, gale 2018-04-01 */
@@ -998,7 +1011,8 @@
 		      <&tlmm_pinmux 12 0>; /* DATA3 */
 		qcom,gpio-names = "CLK", "CMD", "DAT0", "DAT1", "DAT2", "DAT3";
 
-		qcom,clk-rates = <400000 20000000 25000000 50000000>;
+		qcom,clk-rates = <400000 20000000 25000000 50000000 100000000
+			200000000>;
 
 		clock-names = "iface_clk", "core_clk";
 		clocks = <&clock_gcc clk_gcc_sdcc1_ahb_clk>,
@@ -1230,6 +1244,7 @@
 
 	qcom,msm-audio-ion {
 		compatible = "qcom,msm-audio-ion";
+		qcom,scm-mp-enabled;
 		memory-region = <&audio_mem>;
 	};
 
@@ -1388,6 +1403,83 @@
 		qcom,msm-auxpcm-interface = "secondary";
 		qcom,msm-cpudai-afe-clk-ver = <2>;
 	};
+
+	qcom,msm-dai-tdm-pri-rx {
+		compatible = "qcom,msm-dai-tdm";
+		qcom,msm-cpudai-tdm-group-id = <37120>;
+		qcom,msm-cpudai-tdm-group-num-ports = <1>;
+		qcom,msm-cpudai-tdm-group-port-id = <36864>;
+		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
+		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
+		dai_pri_tdm_rx_0: qcom,msm-dai-q6-tdm-pri-rx-0 {
+			compatible = "qcom,msm-dai-q6-tdm";
+			qcom,msm-cpudai-tdm-dev-id = <36864>;
+			qcom,msm-cpudai-tdm-sync-mode = <0>;
+			qcom,msm-cpudai-tdm-sync-src = <1>;
+			qcom,msm-cpudai-tdm-data-out = <0>;
+			qcom,msm-cpudai-tdm-invert-sync = <0>;
+			qcom,msm-cpudai-tdm-data-delay = <1>;
+			qcom,msm-cpudai-tdm-data-align = <0>;
+		};
+	};
+
+	qcom,msm-dai-tdm-pri-tx {
+		compatible = "qcom,msm-dai-tdm";
+		qcom,msm-cpudai-tdm-group-id = <37121>;
+		qcom,msm-cpudai-tdm-group-num-ports = <1>;
+		qcom,msm-cpudai-tdm-group-port-id = <36865>;
+		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
+		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
+		dai_pri_tdm_tx_0: qcom,msm-dai-q6-tdm-pri-tx-0 {
+			compatible = "qcom,msm-dai-q6-tdm";
+			qcom,msm-cpudai-tdm-dev-id = <36865>;
+			qcom,msm-cpudai-tdm-sync-mode = <0>;
+			qcom,msm-cpudai-tdm-sync-src = <1>;
+			qcom,msm-cpudai-tdm-data-out = <0>;
+			qcom,msm-cpudai-tdm-invert-sync = <0>;
+			qcom,msm-cpudai-tdm-data-delay = <1>;
+			qcom,msm-cpudai-tdm-data-align = <0>;
+		};
+	};
+
+	qcom,msm-dai-tdm-sec-rx {
+		compatible = "qcom,msm-dai-tdm";
+		qcom,msm-cpudai-tdm-group-id = <37136>;
+		qcom,msm-cpudai-tdm-group-num-ports = <1>;
+		qcom,msm-cpudai-tdm-group-port-id = <36880>;
+		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
+		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
+		dai_sec_tdm_rx_0: qcom,msm-dai-q6-tdm-sec-rx-0 {
+			compatible = "qcom,msm-dai-q6-tdm";
+			qcom,msm-cpudai-tdm-dev-id = <36880>;
+			qcom,msm-cpudai-tdm-sync-mode = <0>;
+			qcom,msm-cpudai-tdm-sync-src = <1>;
+			qcom,msm-cpudai-tdm-data-out = <0>;
+			qcom,msm-cpudai-tdm-invert-sync = <0>;
+			qcom,msm-cpudai-tdm-data-delay = <1>;
+			qcom,msm-cpudai-tdm-data-align = <0>;
+		};
+	};
+
+	qcom,msm-dai-tdm-sec-tx {
+		compatible = "qcom,msm-dai-tdm";
+		qcom,msm-cpudai-tdm-group-id = <37137>;
+		qcom,msm-cpudai-tdm-group-num-ports = <1>;
+		qcom,msm-cpudai-tdm-group-port-id = <36881>;
+		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
+		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
+		dai_sec_tdm_tx_0: qcom,msm-dai-q6-tdm-sec-tx-0 {
+			compatible = "qcom,msm-dai-q6-tdm";
+			qcom,msm-cpudai-tdm-dev-id = <36881>;
+			qcom,msm-cpudai-tdm-sync-mode = <0>;
+			qcom,msm-cpudai-tdm-sync-src = <1>;
+			qcom,msm-cpudai-tdm-data-out = <0>;
+			qcom,msm-cpudai-tdm-invert-sync = <0>;
+			qcom,msm-cpudai-tdm-data-delay = <1>;
+			qcom,msm-cpudai-tdm-data-align = <0>;
+		};
+	};
+
 	qcom,msm-dai-mi2s {
 		compatible = "qcom,msm-dai-mi2s";
 		mi2s_prim: qcom,msm-dai-q6-mi2s-prim {
@@ -1755,7 +1847,7 @@
 		qcom,bam-producer-pipe-index = <17>;
 		qcom,master-id = <86>;
 		status = "disabled";
-	}; 
+	};
 
 	/*BLSP1 QUP5--->gpio8,9,10,11, gale 2018-3-14*/
 	spi_5: spi@78b9000 { 
@@ -1811,7 +1903,7 @@
 		qcom,master-id = <86>;
 		status = "disabled";
 	};
-	 /*end cullen.wang*/ 
+	/*end cullen.wang*/ 
 
 	qcom,mss@4080000 {
 		compatible = "qcom,pil-q6v55-mss";
@@ -1889,7 +1981,7 @@
 			 <&clock_gcc clk_gcc_sdcc2_apps_clk>;
 		clock-names = "iface_clk", "core_clk";
 
-		qcom,clk-rates = <400000 25000000 50000000>;
+		qcom,clk-rates = <400000 25000000 50000000 100000000 200000000>;
 
 		qcom,pm-qos-irq-type = "affine_irq";
 		qcom,pm-qos-irq-latency = <2 250>;
@@ -2088,107 +2180,6 @@
 		pinctrl-0 = <&pinctrl_pps>;
 		gpios = <&tlmm_pinmux 53 0>;
 		status = "okay";
-	};
-
-	qcom,msm-dai-tdm-pri-rx {
-		compatible = "qcom,msm-dai-tdm";
-		qcom,msm-cpudai-tdm-group-id = <37120>;
-		qcom,msm-cpudai-tdm-group-num-ports = <2>;
-		qcom,msm-cpudai-tdm-group-port-id = <36864 36866>;
-		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
-		qcom,msm-cpudai-tdm-clk-internal = <1>;
-		qcom,msm-cpudai-tdm-sync-mode = <0>;
-		qcom,msm-cpudai-tdm-sync-src = <1>;
-		qcom,msm-cpudai-tdm-data-out = <0>;
-		qcom,msm-cpudai-tdm-invert-sync = <0>;
-		qcom,msm-cpudai-tdm-data-delay = <1>;
-		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
-		dai_pri_tdm_rx_0: qcom,msm-dai-q6-tdm-pri-rx-0 {
-			compatible = "qcom,msm-dai-q6-tdm";
-			qcom,msm-cpudai-tdm-dev-id = <36864>;
-			qcom,msm-cpudai-tdm-data-align = <0>;
-		};
-
-		dai_pri_tdm_rx_1: qcom,msm-dai-q6-tdm-pri-rx-1 {
-			compatible = "qcom,msm-dai-q6-tdm";
-			qcom,msm-cpudai-tdm-dev-id = <36866>;
-			qcom,msm-cpudai-tdm-data-align = <0>;
-		};
-	};
-
-	qcom,msm-dai-tdm-pri-tx {
-		compatible = "qcom,msm-dai-tdm";
-		qcom,msm-cpudai-tdm-group-id = <37121>;
-		qcom,msm-cpudai-tdm-group-num-ports = <2>;
-		qcom,msm-cpudai-tdm-group-port-id = <36865 36867>;
-		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
-		qcom,msm-cpudai-tdm-clk-internal = <1>;
-		qcom,msm-cpudai-tdm-sync-mode = <0>;
-		qcom,msm-cpudai-tdm-sync-src = <1>;
-		qcom,msm-cpudai-tdm-data-out = <0>;
-		qcom,msm-cpudai-tdm-invert-sync = <0>;
-		qcom,msm-cpudai-tdm-data-delay = <1>;
-		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
-		dai_pri_tdm_tx_0: qcom,msm-dai-q6-tdm-pri-tx-0 {
-			compatible = "qcom,msm-dai-q6-tdm";
-			qcom,msm-cpudai-tdm-dev-id = <36865>;
-			qcom,msm-cpudai-tdm-data-align = <0>;
-		};
-		dai_pri_tdm_tx_1: qcom,msm-dai-q6-tdm-pri-tx-1 {
-			compatible = "qcom,msm-dai-q6-tdm";
-			qcom,msm-cpudai-tdm-dev-id = <36867>;
-			qcom,msm-cpudai-tdm-data-align = <0>;
-		};
-	};
-
-	qcom,msm-dai-tdm-sec-rx {
-		compatible = "qcom,msm-dai-tdm";
-		qcom,msm-cpudai-tdm-group-id = <37136>;
-		qcom,msm-cpudai-tdm-group-num-ports = <2>;
-		qcom,msm-cpudai-tdm-group-port-id = <36880 36882>;
-		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
-		qcom,msm-cpudai-tdm-clk-internal = <1>;
-		qcom,msm-cpudai-tdm-sync-mode = <0>;
-		qcom,msm-cpudai-tdm-sync-src = <1>;
-		qcom,msm-cpudai-tdm-data-out = <0>;
-		qcom,msm-cpudai-tdm-invert-sync = <0>;
-		qcom,msm-cpudai-tdm-data-delay = <1>;
-		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
-		dai_sec_tdm_rx_0: qcom,msm-dai-q6-tdm-sec-rx-0 {
-			compatible = "qcom,msm-dai-q6-tdm";
-			qcom,msm-cpudai-tdm-dev-id = <36880>;
-			qcom,msm-cpudai-tdm-data-align = <0>;
-		};
-		dai_sec_tdm_rx_1: qcom,msm-dai-q6-tdm-sec-rx-1 {
-			compatible = "qcom,msm-dai-q6-tdm";
-			qcom,msm-cpudai-tdm-dev-id = <36882>;
-			qcom,msm-cpudai-tdm-data-align = <0>;
-		};
-	};
-
-	qcom,msm-dai-tdm-sec-tx {
-		compatible = "qcom,msm-dai-tdm";
-		qcom,msm-cpudai-tdm-group-id = <37137>;
-		qcom,msm-cpudai-tdm-group-num-ports = <2>;
-		qcom,msm-cpudai-tdm-group-port-id = <36881 36883>;
-		qcom,msm-cpudai-tdm-clk-rate = <12288000>;
-		qcom,msm-cpudai-tdm-clk-internal = <1>;
-		qcom,msm-cpudai-tdm-sync-mode = <0>;
-		qcom,msm-cpudai-tdm-sync-src = <1>;
-		qcom,msm-cpudai-tdm-data-out = <0>;
-		qcom,msm-cpudai-tdm-invert-sync = <0>;
-		qcom,msm-cpudai-tdm-data-delay = <1>;
-		qcom,msm-cpudai-tdm-clk-attribute = /bits/ 16 <1>;
-		dai_sec_tdm_tx_0: qcom,msm-dai-q6-tdm-sec-tx-0 {
-			compatible = "qcom,msm-dai-q6-tdm";
-			qcom,msm-cpudai-tdm-dev-id = <36881>;
-			qcom,msm-cpudai-tdm-data-align = <0>;
-		};
-		dai_sec_tdm_tx_1: qcom,msm-dai-q6-tdm-sec-tx-1 {
-			compatible = "qcom,msm-dai-q6-tdm";
-			qcom,msm-cpudai-tdm-dev-id = <36883>;
-			qcom,msm-cpudai-tdm-data-align = <0>;
-		};
 	};
 
 	//add by max.tang for VBUS detect

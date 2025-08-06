@@ -3601,8 +3601,6 @@ static int emac_probe(struct platform_device *pdev)
 	u8 i;
 	u32 hw_ver;
 
-	printk("emac driver version : %s\n", EMAC_VERSION);
-
 	/* The EMAC itself is capable of 64-bit DMA, so try that first. */
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (ret) {

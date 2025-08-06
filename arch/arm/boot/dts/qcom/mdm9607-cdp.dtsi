@@ -48,14 +48,13 @@
 
 /* Add spi5 node ---> gpio8,9,10,11, gale 2018-3-14 */
 &spi_5 {
-        status = "disabled";
+    status = "disabled";
 };
 
 //add by cullen
 &spi_6 {
-        status = "ok";
+    status = "ok";
 };
-
 
 &blsp1_uart3 {
 	status = "ok";

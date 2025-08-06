@@ -2135,9 +2135,6 @@ free_dma:
 	 * it is most likely that the data is not all 0xff. So memset that
 	 * page to all 0xff.
 	 */
-	/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start(fixed 4)*/
-	int count = 0;
-	/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 	while (fix_data_in_pages) {
 		int temp_page = 0, oobsize = rw_params.cwperpage << 2;
 		int offset = 0;
