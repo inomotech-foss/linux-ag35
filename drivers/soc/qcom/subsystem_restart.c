@@ -753,13 +753,16 @@ static int subsystem_powerup(struct subsys_device *dev, void *data)
 	if (ret < 0) {
 		notify_each_subsys_device(&dev, 1, SUBSYS_POWERUP_FAILURE,
 								NULL);
-		if (!dev->desc->ignore_ssr_failure)
+		if (system_state == SYSTEM_RESTART
+			|| system_state == SYSTEM_POWER_OFF)
+			WARN(1, "SSR aborted: %s, system reboot/shutdown is under way\n",
+				name);
+		else if (!dev->desc->ignore_ssr_failure)
 			panic("[%s:%d]: Powerup error: %s!",
 				current->comm, current->pid, name);
-		else {
+		else
 			pr_err("Powerup failure on %s\n", name);
-			return ret;
-		}
+		return ret;
 	}
 	enable_all_irqs(dev);
 
@@ -1257,8 +1260,11 @@ bool subsys_get_crash_status(struct subsys_device *dev)
 
 void subsys_set_error(struct subsys_device *dev, const char *error_msg)
 {
-	snprintf(dev->error_buf, sizeof(dev->error_buf), "%s", error_msg);
-	sysfs_notify(&dev->dev.kobj, NULL, "error");
+	if (dev) {
+		snprintf(dev->error_buf, sizeof(dev->error_buf), "%s",
+							   error_msg);
+		sysfs_notify(&dev->dev.kobj, NULL, "error");
+	}
 }
 
 static struct subsys_device *desc_to_subsys(struct device *d)

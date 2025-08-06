@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -542,6 +542,7 @@ int afe_get_port_type(u16 port_id)
 	case AFE_PORT_ID_QUATERNARY_TDM_TX_5:
 	case AFE_PORT_ID_QUATERNARY_TDM_TX_6:
 	case AFE_PORT_ID_QUATERNARY_TDM_TX_7:
+	case AFE_LOOPBACK_TX:
 		ret = MSM_AFE_PORT_TYPE_TX;
 		break;
 
@@ -626,7 +627,7 @@ int afe_q6_interface_prepare(void)
 			0xFFFFFFFF, &this_afe);
 		if (this_afe.apr == NULL) {
 			pr_err("%s: Unable to register AFE\n", __func__);
-			ret = -ENODEV;
+			ret = -ENETRESET;
 		}
 		rtac_set_afe_handle(this_afe.apr);
 	}
@@ -1143,6 +1144,7 @@ static int afe_send_hw_delay(u16 port_id, u32 rate)
 
 	pr_debug("%s:\n", __func__);
 
+	memset(&delay_entry, 0, sizeof(delay_entry));
 	delay_entry.sample_rate = rate;
 	if (afe_get_port_type(port_id) == MSM_AFE_PORT_TYPE_TX)
 		ret = afe_get_cal_hw_delay(TX_DEVICE, &delay_entry);
@@ -3024,6 +3026,8 @@ int afe_get_port_index(u16 port_id)
 		return IDX_AFE_PORT_ID_QUATERNARY_TDM_RX_7;
 	case AFE_PORT_ID_QUATERNARY_TDM_TX_7:
 		return IDX_AFE_PORT_ID_QUATERNARY_TDM_TX_7;
+	case AFE_LOOPBACK_TX:
+		return IDX_AFE_LOOPBACK_TX;
 	default:
 		pr_err("%s: port 0x%x\n", __func__, port_id);
 		return -EINVAL;
