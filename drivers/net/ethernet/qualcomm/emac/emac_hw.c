@@ -249,7 +249,7 @@ void emac_hw_config_pow_save(struct emac_hw *hw, u32 speed,
 {
 	struct emac_adapter *adpt = emac_hw_get_adap(hw);
 	struct phy_device *phydev = adpt->phydev;
-	u32 dma_mas, mac;
+	u32 dma_mas, mac, csr1;
 
 	dma_mas = emac_reg_r32(hw, EMAC, EMAC_DMA_MAS_CTRL);
 	dma_mas &= ~LPW_CLK_SEL;
@@ -262,16 +262,22 @@ void emac_hw_config_pow_save(struct emac_hw *hw, u32 speed,
 	if (wol_en) {
 		if (rx_en)
 			mac |= (RXEN | BROAD_EN);
+		if(!adpt->mac2mac_en){
+			/* If WOL is enabled, set link speed/duplex for mac */
+			if (phydev->speed == SPEED_1000)
+				mac = (mac & ~SPEED_MASK) | (SPEED(2) & SPEED_MASK);
 
-		/* If WOL is enabled, set link speed/duplex for mac */
-		if (phydev->speed == SPEED_1000)
-			mac = (mac & ~SPEED_MASK) | (SPEED(2) & SPEED_MASK);
-
-		if (DUPLEX_FULL == phydev->duplex)
-			if (SPEED_10 == phydev->speed ||
-			    SPEED_100 == phydev->speed ||
-			    SPEED_1000 == phydev->speed)
-				mac |= FULLD;
+			if (DUPLEX_FULL == phydev->duplex)
+				if (SPEED_10 == phydev->speed ||
+				    SPEED_100 == phydev->speed ||
+				    SPEED_1000 == phydev->speed)
+					mac |= FULLD;
+		}
+		else{
+			if (adpt->speed_mac2mac == SPEED_1000)
+				mac = (mac & ~SPEED_MASK) | (SPEED(2) & SPEED_MASK);
+			mac |= FULLD;
+		}
 	} else {
 		/* select lower clock speed if WOL is disabled */
 		dma_mas |= LPW_CLK_SEL;
@@ -524,38 +530,53 @@ void emac_hw_start_mac(struct emac_hw *hw)
 	csr1 = emac_reg_r32(hw, EMAC_CSR, EMAC_EMAC_WRAPPER_CSR1);
 
 	mac |= TXEN | RXEN;     /* enable RX/TX */
-
-	/* Configure MAC flow control to match the PHY's settings. */
-	if (phydev->pause)
-		mac |= RXFC;
-	if (phydev->pause != phydev->asym_pause)
-		mac |= TXFC;
+	if(!adpt->mac2mac_en){
+		/* Configure MAC flow control to match the PHY's settings. */
+		if (phydev->pause)
+			mac |= RXFC;
+		if (phydev->pause != phydev->asym_pause)
+			mac |= TXFC;
+	}
 
 	/* setup link speed */
 	mac &= ~SPEED_MASK;
 
-	if (QCA8337_PHY_ID == phydev->phy_id) {
-		mac |= SPEED(2);
-		csr1 |= FREQ_MODE;
-		mac |= FULLD;
-	} else {
-		switch (phydev->speed) {
-		case SPEED_1000:
+	if (!adpt->mac2mac_en){
+		if(QCA8337_PHY_ID == phydev->phy_id) {
 			mac |= SPEED(2);
 			csr1 |= FREQ_MODE;
-			break;
-		default:
-			mac |= SPEED(1);
-			csr1 &= ~FREQ_MODE;
-			break;
-		}
-
-		if (phydev->duplex == DUPLEX_FULL)
 			mac |= FULLD;
-		else
-			mac &= ~FULLD;
-	}
+		} else {
+			switch (phydev->speed) {
+			case SPEED_1000:
+				mac |= SPEED(2);
+				csr1 |= FREQ_MODE;
+				break;
+			default:
+				mac |= SPEED(1);
+				csr1 &= ~FREQ_MODE;
+				break;
+			}
 
+			if (phydev->duplex == DUPLEX_FULL)
+				mac |= FULLD;
+			else
+				mac &= ~FULLD;
+		}
+	}
+	else{
+		switch (adpt->speed_mac2mac) {
+			case SPEED_1000:
+				mac |= SPEED(2);
+				csr1 |= FREQ_MODE;
+				break;
+			default:
+				mac |= SPEED(1);
+				csr1 &= ~FREQ_MODE;
+				break;
+			}
+		mac |= FULLD;
+	}
 	/* other parameters */
 	mac |= (CRCE | PCRCE);
 	mac |= ((hw->preamble << PRLEN_SHFT) & PRLEN_BMSK);
@@ -576,8 +597,12 @@ void emac_hw_start_mac(struct emac_hw *hw)
 		     (INT_RD_CLR_EN | LPW_MODE |
 		      IRQ_MODERATOR_EN | IRQ_MODERATOR2_EN));
 
-	if (TEST_FLAG(hw, HW_PTP_CAP))
-		emac_ptp_set_linkspeed(hw, phydev->speed);
+	if (TEST_FLAG(hw, HW_PTP_CAP)){
+		if(!adpt->mac2mac_en)
+			emac_ptp_set_linkspeed(hw, phydev->speed);
+		else
+			emac_ptp_set_linkspeed(hw, adpt->speed_mac2mac);
+	}
 
 	emac_hw_config_mac_ctrl(hw);
 

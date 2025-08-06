@@ -244,9 +244,18 @@ int emac_sgmii_link_init(struct emac_adapter *adpt)
 	u32 val;
 	int autoneg, speed, duplex;
 
-	autoneg = (adpt->phydev) ? phydev->autoneg : AUTONEG_ENABLE;
-	speed = (adpt->phydev) ? phydev->speed : SPEED_UNKNOWN;
-	duplex = (adpt->phydev) ? phydev->duplex : DUPLEX_UNKNOWN;
+	if(!adpt->mac2mac_en){
+		phydev = adpt->phydev;
+		autoneg = (adpt->phydev) ? phydev->autoneg : AUTONEG_ENABLE;
+		speed = (adpt->phydev) ? phydev->speed : SPEED_UNKNOWN;
+		duplex = (adpt->phydev) ? phydev->duplex : DUPLEX_UNKNOWN;
+	}
+	else{
+		autoneg = AUTONEG_DISABLE;
+		speed = adpt->speed_mac2mac;
+		duplex = DUPLEX_FULL;
+		writel_relaxed(0, sgmii->base + EMAC_SGMII_PHY_SPEED_CFG1);
+	}
 
 	val = readl_relaxed(sgmii->base + EMAC_SGMII_PHY_AUTONEG_CFG2);
 
@@ -307,6 +316,11 @@ int emac_sgmii_irq_clear(struct emac_adapter *adpt, u32 irq_bits)
 		emac_err(adpt,
 			 "error: failed clear SGMII irq: status:0x%x bits:0x%x\n",
 			 status, irq_bits);
+		/* Finalize clearing procedure */
+		writel_relaxed(0, sgmii->base + EMAC_SGMII_PHY_IRQ_CMD);
+		writel_relaxed(0, sgmii->base + EMAC_SGMII_PHY_INTERRUPT_CLEAR);
+		/* Ensure that clearing procedure finalization is written to HW */
+		wmb();
 		return -EIO;
 	}
 
@@ -334,40 +348,42 @@ int emac_sgmii_autoneg_check(struct emac_adapter *adpt,
 	autoneg1 = readl_relaxed(sgmii->base + EMAC_SGMII_PHY_AUTONEG1_STATUS);
 	status   = ((autoneg1 & 0xff) << 8) | (autoneg0 & 0xff);
 
-	if (!(status & TXCFG_LINK)) {
-		phydev->link = false;
-		phydev->speed = SPEED_UNKNOWN;
-		phydev->duplex = DUPLEX_UNKNOWN;
-		return 0;
-	}
+	if(!adpt->mac2mac_en){
+		if (!(status & TXCFG_LINK)) {
+			phydev->link = false;
+			phydev->speed = SPEED_UNKNOWN;
+			phydev->duplex = DUPLEX_UNKNOWN;
+			return 0;
+		}
 
-	phydev->link = true;
+		phydev->link = true;
 
-	switch (status & TXCFG_MODE_BMSK) {
-	case TXCFG_1000_FULL:
-		phydev->speed = SPEED_1000;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case TXCFG_100_FULL:
-		phydev->speed = SPEED_100;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case TXCFG_100_HALF:
-		phydev->speed = SPEED_100;
-		phydev->duplex = DUPLEX_HALF;
-		break;
-	case TXCFG_10_FULL:
-		phydev->speed = SPEED_10;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case TXCFG_10_HALF:
-		phydev->speed = SPEED_10;
-		phydev->duplex = DUPLEX_HALF;
-		break;
-	default:
-		phydev->speed = SPEED_UNKNOWN;
-		phydev->duplex = DUPLEX_UNKNOWN;
-		break;
+		switch (status & TXCFG_MODE_BMSK) {
+		case TXCFG_1000_FULL:
+			phydev->speed = SPEED_1000;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case TXCFG_100_FULL:
+			phydev->speed = SPEED_100;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case TXCFG_100_HALF:
+			phydev->speed = SPEED_100;
+			phydev->duplex = DUPLEX_HALF;
+			break;
+		case TXCFG_10_FULL:
+			phydev->speed = SPEED_10;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case TXCFG_10_HALF:
+			phydev->speed = SPEED_10;
+			phydev->duplex = DUPLEX_HALF;
+			break;
+		default:
+			phydev->speed = SPEED_UNKNOWN;
+			phydev->duplex = DUPLEX_UNKNOWN;
+			break;
+		}
 	}
 	return 0;
 }
@@ -384,33 +400,35 @@ int emac_sgmii_link_check_no_ephy(struct emac_adapter *adpt,
 
 	val = readl_relaxed(sgmii->base + EMAC_SGMII_PHY_SPEED_CFG1);
 	val &= DUPLEX_MODE | SPDMODE_BMSK;
-	switch (val) {
-	case DUPLEX_MODE | SPDMODE_1000:
-		phydev->speed = SPEED_1000;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case DUPLEX_MODE | SPDMODE_100:
-		phydev->speed = SPEED_100;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case SPDMODE_100:
-		phydev->speed = SPEED_100;
-		phydev->duplex = DUPLEX_HALF;
-		break;
-	case DUPLEX_MODE | SPDMODE_10:
-		phydev->speed = SPEED_10;
-		phydev->duplex = DUPLEX_FULL;
-		break;
-	case SPDMODE_10:
-		phydev->speed = SPEED_10;
-		phydev->duplex = DUPLEX_HALF;
-		break;
-	default:
-		phydev->speed = SPEED_UNKNOWN;
-		phydev->duplex = DUPLEX_UNKNOWN;
-		break;
+	if (!adpt->mac2mac_en){
+		switch (val) {
+		case DUPLEX_MODE | SPDMODE_1000:
+			phydev->speed = SPEED_1000;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case DUPLEX_MODE | SPDMODE_100:
+			phydev->speed = SPEED_100;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case SPDMODE_100:
+			phydev->speed = SPEED_100;
+			phydev->duplex = DUPLEX_HALF;
+			break;
+		case DUPLEX_MODE | SPDMODE_10:
+			phydev->speed = SPEED_10;
+			phydev->duplex = DUPLEX_FULL;
+			break;
+		case SPDMODE_10:
+			phydev->speed = SPEED_10;
+			phydev->duplex = DUPLEX_HALF;
+			break;
+		default:
+			phydev->speed = SPEED_UNKNOWN;
+			phydev->duplex = DUPLEX_UNKNOWN;
+			break;
+		}
+		phydev->link = true;
 	}
-	phydev->link = true;
 	return 0;
 }
 
@@ -423,6 +441,9 @@ irqreturn_t emac_sgmii_isr(int _irq, void *data)
 	emac_dbg(adpt, intr, "receive sgmii interrupt\n");
 
 	do {
+		if (TEST_FLAG(adpt, ADPT_STATE_DOWN))
+			break;
+
 		status = readl_relaxed(sgmii->base +
 				       EMAC_SGMII_PHY_INTERRUPT_STATUS) &
 				       SGMII_ISR_MASK;
@@ -435,14 +456,16 @@ irqreturn_t emac_sgmii_isr(int _irq, void *data)
 				emac_task_schedule(adpt);
 		}
 
-		if (status & SGMII_ISR_AN_MASK)
+		if (!TEST_FLAG(adpt, ADPT_STATE_DOWN) && (status & SGMII_ISR_AN_MASK))
 			emac_check_lsc(adpt);
 
-		if (emac_sgmii_irq_clear(adpt, status) != 0) {
-			/* reset */
-			SET_FLAG(adpt, ADPT_TASK_REINIT_REQ);
-			emac_task_schedule(adpt);
-			break;
+		if (!TEST_FLAG(adpt, ADPT_STATE_DOWN)) {
+			if (emac_sgmii_irq_clear(adpt, status) != 0) {
+				/* reset */
+				SET_FLAG(adpt, ADPT_TASK_REINIT_REQ);
+				emac_task_schedule(adpt);
+				break;
+			}
 		}
 	} while (1);
 

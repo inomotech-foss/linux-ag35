@@ -96,13 +96,6 @@ enum emac_clk_rate {
 #define EMAC_LINK_SPEED_100_FULL        0x0008
 #define EMAC_LINK_SPEED_1GB_FULL        0x0020
 
-#define EMAC_LINK_SPEED_DEFAULT (\
-		EMAC_LINK_SPEED_10_HALF  |\
-		EMAC_LINK_SPEED_10_FULL  |\
-		EMAC_LINK_SPEED_100_HALF |\
-		EMAC_LINK_SPEED_100_FULL |\
-		EMAC_LINK_SPEED_1GB_FULL)
-
 #define EMAC_MAX_SETUP_LNK_CYCLE        100
 
 /* Wake On Lan */
@@ -225,6 +218,9 @@ enum emac_adapter_flags {
 	 * mac driver is removing, add a flag to avoid panic */
 	EMAC_FLAG_ADPT_TASK_REMOVING,
 };
+
+#define EMAC_MAC_UP	0
+#define EMAC_MAC_DOWN	1
 
 /* emac shorthand bitops macros */
 #define TEST_FLAG(OBJ, FLAG)	test_bit(EMAC_FLAG_ ## FLAG,  &((OBJ)->flags))
@@ -694,7 +690,9 @@ struct emac_adapter {
 	struct emac_hw			hw;
 	struct emac_hw_stats		hw_stats;
 	int irq_status;
-
+#ifdef CONFIG_DEBUG_FS
+	struct dentry		*debugfs_dir;
+#endif
 	struct emac_irq_per_dev		irq[EMAC_IRQ_CNT];
 	unsigned int			gpio[EMAC_GPIO_CNT];
 	struct emac_clk			clk[EMAC_CLK_CNT];
@@ -727,10 +725,15 @@ struct emac_adapter {
 	struct emac_tx_tstamp_stats hwtxtstamp_stats;
 
 	struct work_struct work_thread;
+	struct delayed_work  work_delayed;
 	struct timer_list  emac_timer;
 	unsigned long	link_jiffies;
 
 	bool            tstamp_en;
+	bool            mac2mac_en;
+	bool            suspend_called;
+	bool            serdes_synced;
+	u32             speed_mac2mac;
 	u32             wol;
 	u16             msg_enable;
 	unsigned long   flags;
@@ -745,6 +748,8 @@ struct emac_adapter {
 
 	u32       bus_cl_hdl;
 	struct msm_bus_scale_pdata *bus_scale_table;
+	bool remote_mac_down;
+	s8 current_status;
 };
 
 static inline struct emac_adapter *emac_hw_get_adap(struct emac_hw *hw)
@@ -775,6 +780,8 @@ void emac_update_hw_stats(struct emac_adapter *adpt);
 int emac_resize_rings(struct net_device *netdev);
 int emac_mac_up(struct emac_adapter *adpt);
 void emac_mac_down(struct emac_adapter *adpt, u32 ctrl);
+void emac_phy_down(struct emac_adapter *adpt);
+void emac_phy_up(struct emac_adapter *adpt);
 int emac_clk_set_rate(struct emac_adapter *adpt, enum emac_clk_id id,
 		      enum emac_clk_rate rate);
 void emac_task_schedule(struct emac_adapter *adpt);

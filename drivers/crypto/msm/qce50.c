@@ -1,6 +1,6 @@
 /* Qualcomm Crypto Engine driver.
  *
- * Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2017, 2020 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -859,6 +859,11 @@ static int _ce_setup_cipher(struct qce_device *pce_dev, struct qce_req *creq,
 	switch (creq->alg) {
 	case CIPHER_ALG_DES:
 		if (creq->mode !=  QCE_MODE_ECB) {
+			if (ivsize > MAX_IV_LENGTH) {
+				pr_err("%s: error: Invalid length parameter\n",
+					 __func__);
+				return -EINVAL;
+			}
 			_byte_stream_to_net_words(enciv32, creq->iv, ivsize);
 			pce = cmdlistinfo->encr_cntr_iv;
 			pce->data = enciv32[0];
@@ -5928,8 +5933,7 @@ static int setup_dummy_req(struct qce_device *pce_dev)
 	int len = DUMMY_REQ_DATA_LEN;
 
 	memcpy(pce_dev->dummyreq_in_buf, input, len);
-	sg_set_buf(&pce_dev->dummyreq.sg, pce_dev->dummyreq_in_buf, len);
-	sg_mark_end(&pce_dev->dummyreq.sg);
+	sg_init_one(&pce_dev->dummyreq.sg, pce_dev->dummyreq_in_buf, len);
 
 	pce_dev->dummyreq.sreq.alg = QCE_HASH_SHA1;
 	pce_dev->dummyreq.sreq.qce_cb = qce_dummy_complete;

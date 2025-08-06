@@ -45,6 +45,9 @@ when         who         what, where, why
 #include <net/ip6_checksum.h>
 #endif
 #include <linux/msm-bus.h>
+#ifdef CONFIG_DEBUG_FS
+#include <linux/debugfs.h>
+#endif
 
 #include "emac.h"
 #include "emac_phy.h"
@@ -80,8 +83,13 @@ when         who         what, where, why
 #define EMAC_PINCTRL_STATE_EPHY_ACTIVE "emac_ephy_active"
 #define EMAC_PINCTRL_STATE_EPHY_SLEEP  "emac_ephy_sleep"
 
-/* 202011107 bowen fix deadlock issue internally */
-#define EMAC_VERSION "1.0.6"
+#ifdef CONFIG_DEBUG_FS
+#define REG_CHIP_CONFIG                  0x1f
+#define BT_BX_REG_SEL                    0x8000
+#endif
+
+#define EMAC_SYSFS_DEV_ATTR_PERMS 0644
+#define BUFF_SZ 256
 
 struct emac_skb_cb {
 	u32           tpd_idx;
@@ -347,6 +355,52 @@ int emac_clk_set_rate(struct emac_adapter *adpt, enum emac_clk_id id,
 	return ret;
 }
 
+/* Check link status and handle link state changes */
+static void emac_mac2mac_adjust_link(struct net_device *netdev)
+{
+	struct emac_adapter *adpt = netdev_priv(netdev);
+	struct emac_phy *phy = &adpt->phy;
+	struct emac_hw *hw = &adpt->hw;
+	bool status_changed = false;
+	int vote_idx = 0;
+	int ret = 0;
+
+	if (!adpt)
+		return;
+
+	/* ensure that no reset is in progress while link task is running */
+	while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING))
+		/* Reset might take few 10s of ms */
+		msleep(EMAC_ADPT_RESET_WAIT_TIME);
+
+	if (TEST_FLAG(adpt, ADPT_STATE_DOWN))
+		goto link_task_done;
+
+	phy->link_speed = adpt->speed_mac2mac;
+	status_changed = true;
+
+	/* Acquire resources */
+	pm_runtime_get_sync(netdev->dev.parent);
+
+	phy->ops.tx_clk_set_rate(adpt);
+	emac_hw_start_mac(hw);
+	adpt->serdes_synced = 1;
+	netif_carrier_on(adpt->netdev);
+link_task_done:
+	CLR_FLAG(adpt, ADPT_STATE_RESETTING);
+}
+
+static void check_serdes_linkup(struct work_struct *work) {
+	struct delayed_work *dwork = container_of(work, struct delayed_work, work);
+	struct emac_adapter *adpt = container_of(dwork, struct emac_adapter, work_delayed);
+	struct emac_sgmii *sgmii = adpt->phy.private;
+
+	if (readl_relaxed(sgmii->base + EMAC_SGMII_PHY_RX_CHK_STATUS) & 0x40)
+		emac_mac2mac_adjust_link(adpt->netdev);
+	else
+		schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
+}
+
 /* reinitialize */
 int emac_reinit_locked(struct emac_adapter *adpt)
 {
@@ -374,6 +428,15 @@ int emac_reinit_locked(struct emac_adapter *adpt)
 	pm_runtime_put_autosuspend(netdev->dev.parent);
 
 	CLR_FLAG(adpt, ADPT_STATE_RESETTING);
+	if (!adpt->mac2mac_en){
+		emac_phy_down(adpt);
+		emac_phy_up(adpt);
+	}
+	adpt->serdes_synced = 0;
+	if(adpt->mac2mac_en){
+		if(!adpt->serdes_synced)
+			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
+	}
 	return ret;
 }
 
@@ -1274,19 +1337,20 @@ static irqreturn_t emac_wol_isr(int irq, void *data)
 
 	pm_runtime_get_sync(netdev->dev.parent);
 
-	/* read switch interrupt status reg */
-	if (QCA8337_PHY_ID == adpt->phydev->phy_id)
-		ret = qca8337_read(adpt->phydev->priv, QCA8337_GLOBAL_INT1);
+	if(!adpt->mac2mac_en){
+		/* read switch interrupt status reg */
+		if (QCA8337_PHY_ID == adpt->phydev->phy_id)
+			ret = qca8337_read(adpt->phydev->priv, QCA8337_GLOBAL_INT1);
 
-	for (i = 0; i < QCA8337_NUM_PHYS ; i++) {
-		ret = mdiobus_read(adpt->phydev->bus, i, MII_INT_STATUS);
-		if ((ret & LINK_SUCCESS_INTERRUPT) || (ret & LINK_SUCCESS_BX) ||
-		    (ret & WOL_INT))
-			val |= 1 << i;
-		if (QCA8337_PHY_ID != adpt->phydev->phy_id)
-			break;
+		for (i = 0; i < QCA8337_NUM_PHYS ; i++) {
+			ret = mdiobus_read(adpt->phydev->bus, i, MII_INT_STATUS);
+			if ((ret & LINK_SUCCESS_INTERRUPT) || (ret & LINK_SUCCESS_BX) ||
+			    (ret & WOL_INT))
+				val |= 1 << i;
+			if (QCA8337_PHY_ID != adpt->phydev->phy_id)
+				break;
+		}
 	}
-
 	pm_runtime_mark_last_busy(netdev->dev.parent);
 	pm_runtime_put_autosuspend(netdev->dev.parent);
 
@@ -1998,6 +2062,11 @@ link_task_done:
 	CLR_FLAG(adpt, ADPT_STATE_RESETTING);
 }
 
+void emac_phy_up(struct emac_adapter *adpt)
+{
+	phy_start(adpt->phydev);
+}
+
 /* Bringup the interface/HW */
 int emac_mac_up(struct emac_adapter *adpt)
 {
@@ -2042,7 +2111,7 @@ int emac_mac_up(struct emac_adapter *adpt)
 	for (i = 0; i < adpt->num_rxques; i++)
 		emac_refresh_rx_buffer(&adpt->rx_queue[i]);
 
-	if (!adpt->phy.is_ext_phy_connect) {
+	if (!adpt->phy.is_ext_phy_connect && !adpt->mac2mac_en) {
 		ret = phy_connect_direct(netdev, adpt->phydev, emac_adjust_link,
 					 phy->phy_interface);
 		if (ret) {
@@ -2061,12 +2130,13 @@ int emac_mac_up(struct emac_adapter *adpt)
 	phy->link_speed = SPEED_UNKNOWN;
 	phy->link_pause = 0;
 
-	/* Enable pause frames. */
-	adpt->phydev->supported |= SUPPORTED_Pause | SUPPORTED_Asym_Pause;
-	adpt->phydev->advertising |= SUPPORTED_Pause | SUPPORTED_Asym_Pause;
+	if(!adpt->mac2mac_en){
+		/* Enable pause frames. */
+		adpt->phydev->supported |= SUPPORTED_Pause | SUPPORTED_Asym_Pause;
+		adpt->phydev->advertising |= SUPPORTED_Pause | SUPPORTED_Asym_Pause;
 
-	adpt->phydev->irq = PHY_IGNORE_INTERRUPT;
-	phy_start(adpt->phydev);
+		adpt->phydev->irq = PHY_POLL;
+	}
 
 	emac_napi_enable_all(adpt);
 	netif_start_queue(netdev);
@@ -2086,6 +2156,11 @@ err_request_irq:
 	return ret;
 }
 
+void emac_phy_down(struct emac_adapter *adpt)
+{
+	phy_stop(adpt->phydev);
+}
+
 /* Bring down the interface/HW */
 void emac_mac_down(struct emac_adapter *adpt, u32 ctrl)
 {
@@ -2102,8 +2177,6 @@ void emac_mac_down(struct emac_adapter *adpt, u32 ctrl)
 	netif_stop_queue(netdev);
 	emac_napi_disable_all(adpt);
 
-	phy_stop(adpt->phydev);
-
 	/* Interrupts must be disabled before the PHY is disconnected, to
 	 * avoid a race condition where adjust_link is null when we get
 	 * an interrupt.
@@ -2119,10 +2192,11 @@ void emac_mac_down(struct emac_adapter *adpt, u32 ctrl)
 		if (adpt->irq[i].irq)
 			free_irq(adpt->irq[i].irq, &adpt->irq[i]);
 
-    /* 20201107 bowen fix deadlock issue internally
-	 * 20201127 bowenthe phy state machine enters the wrong state, hence, whatever any phy,
-	 * every time when mac up/down happens, we need to disconnect phy state machine. */
-	if (adpt->phy.is_ext_phy_connect) {
+	if ((!adpt->mac2mac_en) &&
+	    ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
+	     (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
+	     (ATH8035_PHY_ID == adpt->phydev->phy_id)) &&
+	     (adpt->phy.is_ext_phy_connect)) {
 		phy_disconnect(adpt->phydev);
 		adpt->phy.is_ext_phy_connect = 0;
 	}
@@ -2163,6 +2237,8 @@ static int emac_open(struct net_device *netdev)
 
 	pm_runtime_get_sync(netdev->dev.parent);
 	retval = emac_mac_up(adpt);
+	if (!adpt->mac2mac_en)
+		emac_phy_up(adpt);
 	pm_runtime_mark_last_busy(netdev->dev.parent);
 	pm_runtime_put_autosuspend(netdev->dev.parent);
 	if (retval)
@@ -2187,6 +2263,15 @@ static int emac_open(struct net_device *netdev)
 			emac_wol_gpio_irq(adpt, false);
 		}
 	}
+
+	if(adpt->mac2mac_en) {
+		if (adpt->remote_mac_down)
+			return retval;
+
+		if(!adpt->serdes_synced)
+			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
+	}
+
 	return retval;
 
 err_up:
@@ -2201,12 +2286,6 @@ static int emac_close(struct net_device *netdev)
 	struct emac_adapter *adpt = netdev_priv(netdev);
 	struct emac_hw *hw = &adpt->hw;
 	struct emac_phy *phy = &adpt->phy;
-	
-    /* 202011107 bowen fix deadlock issue internally */
-	/* ensure no task is running and no reset is in progress */
-	while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING))
-		/* Reset might take few 10s of ms */
-		msleep(EMAC_ADPT_RESET_WAIT_TIME);
 
 	pm_runtime_get_sync(netdev->dev.parent);
 
@@ -2217,9 +2296,11 @@ static int emac_close(struct net_device *netdev)
 		disable_irq_wake(adpt->irq[EMAC_WOL_IRQ].irq);
 	}
 
-	if (!TEST_FLAG(adpt, ADPT_STATE_DOWN))
+	if (!TEST_FLAG(adpt, ADPT_STATE_DOWN)) {
 		emac_mac_down(adpt, EMAC_HW_CTRL_RESET_MAC);
-	else
+		if (!adpt->mac2mac_en)
+			emac_phy_down(adpt);
+	} else
 		emac_hw_reset_mac(hw);
 
 	if (TEST_FLAG(hw, HW_PTP_CAP))
@@ -2230,7 +2311,9 @@ static int emac_close(struct net_device *netdev)
 
 	emac_free_all_rtx_descriptor(adpt);
 
-	CLR_FLAG(adpt, ADPT_STATE_RESETTING);
+	cancel_delayed_work_sync(&adpt->work_delayed);
+ 	flush_delayed_work(&adpt->work_delayed);
+	adpt->serdes_synced = 0;
 	return 0;
 }
 
@@ -2259,7 +2342,10 @@ static int emac_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 		if (TEST_FLAG(hw, HW_PTP_CAP))
 			return emac_tstamp_ioctl(netdev, ifr, cmd);
 	default:
-		return phy_mii_ioctl(netdev->phydev, ifr, cmd);
+		if(!adpt->mac2mac_en)
+			return phy_mii_ioctl(netdev->phydev, ifr, cmd);
+		else
+			return 0;
 	}
 }
 
@@ -2273,7 +2359,7 @@ void emac_update_hw_stats(struct emac_adapter *adpt)
 	/* Prevent stats update while adapter is being reset, or if the
 	 * connection is down.
 	 */
-	if (adpt->phydev->speed <= 0)
+	if (!adpt->mac2mac_en && adpt->phydev->speed <= 0)
 		return;
 
 	if (TEST_FLAG(adpt, ADPT_STATE_DOWN) ||
@@ -2400,7 +2486,6 @@ static void emac_work_thread(struct work_struct *work)
 
 	emac_reinit_task_routine(adpt);
 
-	phy_mac_interrupt(adpt->phydev, !!(adpt->irq_status & ISR_GPHY_LINK));
 	adpt->irq_status &= ~ISR_GPHY_LINK;
 
 	adpt->phy.ops.periodic_task(adpt);
@@ -2806,6 +2891,10 @@ static int emac_get_resources(struct platform_device *pdev,
 		adpt->tstamp_en
 			= of_property_read_bool(node, "qcom,emac-tstamp-en");
 
+	/* get mac2mac enable flag and speed*/
+	adpt->mac2mac_en = of_property_read_bool(node, "mac2mac");
+	of_property_read_u32(node, "speed_mac2mac", &adpt->speed_mac2mac);
+
 	/* get mac address */
 	if (ACPI_COMPANION(&pdev->dev)) {
 		retval = device_property_read_u8_array(&pdev->dev,
@@ -3004,45 +3093,52 @@ static int emac_pm_suspend(struct device *device, bool wol_enable)
 			msleep(EMAC_ADPT_RESET_WAIT_TIME);
 
 		emac_mac_down(adpt, 0);
+		if (!adpt->mac2mac_en)
+			emac_phy_down(adpt);
 
 		CLR_FLAG(adpt, ADPT_STATE_RESETTING);
 	}
+	if(!adpt->mac2mac_en){
+		phy_suspend(adpt->phydev);
+		flush_delayed_work(&adpt->phydev->state_queue);
+		if (QCA8337_PHY_ID != adpt->phydev->phy_id)
+			emac_hw_config_pow_save(hw, adpt->phydev->speed, !!wufc,
+						!!(wufc & EMAC_WOL_PHY));
 
-	phy_suspend(adpt->phydev);
-	flush_delayed_work(&adpt->phydev->state_queue);
-	if (QCA8337_PHY_ID != adpt->phydev->phy_id)
-		emac_hw_config_pow_save(hw, adpt->phydev->speed, !!wufc,
-					!!(wufc & EMAC_WOL_PHY));
+		if (!adpt->phydev->link && phy->is_wol_irq_reg) {
+			int value, i;
 
-	if (!adpt->phydev->link && phy->is_wol_irq_reg) {
-		int value, i;
-
-		for (i = 0; i < QCA8337_NUM_PHYS ; i++) {
-			/* ePHY driver keep external phy into power down mode
-			 * if WOL is not enabled. This change is to make sure
-			 * to keep ePHY in active state for LINK UP to work
+			for (i = 0; i < QCA8337_NUM_PHYS ; i++) {
+				/* ePHY driver keep external phy into power down mode
+				 * if WOL is not enabled. This change is to make sure
+				 * to keep ePHY in active state for LINK UP to work
 			 */
-			value = mdiobus_read(adpt->phydev->bus, i, MII_BMCR);
-			value &= ~BMCR_PDOWN;
-			mdiobus_write(adpt->phydev->bus, i, MII_BMCR, value);
+				value = mdiobus_read(adpt->phydev->bus, i, MII_BMCR);
+				value &= ~BMCR_PDOWN;
+				mdiobus_write(adpt->phydev->bus, i, MII_BMCR, value);
 
-			/* Enable EPHY Link UP interrupt */
-			mdiobus_write(adpt->phydev->bus, i, MII_INT_ENABLE,
-				      LINK_SUCCESS_INTERRUPT |
-				      LINK_SUCCESS_BX);
+				/* Enable EPHY Link UP interrupt */
+				mdiobus_write(adpt->phydev->bus, i, MII_INT_ENABLE,
+					      LINK_SUCCESS_INTERRUPT |
+					      LINK_SUCCESS_BX);
+			}
+
+			/* enable switch interrupts */
+			if (QCA8337_PHY_ID == adpt->phydev->phy_id)
+				qca8337_write(adpt->phydev->priv,
+					      QCA8337_GLOBAL_INT1_MASK, 0x8000);
+
+			if (wol_enable && phy->is_wol_irq_reg)
+				emac_wol_gpio_irq(adpt, true);
 		}
-
-		/* enable switch interrupts */
-		if (QCA8337_PHY_ID == adpt->phydev->phy_id)
-			qca8337_write(adpt->phydev->priv,
-				      QCA8337_GLOBAL_INT1_MASK, 0x8000);
-
-		if (wol_enable && phy->is_wol_irq_reg)
-			emac_wol_gpio_irq(adpt, true);
 	}
-
 	adpt->gpio_off(adpt, true, false);
 	msm_emac_clk_path_vote(adpt, EMAC_NO_PERF_VOTE);
+
+	adpt->suspend_called = 1;
+	cancel_delayed_work_sync(&adpt->work_delayed);
+	flush_delayed_work(&adpt->work_delayed);
+	adpt->serdes_synced = 0;
 	return 0;
 }
 
@@ -3059,22 +3155,35 @@ static int emac_pm_resume(struct device *device)
 	msm_emac_clk_path_vote(adpt, EMAC_MAX_PERF_VOTE);
 	emac_hw_reset_mac(hw);
 
-	/* Disable EPHY Link UP interrupt */
-	if (phy->is_wol_irq_reg) {
-		for (i = 0; i < QCA8337_NUM_PHYS ; i++)
-			mdiobus_write(adpt->phydev->bus, i, MII_INT_ENABLE, 0);
+	if (!adpt->mac2mac_en){
+		/* Disable EPHY Link UP interrupt */
+		if (phy->is_wol_irq_reg) {
+			for (i = 0; i < QCA8337_NUM_PHYS ; i++)
+				mdiobus_write(adpt->phydev->bus, i, MII_INT_ENABLE, 0);
+		}
+
+		/* disable switch interrupts */
+		if (QCA8337_PHY_ID == adpt->phydev->phy_id)
+			qca8337_write(adpt->phydev->priv, QCA8337_GLOBAL_INT1, 0x8000);
+
+		phy_resume(adpt->phydev);
 	}
-
-	/* disable switch interrupts */
-	if (QCA8337_PHY_ID == adpt->phydev->phy_id)
-		qca8337_write(adpt->phydev->priv, QCA8337_GLOBAL_INT1, 0x8000);
-
-	phy_resume(adpt->phydev);
-
 	if (netif_running(netdev)) {
 		retval = emac_mac_up(adpt);
+		emac_phy_up(adpt);
 		if (retval)
 			goto error;
+		if (!adpt->mac2mac_en){
+			emac_phy_up(adpt);
+		}
+	}
+
+	if(adpt->mac2mac_en) {
+		if (adpt->remote_mac_down)
+			return retval;
+
+		if(!adpt->serdes_synced && adpt->suspend_called)
+			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
 	}
 	return 0;
 error:
@@ -3166,6 +3275,320 @@ static int emac_pm_sys_resume(struct device *device)
 	return 0;
 }
 #endif
+
+#ifdef CONFIG_DEBUG_FS
+static ssize_t phy_reg_read_dump(struct file *file, char __user *user_buf,
+		size_t count, loff_t *ppos)
+{
+	struct emac_adapter *adpt = file->private_data;
+	int phydata = 0;
+	int i = 0;
+	unsigned int len = 0, buf_len = 3000;
+	char *buf;
+	ssize_t ret_cnt;
+	int ccr;
+
+
+	if (!adpt || !adpt->mii_bus || !adpt->phydev) {
+		return -1;
+	}
+
+	buf = kzalloc(buf_len, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	len += scnprintf(buf + len, buf_len - len,
+			"\n************* PHY Reg dump *************\n");
+
+	for (i = 0; i < 32; i++) {
+		phydata = adpt->mii_bus->read(adpt->mii_bus, adpt->phydev->addr, i);
+		len += scnprintf(buf + len, buf_len - len,
+				"MII Register (%#x) = %#x\n",
+				i, phydata);
+	}
+	ccr = phy_read(adpt->phydev, REG_CHIP_CONFIG);
+	/* switch to SGMII/fiber page */
+	phy_write(adpt->phydev, REG_CHIP_CONFIG, ccr & ~BT_BX_REG_SEL);
+	len += scnprintf(buf + len, buf_len - len,
+		                        "\n fiber ************* PHY Reg dump *************\n");
+
+	for (i = 0; i < 32; i++) {
+		phydata = adpt->mii_bus->read(adpt->mii_bus, adpt->phydev->addr, i);
+		len += scnprintf(buf + len, buf_len - len,
+				"MII Register (%#x) = %#x\n",
+				i, phydata);
+	}
+
+	/* switch back to copper page */
+	phy_write(adpt->phydev, REG_CHIP_CONFIG, ccr | BT_BX_REG_SEL);
+	len += scnprintf(buf + len, buf_len - len,
+			"\n copper ************* PHY Reg dump *************\n");
+
+	for (i = 0; i < 32; i++) {
+		phydata = adpt->mii_bus->read(adpt->mii_bus, adpt->phydev->addr, i);
+		len += scnprintf(buf + len, buf_len - len,
+				"MII Register (%#x) = %#x\n",
+				i, phydata);
+	}
+
+	if (len > buf_len) {
+		len = buf_len;
+	}
+
+	ret_cnt = simple_read_from_buffer(user_buf, count, ppos, buf, len);
+	kfree(buf);
+	return ret_cnt;
+
+}
+
+static ssize_t phy_reg_write(struct file *file, const char __user *user_buf,
+		                size_t count, loff_t *ppos)
+{
+	struct emac_adapter *adpt = file->private_data;
+	unsigned long ret;
+	char in_buf[400];
+	unsigned int val;
+	unsigned int regnum, page;
+	int phydata;
+	int ccr;
+
+	ret = copy_from_user(in_buf, user_buf, count);
+	if (ret) {
+		return -1;
+	}
+
+	ret = sscanf(in_buf, "%x %x %x", &page, &regnum, &val);
+
+	if (!adpt || !adpt->mii_bus || !adpt->phydev) {
+		return -1;
+	}
+
+	ccr = phy_read(adpt->phydev, REG_CHIP_CONFIG);
+	if (page == 1) {
+		/* switch back to copper page */
+		phy_write(adpt->phydev, REG_CHIP_CONFIG, ccr | BT_BX_REG_SEL);
+		phydata = adpt->mii_bus->read(adpt->mii_bus,  adpt->phydev->addr, regnum);
+		return count;
+	} else if (page == 2) {
+		/* switch to SGMII/fiber page */
+		 phy_write(adpt->phydev, REG_CHIP_CONFIG, ccr & ~BT_BX_REG_SEL);
+		 phydata = adpt->mii_bus->read(adpt->mii_bus,  adpt->phydev->addr, regnum);
+		 return count;
+	}
+
+	phy_write(adpt->phydev, REG_CHIP_CONFIG, ccr | BT_BX_REG_SEL);
+	if (val >= 0 && regnum >= 0) {
+		pm_runtime_get_sync(adpt->netdev->dev.parent);
+		phydata = adpt->mii_bus->write(adpt->mii_bus,  adpt->phydev->addr, regnum, val);
+		pm_runtime_mark_last_busy(adpt->netdev->dev.parent);
+		pm_runtime_put_autosuspend(adpt->netdev->dev.parent);
+	} else {
+		pr_err("Invalid args");
+	}
+
+	return count;
+}
+
+static const struct file_operations fops_phy_reg_rw = {
+	.read = phy_reg_read_dump,
+	.write = phy_reg_write,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+/* Create debugfs nodes */
+static int emac_create_debugfs(struct emac_adapter *adpt)
+{
+	static struct dentry *phy_reg_rw;
+	char dir_name[32];
+
+	snprintf(dir_name, sizeof(dir_name), "%s%d", "eth", 0);
+
+	adpt->debugfs_dir = debugfs_create_dir(dir_name, NULL);
+	if (!adpt->debugfs_dir || IS_ERR(adpt->debugfs_dir)) {
+		pr_err("Can't create debugfs dir\n");
+		return -1;
+	}
+
+	phy_reg_rw = debugfs_create_file("phy_reg_rw", 0400,
+			adpt->debugfs_dir, adpt,
+			&fops_phy_reg_rw);
+	if (!phy_reg_rw || IS_ERR(phy_reg_rw)) {
+		pr_err("Can't create phy_reg_rw %d\n", (long)phy_reg_rw);
+		goto fail;
+	}
+
+	return 0;
+fail:
+	debugfs_remove_recursive(adpt->debugfs_dir);
+	return -1;
+}
+#endif
+
+static ssize_t read_remote_mac_state(struct device *dev,
+			      struct device_attribute *attr,
+			      char *user_buf)
+{
+	struct net_device *netdev = NULL;
+	struct emac_adapter *adpt = NULL;
+	unsigned int len = 0, buf_len = 2000;
+	char buf[2000];
+
+	if (!dev) {
+		pr_info("%s %d device is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	netdev = to_net_dev(dev);
+	if (!netdev) {
+		pr_info("%s %d net_device is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	adpt = netdev_priv(netdev);
+	if (!adpt) {
+		pr_info("%s %d adpt is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	if (netif_running(netdev) && netif_carrier_ok(netdev)) {
+		len += scnprintf(buf + len, buf_len - len,
+				"Current EMAC state : UP\n");
+	} else {
+		len += scnprintf(buf + len, buf_len - len,
+				"Current EMAC state : DOWN\n");
+	}
+
+	if (len > buf_len)
+		len = buf_len;
+
+	memcpy(user_buf, buf, len);
+	return len;
+}
+
+static ssize_t write_remote_mac_state(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *user_buf,
+			       size_t count)
+{
+	struct net_device *netdev = NULL;
+	struct emac_adapter *adpt = NULL;
+	struct emac_hw *hw = NULL;
+	struct emac_phy *phy = NULL;
+	int retval = 0, i;
+
+	if (!dev) {
+		pr_info("%s %d device is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	netdev = to_net_dev(dev);
+	if (!netdev) {
+		pr_info("%s %d net_device is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	adpt = netdev_priv(netdev);
+	if (!adpt) {
+		pr_info("%s %d adpt is NULL\n", __func__, __LINE__);
+		return -1;
+	}
+
+	hw = &adpt->hw;
+	phy = &adpt->phy;
+
+	if (kstrtos8(user_buf, 0, &adpt->current_status))
+		return -1;
+
+	if (adpt->current_status == EMAC_MAC_UP) {
+		if (!adpt->remote_mac_down) {
+			pr_err("remote mac state is already up\n");
+			return -1;
+		}
+		adpt->remote_mac_down = false;
+
+		if(netif_running(netdev))
+			schedule_delayed_work(&adpt->work_delayed, msecs_to_jiffies(1000));
+
+	} else if (adpt->current_status == EMAC_MAC_DOWN) {
+		if (adpt->remote_mac_down) {
+			pr_err("remote mac state is already down\n");
+			return -1;
+		}
+		adpt->remote_mac_down = true;
+
+		if (!netif_carrier_ok(netdev)) {
+			pr_err("ethernet interface is already down\n");
+			return -1;
+		}
+
+		netif_carrier_off(netdev);
+		emac_hw_stop_mac(hw);
+
+		pm_runtime_mark_last_busy(netdev->dev.parent);
+		pm_runtime_put_autosuspend(netdev->dev.parent);
+
+		cancel_delayed_work_sync(&adpt->work_delayed);
+		flush_delayed_work(&adpt->work_delayed);
+		adpt->serdes_synced = 0;
+	} else {
+		pr_err("option 1 for bringdown\n option 0 for bringup\n");
+	}
+
+	return count;
+}
+
+static DEVICE_ATTR(remote_mac_state, EMAC_SYSFS_DEV_ATTR_PERMS,
+		                   read_remote_mac_state, write_remote_mac_state);
+
+static int emac_remove_sysfs(struct emac_adapter *adpt)
+{
+	struct net_device *netdev;
+
+	if (!adpt) {
+		pr_err("adpt is NULL\n");
+		return -1;
+	}
+
+	netdev = adpt->netdev;
+
+	if (!netdev) {
+		pr_err("netdev is NULL\n");
+		return -1;
+	}
+
+	sysfs_remove_file(&netdev->dev.kobj,
+			  &dev_attr_remote_mac_state.attr);
+	return 0;
+}
+
+static int emac_create_sysfs(struct emac_adapter *adpt)
+{
+	struct net_device *netdev;
+	int ret = 0;
+
+	if (!adpt || !adpt->netdev) {
+		pr_err("adpt is NULL\n");
+		goto fail;
+	}
+
+	netdev = adpt->netdev;
+	if (!netdev) {
+		pr_err("netdev is NULL\n");
+		goto fail;
+	}
+
+	ret = sysfs_create_file(&netdev->dev.kobj, &dev_attr_remote_mac_state.attr);
+	if (ret) {
+		pr_err("unable to create sysfs mac_state node\n");
+		goto fail;
+	}
+	return 0;
+
+fail:
+	return -1;
+}
 
 /* Probe function */
 static int emac_probe(struct platform_device *pdev)
@@ -3272,7 +3695,11 @@ static int emac_probe(struct platform_device *pdev)
 
 	mdelay(20);
 	/* init external phy */
-	ret = emac_phy_config_external(pdev, adpt);
+	if (!adpt->mac2mac_en)
+		ret = emac_phy_config_external(pdev, adpt);
+	else
+		dev_err(&pdev->dev, "mac2mac is enabled, not attaching external phy\n");
+
 	if (ret)
 		goto err_init_mdio_gpio;
 
@@ -3290,6 +3717,8 @@ static int emac_probe(struct platform_device *pdev)
 				 NETIF_F_TSO | NETIF_F_TSO6;
 
 	INIT_WORK(&adpt->work_thread, emac_work_thread);
+	if(adpt->mac2mac_en)
+		INIT_DELAYED_WORK(&adpt->work_delayed, check_serdes_linkup);
 
 	/* Initialize queues */
 	emac_mac_rx_tx_ring_init_all(pdev, adpt);
@@ -3338,6 +3767,14 @@ static int emac_probe(struct platform_device *pdev)
 		pm_runtime_put_autosuspend(&pdev->dev);
 	}
 
+#ifdef CONFIG_DEBUG_FS
+	emac_create_debugfs(adpt);
+#endif
+	if (adpt->mac2mac_en){
+		if (emac_create_sysfs(adpt))
+			pr_err("Error: create sysfs node failed\n");
+	}
+
 	emac_dbg(adpt, probe, "HW ID %d.%d, HW version %d.%d.%d\n",
 		 hw->devid, hw->revid,
 		 (hw_ver & MAJOR_BMSK) >> MAJOR_SHFT,
@@ -3350,24 +3787,27 @@ static int emac_probe(struct platform_device *pdev)
 err_undo_napi:
 	for (i = 0; i < adpt->num_rxques; i++)
 		netif_napi_del(&adpt->rx_queue[i].napi);
-	if (!ACPI_COMPANION(&pdev->dev))
+	if (!adpt->mac2mac_en && !ACPI_COMPANION(&pdev->dev))
 		put_device(&adpt->phydev->dev);
 	mdiobus_unregister(adpt->mii_bus);
 err_init_mdio_gpio:
 	adpt->gpio_off(adpt, true, true);
 err_clk_init:
-	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
+	if ((!adpt->mac2mac_en) &&
+	    (ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
 	    (BCM89832_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
 		emac_disable_clks(adpt);
 err_ldo_init:
-	if ((ATH8030_PHY_ID == adpt->phydev->phy_id) ||
+	if ((!adpt->mac2mac_en) &&
+	    (ATH8030_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8031_PHY_ID == adpt->phydev->phy_id) ||
 	    (BCM89832_PHY_ID == adpt->phydev->phy_id) ||
 	    (ATH8035_PHY_ID == adpt->phydev->phy_id))
 		emac_disable_regulator(adpt, EMAC_VREG1, EMAC_VREG5);
 err_get_resource:
+	msm_emac_clk_path_teardown(adpt);
 	free_netdev(netdev);
 
 	return ret;
@@ -3390,14 +3830,10 @@ static int emac_remove(struct platform_device *pdev)
 	if (!pm_runtime_enabled(&pdev->dev) ||
 	    !pm_runtime_suspended(&pdev->dev)) {
 		if (netif_running(netdev)) {
-			/* ensure no task/reset is in progress */
-			while (TEST_N_SET_FLAG(adpt, ADPT_STATE_RESETTING))
-				/* Reset might take few 10s of ms */
-				msleep(EMAC_ADPT_RESET_WAIT_TIME);
-
-				emac_mac_down(adpt, 0);
-				CLR_FLAG(adpt, ADPT_STATE_RESETTING);
-			}
+			emac_mac_down(adpt, 0);
+			if(!adpt->mac2mac_en)
+				emac_phy_down(adpt);
+		}
 		pm_runtime_disable(netdev->dev.parent);
 		pm_runtime_set_suspended(netdev->dev.parent);
 		pm_runtime_enable(netdev->dev.parent);
@@ -3409,7 +3845,8 @@ static int emac_remove(struct platform_device *pdev)
 	if (phy->is_wol_irq_reg)
 		emac_wol_gpio_irq(adpt, false);
 
-	mdiobus_unregister(adpt->mii_bus);
+	if(!adpt->mac2mac_en)
+		mdiobus_unregister(adpt->mii_bus);
 	unregister_netdev(netdev);
 
 	for (i = 0; i < adpt->num_rxques; i++)
@@ -3425,7 +3862,14 @@ static int emac_remove(struct platform_device *pdev)
 	emac_disable_regulator(adpt, EMAC_VREG1, EMAC_VREG5);
 	msm_emac_clk_path_teardown(adpt);
 
-	if (!ACPI_COMPANION(&pdev->dev))
+
+#ifdef CONFIG_DEBUG_FS
+	debugfs_remove_recursive(adpt->debugfs_dir);
+#endif
+	if (adpt->mac2mac_en)
+		emac_remove_sysfs(adpt);
+
+	if (!adpt->mac2mac_en && !ACPI_COMPANION(&pdev->dev))
 		put_device(&adpt->phydev->dev);
 
 	if (sgmii->digital)

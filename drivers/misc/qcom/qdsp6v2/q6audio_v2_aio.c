@@ -9,6 +9,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
 */
 
 #include <linux/module.h>
@@ -117,7 +118,7 @@ void audio_aio_cb(uint32_t opcode, uint32_t token,
 	}
 }
 
-void extract_meta_out_info(struct q6audio_aio *audio,
+int extract_meta_out_info(struct q6audio_aio *audio,
 		struct audio_aio_buffer_node *buf_node, int dir)
 {
 	struct dec_meta_out *meta_data = buf_node->kvaddr;
@@ -155,6 +156,7 @@ void extract_meta_out_info(struct q6audio_aio *audio,
 			meta_out_dsp[0].nflags,
 		((struct dec_meta_out *)buf_node->kvaddr)->num_of_frames);
 	}
+	return 0;
 }
 
 /* Read buffer from DSP / Handle Ack from DSP */

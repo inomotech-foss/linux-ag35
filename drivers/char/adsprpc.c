@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -61,6 +61,11 @@
 #define FASTRPC_ENOSUCH 39
 #define VMID_SSC_Q6     5
 #define VMID_ADSP_Q6    6
+
+#define ADSP_DOMAIN_ID (0)
+#define MDSP_DOMAIN_ID (1)
+#define SDSP_DOMAIN_ID (2)
+#define CDSP_DOMAIN_ID (3)
 
 #define RPC_TIMEOUT	(5 * HZ)
 #define OPEN_TIMEOUT    (0.5 * HZ)
@@ -252,6 +257,7 @@ struct fastrpc_mmap {
 	int refs;
 	uintptr_t raddr;
 	int uncached;
+	bool is_filemap; /*flag to indicate map used in process init*/
 };
 
 struct fastrpc_file {
@@ -458,9 +464,10 @@ static int fastrpc_mmap_remove(struct fastrpc_file *fl, uintptr_t va,
 
 	spin_lock(&me->hlock);
 	hlist_for_each_entry_safe(map, n, &me->maps, hn) {
-		if (map->raddr == va &&
+		if (map->refs == 1 && map->raddr == va &&
 			map->raddr + map->len == va + len &&
-			map->refs == 1) {
+			/*Remove map if not used in process initialization*/
+			!map->is_filemap) {
 			match = map;
 			hlist_del_init(&map->hn);
 			break;
@@ -473,9 +480,10 @@ static int fastrpc_mmap_remove(struct fastrpc_file *fl, uintptr_t va,
 	}
 	spin_lock(&fl->hlock);
 	hlist_for_each_entry_safe(map, n, &fl->maps, hn) {
-		if (map->raddr == va &&
+		if (map->refs == 1 && map->raddr == va &&
 			map->raddr + map->len == va + len &&
-			map->refs == 1) {
+			/*Remove map if not used in process initialization*/
+			!map->is_filemap) {
 			match = map;
 			hlist_del_init(&map->hn);
 			break;
@@ -493,11 +501,21 @@ static void fastrpc_mmap_free(struct fastrpc_mmap *map)
 {
 	struct fastrpc_apps *me = &gfa;
 	struct fastrpc_file *fl;
-	int vmid;
+	int vmid, cid = -1, err = 0;
 
 	if (!map)
 		return;
 	fl = map->fl;
+	if (fl && !(map->flags == ADSP_MMAP_HEAP_ADDR)) {
+		cid = fl->cid;
+		VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
+		if (err) {
+			err = -ECHRNG;
+			pr_err("adsprpc: ERROR:%s, Invalid channel id: %d, err:%d",
+					__func__, cid, err);
+			return;
+		}
+	}
 	if (map->flags == ADSP_MMAP_HEAP_ADDR) {
 		spin_lock(&me->hlock);
 		map->refs--;
@@ -564,12 +582,21 @@ static int fastrpc_mmap_create(struct fastrpc_file *fl, int fd, uintptr_t va,
 	struct fastrpc_apps *me = &gfa;
 	struct fastrpc_session_ctx *sess = fl->sctx;
 	struct fastrpc_mmap *map = NULL;
+	struct fastrpc_apps *apps = fl->apps;
+	struct fastrpc_channel_ctx *chan = NULL;
 	struct dma_attrs attrs;
 	dma_addr_t region_start = 0;
 	void *region_vaddr = NULL;
 	unsigned long flags;
-	int err = 0, vmid;
+	int err = 0, vmid, cid = -1;
 
+	cid = fl->cid;
+	VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
+	if (err) {
+		err = -ECHRNG;
+		goto bail;
+	}
+	chan = &apps->channel[cid];
 	if (!fastrpc_mmap_find(fl, fd, va, len, mflags, ppmap))
 		return 0;
 	map = kzalloc(sizeof(*map), GFP_KERNEL);
@@ -581,6 +608,7 @@ static int fastrpc_mmap_create(struct fastrpc_file *fl, int fd, uintptr_t va,
 	INIT_HLIST_NODE(&map->hn);
 	map->fl = fl;
 	map->fd = fd;
+	map->is_filemap = false;
 	if (mflags == ADSP_MMAP_HEAP_ADDR) {
 		DEFINE_DMA_ATTRS(rh_attrs);
 
@@ -1106,7 +1134,7 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx)
 	metalen = copylen = (size_t)&ipage[0];
 
 	/* allocate new local rpra buffer */
-	lrpralen = (size_t)&list[0];
+	lrpralen = (u64)(uintptr_t)&list[0];
 	if (lrpralen) {
 		err = fastrpc_buf_alloc(ctx->fl, lrpralen,
 			ctx_attrs, 0, 0, &ctx->lbuf);
@@ -1391,11 +1419,22 @@ static int fastrpc_invoke_send(struct smq_invoke_ctx *ctx,
 {
 	struct smq_msg *msg = &ctx->msg;
 	struct fastrpc_file *fl = ctx->fl;
-	int err = 0, len;
+	int err = 0, len, cid = -1;
+	struct fastrpc_channel_ctx *channel_ctx = NULL;
 
-	VERIFY(err, NULL != fl->apps->channel[fl->cid].chan);
-	if (err)
+	cid = fl->cid;
+	VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
+	if (err) {
+		err = -ECHRNG;
 		goto bail;
+	}
+	channel_ctx = &fl->apps->channel[fl->cid];
+
+	VERIFY(err, NULL != channel_ctx->chan);
+	if (err) {
+		err = -ECHRNG;
+		goto bail;
+	}
 	msg->pid = current->tgid;
 	msg->tid = current->pid;
 	if (kernel)
@@ -1499,16 +1538,19 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 {
 	struct smq_invoke_ctx *ctx = NULL;
 	struct fastrpc_ioctl_invoke *invoke = &invokefd->inv;
-	int cid = fl->cid;
-	int interrupted = 0;
-	int err = 0;
+	int err = 0, cid = -1, interrupted = 0;
 
+	cid = fl->cid;
+	VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
+	if (err) {
+		err = -ECHRNG;
+		goto bail;
+	}
 	VERIFY(err, fl->sctx != NULL);
-	if (err)
+	if (err) {
+		err = -EBADR;
 		goto bail;
-	VERIFY(err, fl->cid >= 0 && fl->cid < NUM_CHANNELS);
-	if (err)
-		goto bail;
+	}
 
 	if (!kernel) {
 		VERIFY(err, 0 == context_restore_interrupted(fl, invokefd,
@@ -1611,6 +1653,8 @@ static int fastrpc_init_process(struct fastrpc_file *fl,
 		if (init->filelen) {
 			VERIFY(err, !fastrpc_mmap_create(fl, init->filefd,
 				init->file, init->filelen, mflags, &file));
+			if (file)
+				file->is_filemap = true;
 			if (err)
 				goto bail;
 		}

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2018, 2021, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1757,7 +1757,7 @@ free_dma:
 			if (last_pos < ecc_bytes_percw_in_bits)
 				num_zero_bits++;
 
-			if (num_zero_bits > 4) {
+			if (num_zero_bits > MAX_ECC_BIT_FLIPS) {
 				*erased_page = false;
 				goto free_mem;
 			}
@@ -1769,7 +1769,7 @@ free_dma:
 		ecc_temp += chip->ecc_parity_bytes;
 	}
 
-	if ((n == cwperpage) && (num_zero_bits <= 4))
+	if ((n == cwperpage) && (num_zero_bits <= MAX_ECC_BIT_FLIPS))
 		*erased_page = true;
 free_mem:
 	kfree(ecc);
@@ -1788,7 +1788,7 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 	struct msm_nand_chip *chip = &info->nand_chip;
 	struct flash_identification *flash_dev = &info->flash_dev;
 	uint32_t cwperpage = (mtd->writesize >> 9);
-	int err, pageerr = 0, rawerr = 0, submitted_num_desc = 0;
+	int err, pageerr = 0, rawerr = 0, submitted_num_desc = 0, count = 0;
 	uint32_t n = 0, pages_read = 0;
 	uint32_t ecc_errors = 0, total_ecc_errors = 0, ecc_capability;
 	struct msm_nand_rw_params rw_params;
@@ -1969,6 +1969,33 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 			goto free_dma;
 		/* Check for flash status errors */
 		pageerr = rawerr = 0;
+
+		/*
+		 * PAGE_ERASED bit will set only if all
+		 * CODEWORD_ERASED bit of all codewords
+		 * of the page is set.
+		 *
+		 * PAGE_ERASED bit is a 'logical and' of all
+		 * CODEWORD_ERASED bit of all codewords i.e.
+		 * even if one codeword is detected as not
+		 * an erased codeword, PAGE_ERASED bit will unset.
+		 */
+		for (n = rw_params.start_sector; n < cwperpage; n++) {
+			if ((dma_buffer->result[n].erased_cw_status &
+					(1 << PAGE_ERASED)) &&
+					(dma_buffer->result[n].buffer_status &
+					NUM_ERRORS)) {
+				err = msm_nand_is_erased_page(mtd,
+						from, ops,
+						&rw_params,
+						&erased_page);
+				if (err)
+					goto free_dma;
+				if (erased_page)
+					rawerr = -EIO;
+				break;
+			}
+		}
 		for (n = rw_params.start_sector; n < cwperpage; n++) {
 			if (dma_buffer->result[n].flash_status & (FS_OP_ERR |
 					FS_MPU_ERR)) {
@@ -2038,10 +2065,7 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 			 * and this will only handle about 64 pages being read
 			 * at a time i.e. one erase block worth of pages.
 			 */
-			/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start (fixed 2)*/
-			//fix_data_in_pages |= BIT(rw_params.page_count);
-			fix_data_in_pages |= BIT(fix_page_count);
-			/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
+			fix_data_in_pages |= BIT(pages_read);
 		}
 		/* check for correctable errors */
 		if (!rawerr) {
@@ -2116,9 +2140,7 @@ free_dma:
 	/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 	while (fix_data_in_pages) {
 		int temp_page = 0, oobsize = rw_params.cwperpage << 2;
-		/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 start(fixed 5)*/
 		int offset = 0;
-		/* add for earsed page is not all 0xff that it fix bug by Tim 20190903 end*/
 
 		temp_page = fix_data_in_pages & BIT_MASK(0);
 		fix_data_in_pages = fix_data_in_pages >> 1;

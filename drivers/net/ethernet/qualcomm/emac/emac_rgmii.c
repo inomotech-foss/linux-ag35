@@ -139,6 +139,9 @@ static void emac_rgmii_tx_clk_set_rate(struct emac_adapter *adpt)
 {
 	struct phy_device *phydev = adpt->phydev;
 
+	if(adpt->mac2mac_en)
+		return;
+
 	switch (phydev->speed) {
 	case SPEED_1000:
 		clk_set_rate(adpt->clk[EMAC_CLK_TX].clk, EMC_CLK_RATE_125MHZ);

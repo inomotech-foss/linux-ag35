@@ -78,7 +78,13 @@ static const char *const emac_ethtool_stat_strings[] = {
 static int emac_get_settings(struct net_device *netdev,
 			     struct ethtool_cmd *cmd)
 {
-	struct phy_device *phydev = netdev->phydev;
+	struct emac_adapter *adpt = netdev_priv(netdev);
+	struct phy_device *phydev;
+
+	if(adpt->mac2mac_en)
+		return 0;
+
+	phydev = netdev->phydev;
 
 	if (!netif_running(netdev))
 		return -EINVAL;
@@ -94,8 +100,13 @@ static int emac_set_settings(struct net_device *netdev,
 {
 	struct emac_adapter *adpt = netdev_priv(netdev);
 	struct emac_phy *phy = &adpt->phy;
-	struct phy_device *phydev = netdev->phydev;
+	struct phy_device *phydev;
 	int ret = 0;
+
+	if(adpt->mac2mac_en)
+		return ret;
+
+	phydev = netdev->phydev;
 
 	if (!netif_running(netdev))
 		return -EINVAL;
@@ -130,8 +141,10 @@ static int emac_set_settings(struct net_device *netdev,
 			phydev->advertising &= ~ADVERTISED_Autoneg;
 
 		emac_mac_down(adpt, EMAC_HW_CTRL_RESET_MAC);
+		emac_phy_down(adpt);
 		ret = phy->ops.link_setup_no_ephy(adpt);
 		emac_mac_up(adpt);
+		emac_phy_up(adpt);
 	}
 
 done:
@@ -143,11 +156,14 @@ done:
 static void emac_get_pauseparam(struct net_device *netdev,
 				struct ethtool_pauseparam *pause)
 {
+	struct emac_adapter *adpt = netdev_priv(netdev);
 	struct phy_device *phydev = netdev->phydev;
 
-	pause->autoneg = (phydev->autoneg) ? AUTONEG_ENABLE : AUTONEG_DISABLE;
-	pause->rx_pause = (phydev->pause) ? 1 : 0;
-	pause->tx_pause = (phydev->pause != phydev->asym_pause) ? 1 : 0;
+	if(!adpt->mac2mac_en){
+		pause->autoneg = (phydev->autoneg) ? AUTONEG_ENABLE : AUTONEG_DISABLE;
+		pause->rx_pause = (phydev->pause) ? 1 : 0;
+		pause->tx_pause = (phydev->pause != phydev->asym_pause) ? 1 : 0;
+	}
 }
 
 static int emac_set_pauseparam(struct net_device *netdev,
@@ -163,7 +179,7 @@ static int emac_set_pauseparam(struct net_device *netdev,
 	if (!netif_running(netdev))
 		return -EINVAL;
 
-	if (!phydev)
+	if (!phydev && !adpt->mac2mac_en)
 		return -ENODEV;
 
 	req_fc_mode        = phy->req_fc_mode;
@@ -189,7 +205,8 @@ static int emac_set_pauseparam(struct net_device *netdev,
 
 	pm_runtime_get_sync(netdev->dev.parent);
 
-	if ((phy->req_fc_mode != req_fc_mode) ||
+	if (!adpt->mac2mac_en &&
+		(phy->req_fc_mode != req_fc_mode) ||
 	    (phy->disable_fc_autoneg != disable_fc_autoneg)) {
 		phy->req_fc_mode	= req_fc_mode;
 		phy->disable_fc_autoneg	= disable_fc_autoneg;
@@ -332,8 +349,9 @@ static int emac_set_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
 	if (emac_wol_exclusion(adpt, wol))
 		return wol->wolopts ? -EOPNOTSUPP : 0;
 
+	if(!adpt->mac2mac_en)
 	/* Enable WOL interrupt */
-	ret = phy_ethtool_set_wol(phydev, wol);
+		ret = phy_ethtool_set_wol(phydev, wol);
 	if (ret)
 		return ret;
 

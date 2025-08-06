@@ -226,6 +226,7 @@ int cfg80211_mgd_wext_giwessid(struct net_device *dev,
 {
 	int ret = 0;
 	struct wireless_dev *wdev = dev->ieee80211_ptr;
+	int ret = 0;
 
 	/* call only for station! */
 	if (WARN_ON(wdev->iftype != NL80211_IFTYPE_STATION))
@@ -243,7 +244,6 @@ int cfg80211_mgd_wext_giwessid(struct net_device *dev,
 		if (ie) {
 			data->flags = 1;
 			data->length = ie[1];
-			memcpy(ssid, ie + 2, data->length);
 			if (data->length > IW_ESSID_MAX_SIZE)
 				ret = -EINVAL;
 			else
