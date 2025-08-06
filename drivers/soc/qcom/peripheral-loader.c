@@ -136,6 +136,17 @@ struct pil_priv {
 	size_t region_size;
 };
 
+#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
+void machine_restart(char *cmd);
+extern void quectel_set_system_reset_mode(int mode);
+#endif
+
+#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
+void machine_restart(char *cmd);
+extern void quectel_set_system_reset_mode(int mode);
+bool modem_file_lose = false;
+#endif
+
 /**
  * pil_do_ramdump() - Ramdump an image
  * @desc: descriptor from pil_desc_init()
@@ -670,6 +681,9 @@ static int pil_load_seg(struct pil_desc *desc, struct pil_seg *seg)
 		if (ret < 0) {
 			pil_err(desc, "Failed to locate blob %s or blob is too big.\n",
 				fw_name);
+#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
+			modem_file_lose = true;
+#endif 				
 			subsys_set_error(desc->subsys_dev, firmware_error_msg);
 			return ret;
 		}
@@ -785,6 +799,9 @@ int pil_boot(struct pil_desc *desc)
 	ret = request_firmware(&fw, fw_name, desc->dev);
 	if (ret) {
 		pil_err(desc, "Failed to locate %s\n", fw_name);
+#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
+	modem_file_lose = true;
+#endif 
 		goto out;
 	}
 
@@ -929,6 +946,19 @@ out:
 			priv->region = NULL;
 		}
 		pil_release_mmap(desc);
+
+#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
+		quectel_set_system_reset_mode(0);
+	 	machine_restart(NULL);
+#endif
+
+#ifdef QUECTEL_REBOOT_WHEN_MODEM_LOAD_FAILED
+	if(false == modem_file_lose)
+	{
+		quectel_set_system_reset_mode(0);
+	 	machine_restart(NULL);
+	}
+#endif
 	}
 	return ret;
 }

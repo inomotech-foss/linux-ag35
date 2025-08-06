@@ -4377,7 +4377,7 @@ static void config_debug_fs_init(void)
 	S_IRUGO | S_IWUSR | S_IWGRP, NULL, (void *) "afe_loopback",
 	&afe_debug_fops);
 
-	debugfs_afelb_gain = debugfs_create_file("afe_loopback_gain",
+	debugfs_afelb_gain = debugfs_create_file("afe_loop_gain",
 	S_IRUGO | S_IWUSR | S_IWGRP, NULL, (void *) "afe_loopback_gain",
 	&afe_debug_fops);
 }

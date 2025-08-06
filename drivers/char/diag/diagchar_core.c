@@ -51,6 +51,9 @@ MODULE_DESCRIPTION("Diag Char Driver");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION("1.0");
 
+//will.shao, add for sleep
+#define QUECTEL_SLEEP_CTRL
+
 #define MIN_SIZ_ALLOW 4
 #define INIT	1
 #define EXIT	-1
@@ -3110,7 +3113,10 @@ void diag_ws_on_notify()
 	 * Do not deal with reference count here as there can be spurious
 	 * interrupts.
 	 */
+//will.shao, add for sleep
+#ifndef QUECTEL_SLEEP_CTRL
 	pm_stay_awake(driver->diag_dev);
+#endif
 }
 
 void diag_ws_on_read(int type, int pkt_len)
@@ -3249,8 +3255,11 @@ void diag_ws_reset(int type)
 
 void diag_ws_release()
 {
+//will.shao, add for sleep
+#ifndef QUECTEL_SLEEP_CTRL
 	if (driver->dci_ws.ref_count == 0 && driver->md_ws.ref_count == 0)
 		pm_relax(driver->diag_dev);
+#endif
 }
 
 #ifdef DIAG_DEBUG
