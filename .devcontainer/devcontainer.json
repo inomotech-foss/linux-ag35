@@ -1,0 +1,19 @@
+{
+    "name": "Debian",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "features": {
+        // Allow access to the host Docker daemon.
+        "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+        // Mount the shell history separately to persist it across container rebuilds.
+        "ghcr.io/stuartleeks/dev-container-features/shell-history:0": {}
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "eamodio.gitlens",
+            ]
+        }
+    },
+}
