@@ -349,6 +349,10 @@ static const struct of_device_id emac_sgmii_dt_match[] = {
 		.data = &fsm9900_ops,
 	},
 	{
+		.compatible = "qcom,mdm9607-emac-sgmii",
+		.data = &fsm9900_ops,
+	},
+	{
 		.compatible = "qcom,qdf2432-emac-sgmii",
 		.data = &qdf2432_ops,
 	},
