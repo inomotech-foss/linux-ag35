@@ -7,6 +7,7 @@
 
 #include "qcom-mdm9607.dtsi"
 #include "qcom-pm8019.dtsi"
+#include "qcom-mdm9607-regulators.dtsi"
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
 
@@ -45,6 +46,8 @@
 	status = "okay";
 	bus-width = <4>;
 	non-removable;
+	vmmc-supply = <&mdm9607_l13>;
+	vqmmc-supply = <&mdm9607_l11>;
 };
 
 /* SD card on SDCC2 */
@@ -52,10 +55,14 @@
 	status = "okay";
 	bus-width = <4>;
 	cd-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
+	vmmc-supply = <&mdm9607_l13>;
+	vqmmc-supply = <&mdm9607_l11>;
 };
 
 /* USB HS in peripheral mode */
 &usb_hs_phy {
+	v1p8-supply = <&mdm9607_l2>;
+	v3p3-supply = <&mdm9607_l4>;
 	status = "okay";
 };
 

@@ -1,0 +1,107 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * MDM9607 RPM-SMD regulator setup.
+ *
+ * The MDM9607/PM8019 power tree is close to PM8916 for RPM-regulated rails,
+ * so we use the pm8916-compatible regulator driver mapping and provide
+ * MDM9607-labeled phandles for board DTS files.
+ */
+
+&rpm_requests {
+	mdm9607_rpm_regulators: regulators {
+		compatible = "qcom,rpm-pm8916-regulators";
+		vdd_l1_l2_l3-supply = <&mdm9607_s3>;
+		vdd_l4_l5_l6-supply = <&mdm9607_s4>;
+		vdd_l7-supply = <&mdm9607_s4>;
+
+		/* s1 is managed by rpmpd (MDM9607_VDDCX) */
+		mdm9607_s2: s2 {
+			regulator-min-microvolt = <750000>;
+			regulator-max-microvolt = <1275000>;
+		};
+
+		/* MX rail */
+		mdm9607_s3: s3 {
+			regulator-min-microvolt = <500000>;
+			regulator-max-microvolt = <1150000>;
+			regulator-always-on;
+		};
+
+		mdm9607_s4: s4 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1950000>;
+			regulator-always-on;
+		};
+
+		mdm9607_l1: l1 {
+			regulator-min-microvolt = <1250000>;
+			regulator-max-microvolt = <1250000>;
+		};
+
+		mdm9607_l2: l2 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		mdm9607_l3: l3 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		mdm9607_l4: l4 {
+			regulator-min-microvolt = <3075000>;
+			regulator-max-microvolt = <3075000>;
+		};
+
+		mdm9607_l5: l5 {
+			regulator-min-microvolt = <1700000>;
+			regulator-max-microvolt = <3050000>;
+		};
+
+		mdm9607_l6: l6 {
+			regulator-min-microvolt = <1700000>;
+			regulator-max-microvolt = <3050000>;
+		};
+
+		mdm9607_l7: l7 {
+			regulator-min-microvolt = <1700000>;
+			regulator-max-microvolt = <1900000>;
+		};
+
+		mdm9607_l8: l8 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		mdm9607_l9: l9 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1250000>;
+		};
+
+		mdm9607_l10: l10 {
+			regulator-min-microvolt = <1050000>;
+			regulator-max-microvolt = <1050000>;
+		};
+
+		mdm9607_l11: l11 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		mdm9607_l12: l12 {
+			regulator-min-microvolt = <500000>;
+			regulator-max-microvolt = <1150000>;
+			regulator-always-on;
+		};
+
+		mdm9607_l13: l13 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2850000>;
+		};
+
+		mdm9607_l14: l14 {
+			regulator-min-microvolt = <2650000>;
+			regulator-max-microvolt = <3000000>;
+		};
+	};
+};
