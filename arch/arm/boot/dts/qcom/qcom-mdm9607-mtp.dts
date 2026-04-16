@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * MDM9607 MTP board - used as the base for Quectel AG35 module
+ * Copyright (c) 2015, The Linux Foundation. All rights reserved.
+ */
+/dts-v1/;
+
+#include "qcom-mdm9607.dtsi"
+#include "qcom-pm8019.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+
+/ {
+	model = "Qualcomm Technologies, Inc. MDM9607 MTP";
+	compatible = "qcom,mdm9607-mtp", "qcom,mdm9607";
+	qcom,msm-id = <290 0x10000>, <296 0x10000>, <297 0x10000>,
+		      <298 0x10000>, <299 0x10000>;
+	qcom,board-id = <8 0>;
+};
+
+/* BLSP1 UART2 (gpio4/5): debug console */
+&blsp1_uart2 {
+	status = "okay";
+};
+
+/* BLSP1 UART3 (gpio0/1/2/3): modem AT command port */
+&blsp1_uart3 {
+	status = "okay";
+};
+
+&blsp1_i2c2 {
+	status = "okay";
+};
+
+&blsp1_i2c4 {
+	status = "okay";
+};
+
+&blsp1_spi6 {
+	status = "okay";
+};
+
+/* eMMC on SDCC1 */
+&sdhc_1 {
+	status = "okay";
+	bus-width = <4>;
+	non-removable;
+};
+
+/* SD card on SDCC2 */
+&sdhc_2 {
+	status = "okay";
+	bus-width = <4>;
+	cd-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
+};
+
+/* USB HS in peripheral mode */
+&usb_hs_phy {
+	status = "okay";
+};
+
+&usb {
+	dr_mode = "peripheral";
+	status = "okay";
+};
+
+/* QPIC NAND */
+&qpic_bam {
+	status = "okay";
+};
+
+&qpic_nand {
+	status = "okay";
+
+	nand@0 {
+		reg = <0>;
+		nand-ecc-strength = <4>;
+		nand-ecc-step-size = <512>;
+		nand-bus-width = <8>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "sbl";
+				reg = <0x0 0x180000>;
+				read-only;
+			};
+
+			partition@180000 {
+				label = "mibib";
+				reg = <0x180000 0x80000>;
+				read-only;
+			};
+
+			partition@200000 {
+				label = "efs2";
+				reg = <0x200000 0x900000>;
+			};
+
+			partition@b00000 {
+				label = "tz";
+				reg = <0xb00000 0x280000>;
+				read-only;
+			};
+
+			partition@d80000 {
+				label = "rpm";
+				reg = <0xd80000 0x200000>;
+				read-only;
+			};
+
+			partition@f80000 {
+				label = "aboot";
+				reg = <0xf80000 0x200000>;
+				read-only;
+			};
+
+			partition@1180000 {
+				label = "boot";
+				reg = <0x1180000 0xa00000>;
+			};
+
+			partition@1b80000 {
+				label = "modem";
+				reg = <0x1b80000 0x4800000>;
+			};
+
+			partition@6380000 {
+				label = "system";
+				reg = <0x6380000 0x2400000>;
+			};
+
+			partition@87c0000 {
+				label = "userdata";
+				reg = <0x87c0000 0x3840000>;
+			};
+		};
+	};
+};
+
+&pm8019_mpps {
+	pinctrl-names = "default";
+	pinctrl-0 = <&usb_mpp>;
+
+	usb_mpp: usb-mpp {
+		pins = "mpp1";
+		function = "digital";
+		bias-pull-up = <10000>;
+		power-source = <3>; /* 1.8V (L11) */
+	};
+};
