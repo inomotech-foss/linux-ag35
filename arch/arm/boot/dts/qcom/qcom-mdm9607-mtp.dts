@@ -17,6 +17,14 @@
 	qcom,msm-id = <290 0x10000>, <296 0x10000>, <297 0x10000>,
 		      <298 0x10000>, <299 0x10000>;
 	qcom,board-id = <8 0>;
+
+	aliases {
+		serial0 = &blsp1_uart2;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
 };
 
 /* BLSP1 UART2 (gpio4/5): debug console */
