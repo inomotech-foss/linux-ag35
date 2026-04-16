@@ -37,6 +37,12 @@
 	status = "okay";
 };
 
+/* Modem remoteproc - loads and manages modem firmware */
+&remoteproc_mss {
+	status = "okay";
+	firmware = "mdm/mba.mbn", "mdm/mpss.mbn";
+};
+
 &blsp1_i2c2 {
 	status = "okay";
 };
