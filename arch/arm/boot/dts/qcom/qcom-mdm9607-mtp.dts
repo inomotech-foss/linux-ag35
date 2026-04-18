@@ -75,7 +75,7 @@
 
 /* USB HS in peripheral mode */
 &usb_hs_phy {
-	v1p8-supply = <&mdm9607_l2>;
+	v1p8-supply = <&mdm9607_l11>;
 	v3p3-supply = <&mdm9607_l4>;
 	status = "okay";
 };

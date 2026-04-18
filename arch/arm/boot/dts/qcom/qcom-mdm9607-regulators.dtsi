@@ -22,14 +22,14 @@
 
 		/* MX rail */
 		mdm9607_s3: s3 {
-			regulator-min-microvolt = <500000>;
-			regulator-max-microvolt = <1150000>;
+			regulator-min-microvolt = <1250000>;
+			regulator-max-microvolt = <1350000>;
 			regulator-always-on;
 		};
 
 		mdm9607_s4: s4 {
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1950000>;
+			regulator-min-microvolt = <1850000>;
+			regulator-max-microvolt = <2150000>;
 			regulator-always-on;
 		};
 
@@ -39,8 +39,9 @@
 		};
 
 		mdm9607_l2: l2 {
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-always-on;
 		};
 
 		mdm9607_l3: l3 {
