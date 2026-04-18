@@ -15,6 +15,20 @@
 	#size-cells = <1>;
 	interrupt-parent = <&intc>;
 
+	/*
+	 * The LK bootloader searches for /memory by path and patches
+	 * it with the actual RAM base and size.  Without this node the
+	 * bootloader aborts with "Could not find memory node".
+	 *
+	 * If the bootloader-patched DTB is used, reg will be
+	 * overwritten.  If an appended DTB is used instead, these
+	 * values must match the hardware (256 MB at 0x80000000).
+	 */
+	memory {
+		device_type = "memory";
+		reg = <0x80000000 0x10000000>;
+	};
+
 	clocks {
 		xo_board: xo-board {
 			compatible = "fixed-clock";
@@ -72,6 +86,23 @@
 		gpios = <&tlmm 53 GPIO_ACTIVE_HIGH>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&pps_gpio>;
+	};
+
+	/*
+	 * CP15-based ARM arch timer.  The memory-mapped timer inside
+	 * soc (arm,armv7-timer-mem) provides additional timer frames,
+	 * but the kernel needs this node for the primary clocksource
+	 * and clockevent.  PPI numbers match MSM8226/IPQ4019 which
+	 * share the same Cortex-A7 GIC routing.
+	 */
+	timer {
+		compatible = "arm,armv7-timer";
+		interrupts = <GIC_PPI 2 (GIC_CPU_MASK_SIMPLE(1) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 3 (GIC_CPU_MASK_SIMPLE(1) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 4 (GIC_CPU_MASK_SIMPLE(1) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 1 (GIC_CPU_MASK_SIMPLE(1) | IRQ_TYPE_LEVEL_LOW)>;
+		clock-frequency = <19200000>;
+		always-on;
 	};
 
 	reserved-memory {
