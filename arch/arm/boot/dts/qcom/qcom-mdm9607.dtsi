@@ -1068,6 +1068,13 @@
 			reg = <0x0b011000 0x1000>;
 		};
 
+		watchdog: watchdog@b017000 {
+			compatible = "qcom,kpss-wdt";
+			reg = <0x0b017000 0x40>;
+			clocks = <&sleep_clk>;
+			timeout-sec = <30>;
+		};
+
 		timer@b020000 {
 			compatible = "arm,armv7-timer-mem";
 			reg = <0x0b020000 0x1000>;
