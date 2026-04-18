@@ -162,6 +162,7 @@
 
 		rpm {
 			interrupts = <GIC_SPI 168 IRQ_TYPE_EDGE_RISING>;
+			mboxes = <&apcs 0>;
 			qcom,ipc = <&apcs 8 0>;
 			qcom,smd-edge = <15>;
 
@@ -767,6 +768,7 @@
 			smd-edge {
 				interrupts = <GIC_SPI 25 IRQ_TYPE_EDGE_RISING>;
 
+				mboxes = <&apcs 12>;
 				qcom,ipc = <&apcs 8 12>;
 				qcom,smd-edge = <0>;
 
@@ -1064,8 +1066,9 @@
 		 * just for ARM frequency voting.
 		 */
 		apcs: syscon@b011000 {
-			compatible = "syscon";
+			compatible = "qcom,msm8916-apcs-kpss-global", "syscon";
 			reg = <0x0b011000 0x1000>;
+			#mbox-cells = <1>;
 		};
 
 		watchdog: watchdog@b017000 {
@@ -1142,6 +1145,7 @@
 		interrupt-parent = <&intc>;
 		interrupts = <GIC_SPI 27 IRQ_TYPE_EDGE_RISING>;
 
+		mboxes = <&apcs 14>;
 		qcom,ipc = <&apcs 8 14>;
 
 		qcom,local-pid = <0>;
@@ -1166,6 +1170,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
+		mboxes = <0>, <&apcs 13>, <&apcs 9>, <&apcs 19>;
 		qcom,ipc-1 = <&apcs 8 13>;
 
 		apps_smsm: apps@0 {
