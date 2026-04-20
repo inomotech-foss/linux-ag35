@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * MDM9607 RPM-SMD regulator setup.
- *
- * The MDM9607/PM8019 power tree is close to PM8916 for RPM-regulated rails,
- * so we use the pm8916-compatible regulator driver mapping and provide
- * MDM9607-labeled phandles for board DTS files.
+ * MDM9607 RPM-SMD regulator setup using PM8019 PMIC.
  *
  * Rails NOT listed here (managed by rpmpd power domains instead):
  *   s1  - unused / disabled in original BSP
@@ -14,7 +10,7 @@
 
 &rpm_requests {
 	mdm9607_rpm_regulators: regulators {
-		compatible = "qcom,rpm-pm8916-regulators";
+		compatible = "qcom,rpm-pm8019-regulators";
 		vdd_l4_l5_l6-supply = <&mdm9607_s4>;
 		vdd_l7-supply = <&mdm9607_s4>;
 
@@ -34,11 +30,10 @@
 			regulator-max-microvolt = <1250000>;
 		};
 
-		/*
-		 * l2 omitted: original BSP ran it at 1800000uV but the
-		 * pm8916_nldo descriptor only reaches 1537500uV.  RPM
-		 * keeps the bootloader-programmed value.
-		 */
+		mdm9607_l2: l2 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
 
 		mdm9607_l3: l3 {
 			regulator-min-microvolt = <1800000>;
