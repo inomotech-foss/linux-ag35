@@ -34,10 +34,11 @@
 			regulator-max-microvolt = <1250000>;
 		};
 
-		mdm9607_l2: l2 {
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
-		};
+		/*
+		 * l2 omitted: original BSP ran it at 1800000uV but the
+		 * pm8916_nldo descriptor only reaches 1537500uV.  RPM
+		 * keeps the bootloader-programmed value.
+		 */
 
 		mdm9607_l3: l3 {
 			regulator-min-microvolt = <1800000>;
