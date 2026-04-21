@@ -291,8 +291,13 @@ static int qcom_wdt_probe(struct platform_device *pdev)
 	 * to inform the WDT subsystem to ping the WDT
 	 */
 	if (qcom_wdt_is_running(&wdt->wdd)) {
+		dev_info(dev, "APPS WDT was running (EN=%#x), reconfiguring\n",
+			 readl(wdt_addr(wdt, WDT_EN)));
 		qcom_wdt_start(&wdt->wdd);
 		set_bit(WDOG_HW_RUNNING, &wdt->wdd.status);
+	} else {
+		dev_info(dev, "APPS WDT not running (EN=%#x)\n",
+			 readl(wdt_addr(wdt, WDT_EN)));
 	}
 
 	ret = devm_watchdog_register_device(dev, &wdt->wdd);
@@ -300,6 +305,8 @@ static int qcom_wdt_probe(struct platform_device *pdev)
 		return ret;
 
 	platform_set_drvdata(pdev, wdt);
+	dev_info(dev, "APPS WDT probed, rate=%lu timeout=%u\n",
+		 wdt->rate, wdt->wdd.timeout);
 	return 0;
 }
 

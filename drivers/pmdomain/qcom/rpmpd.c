@@ -1133,6 +1133,8 @@ static int rpmpd_probe(struct platform_device *pdev)
 			pm_genpd_add_subdomain(rpmpds[i]->parent, &rpmpds[i]->pd);
 	}
 
+	dev_info(&pdev->dev, "rpmpd: registered %zu power domains\n", num);
+
 	return of_genpd_add_provider_onecell(pdev->dev.of_node, data);
 }
 
@@ -1142,10 +1144,19 @@ static void rpmpd_sync_state(struct device *dev)
 	struct rpmpd **rpmpds = desc->rpmpds;
 	struct rpmpd *pd;
 	unsigned int i;
-	int ret;
 
-	of_genpd_sync_state(dev->of_node);
+	dev_info(dev, "rpmpd: sync_state SKIPPED to prevent UVLO on critical rails\n");
 
+	/*
+	 * Do NOT call of_genpd_sync_state() or send corner=0.
+	 * On MDM9607, all rpmpd consumers (modem, sdhc) may be disabled
+	 * during bringup.  sync_state would send KEY_LEVEL=0 / swen=0
+	 * for VDDCX (SMPA3) and VDDMX (LDOA12), causing the RPM to
+	 * shut down the SoC power rails → UVLO reset.
+	 *
+	 * Still mark domains as synced so they can be properly managed
+	 * when consumers are eventually enabled.
+	 */
 	mutex_lock(&rpmpd_lock);
 	for (i = 0; i < desc->num_pds; i++) {
 		pd = rpmpds[i];
@@ -1155,11 +1166,8 @@ static void rpmpd_sync_state(struct device *dev)
 		pd->state_synced = true;
 
 		if (!pd->enabled)
-			pd->corner = 0;
-
-		ret = rpmpd_aggregate_corner(pd);
-		if (ret)
-			dev_err(dev, "failed to sync %s: %d\n", pd->pd.name, ret);
+			dev_info(dev, "rpmpd: %s not enabled, keeping max_state vote\n",
+				 pd->pd.name);
 	}
 	mutex_unlock(&rpmpd_lock);
 }
