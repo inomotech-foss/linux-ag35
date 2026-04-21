@@ -14,6 +14,16 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
+		pon@800 {
+			compatible = "qcom,pm8916-pon";
+			reg = <0x800>;
+
+			watchdog {
+				compatible = "qcom,pm8916-wdt";
+				interrupts = <0x0 0x8 0x6 IRQ_TYPE_EDGE_RISING>;
+			};
+		};
+
 		pm8019_vadc: adc@3100 {
 			compatible = "qcom,spmi-vadc";
 			reg = <0x3100>;
