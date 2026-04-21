@@ -159,6 +159,13 @@
 
 	smd {
 		compatible = "qcom,smd";
+		/*
+		 * DIAGNOSTIC: disabled to test if RPM SMD messaging
+		 * (rpmcc handoff, regulators, rpmpd) causes the hard
+		 * reset at ~2.8s.  Re-enable once the root cause is
+		 * identified.
+		 */
+		status = "disabled";
 
 		rpm {
 			interrupts = <GIC_SPI 168 IRQ_TYPE_EDGE_RISING>;

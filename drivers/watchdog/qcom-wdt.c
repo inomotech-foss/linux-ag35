@@ -291,8 +291,12 @@ static int qcom_wdt_probe(struct platform_device *pdev)
 	 * to inform the WDT subsystem to ping the WDT
 	 */
 	if (qcom_wdt_is_running(&wdt->wdd)) {
+		dev_info(dev, "WDT alive from bootloader, taking over (rate=%lu bite=%us)\n",
+			 wdt->rate, wdt->wdd.timeout);
 		qcom_wdt_start(&wdt->wdd);
 		set_bit(WDOG_HW_RUNNING, &wdt->wdd.status);
+	} else {
+		dev_info(dev, "WDT not running (rate=%lu)\n", wdt->rate);
 	}
 
 	ret = devm_watchdog_register_device(dev, &wdt->wdd);
