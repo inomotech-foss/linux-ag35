@@ -1311,8 +1311,7 @@ trace_initcall_start_cb(void *data, initcall_t fn)
 {
 	ktime_t *calltime = data;
 
-	/* Force KERN_INFO so this is visible regardless of console_loglevel */
-	printk(KERN_INFO "calling  %pS @ %i\n", fn, task_pid_nr(current));
+	pr_debug("calling  %pS @ %i\n", fn, task_pid_nr(current));
 	*calltime = ktime_get();
 }
 
@@ -1322,14 +1321,14 @@ trace_initcall_finish_cb(void *data, initcall_t fn, int ret)
 	ktime_t rettime, *calltime = data;
 
 	rettime = ktime_get();
-	printk(KERN_INFO "initcall %pS returned %d after %lld usecs\n",
+	pr_debug("initcall %pS returned %d after %lld usecs\n",
 		 fn, ret, (unsigned long long)ktime_us_delta(rettime, *calltime));
 }
 
 static __init_or_module void
 trace_initcall_level_cb(void *data, const char *level)
 {
-	printk(KERN_INFO "entering initcall level: %s\n", level);
+	pr_debug("entering initcall level: %s\n", level);
 }
 
 static ktime_t initcall_calltime;
@@ -1380,23 +1379,11 @@ int __init_or_module do_one_initcall(initcall_t fn)
 	if (initcall_blacklisted(fn))
 		return -EPERM;
 
-	/*
-	 * Unconditional brute-force initcall trace.  Bypasses the
-	 * tracepoint-based initcall_debug machinery (which is silent
-	 * on this build for unknown reasons) so we can identify
-	 * exactly which initcall hangs/resets the machine.
-	 */
-	calltime = ktime_get();
-	printk(KERN_INFO "init: calling  %pS\n", fn);
-
 	do_trace_initcall_start(fn);
+	calltime = ktime_get();
 	ret = fn();
-	do_trace_initcall_finish(fn, ret);
-
 	rettime = ktime_get();
-	printk(KERN_INFO "init: %pS returned %d after %lld us\n",
-	       fn, ret,
-	       (unsigned long long)ktime_us_delta(rettime, calltime));
+	do_trace_initcall_finish(fn, ret);
 
 	msgbuf[0] = 0;
 

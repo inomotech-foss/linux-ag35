@@ -342,6 +342,16 @@
 			clock-names = "bus", "bus_a";
 			clocks = <&rpmcc RPM_SMD_BIMC_CLK>,
 				 <&rpmcc RPM_SMD_BIMC_A_CLK>;
+			/*
+			 * The MDM9607 interconnect driver has multiple bugs:
+			 * missing .type (defaults to NOC, should be BIMC),
+			 * missing .qos_offset (writes QoS to offset 0), and
+			 * nodes with qos_mode=-1 bypass INVALID check (which
+			 * is 0).  This causes writes to wrong BIMC registers
+			 * during probe, triggering a bus fault / hard reset.
+			 * Disable until the driver is fixed.
+			 */
+			status = "disabled";
 		};
 
 		tsens: thermal-sensor@4a9000 {
@@ -375,6 +385,8 @@
 			clock-names = "bus", "bus_a";
 			clocks = <&rpmcc RPM_SMD_PCNOC_CLK>,
 				 <&rpmcc RPM_SMD_PCNOC_A_CLK>;
+			/* Same interconnect driver bugs as BIMC above. */
+			status = "disabled";
 		};
 
 		cryptobam: dma@704000 {
