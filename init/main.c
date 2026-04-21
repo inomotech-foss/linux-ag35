@@ -1311,7 +1311,8 @@ trace_initcall_start_cb(void *data, initcall_t fn)
 {
 	ktime_t *calltime = data;
 
-	printk(KERN_DEBUG "calling  %pS @ %i\n", fn, task_pid_nr(current));
+	/* Force KERN_INFO so this is visible regardless of console_loglevel */
+	printk(KERN_INFO "calling  %pS @ %i\n", fn, task_pid_nr(current));
 	*calltime = ktime_get();
 }
 
@@ -1321,14 +1322,14 @@ trace_initcall_finish_cb(void *data, initcall_t fn, int ret)
 	ktime_t rettime, *calltime = data;
 
 	rettime = ktime_get();
-	printk(KERN_DEBUG "initcall %pS returned %d after %lld usecs\n",
+	printk(KERN_INFO "initcall %pS returned %d after %lld usecs\n",
 		 fn, ret, (unsigned long long)ktime_us_delta(rettime, *calltime));
 }
 
 static __init_or_module void
 trace_initcall_level_cb(void *data, const char *level)
 {
-	printk(KERN_DEBUG "entering initcall level: %s\n", level);
+	printk(KERN_INFO "entering initcall level: %s\n", level);
 }
 
 static ktime_t initcall_calltime;
