@@ -120,7 +120,7 @@ static void deferred_probe_work_func(struct work_struct *work)
 		 */
 		device_pm_move_to_tail(dev);
 
-		dev_dbg(dev, "Retrying from deferred list\n");
+		dev_info(dev, "Retrying from deferred list\n");
 		bus_probe_device(dev);
 		mutex_lock(&deferred_probe_mutex);
 
