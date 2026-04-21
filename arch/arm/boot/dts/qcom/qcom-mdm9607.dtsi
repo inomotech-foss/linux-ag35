@@ -1149,7 +1149,7 @@
 			compatible = "qcom,kpss-wdt";
 			reg = <0x0b017000 0x40>;
 			clocks = <&sleep_clk>;
-			timeout-sec = <30>;
+			timeout-sec = <10>;
 		};
 
 		timer@b020000 {
