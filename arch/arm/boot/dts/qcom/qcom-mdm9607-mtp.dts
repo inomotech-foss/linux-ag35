@@ -24,6 +24,14 @@
 
 	chosen {
 		stdout-path = "serial0:115200n8";
+		/*
+		 * Diagnostic: print every initcall with timing.  This is
+		 * critical for finding what's eating the ~1.7s of silence
+		 * between hw-breakpoint init and usbcore registration.
+		 * The bootloader cmdline is appended after this when
+		 * CONFIG_ARM_ATAG_DTB_COMPAT_CMDLINE_EXTEND=y.
+		 */
+		bootargs = "initcall_debug";
 	};
 };
 
