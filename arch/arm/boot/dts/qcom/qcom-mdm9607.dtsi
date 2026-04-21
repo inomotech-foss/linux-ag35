@@ -765,9 +765,14 @@
 				      "sleep_clk";
 			clocks = <&xo_board>, <&sleep_clk>;
 
-			assigned-clocks = <&gcc APSS_AHB_CLK_SRC>,
-							<&gcc PCNOC_BFDCD_CLK_SRC>;
-			assigned-clock-rates = <19200000>, <50000000>;
+			/*
+			 * The downstream 3.18 GCC has NO assigned-clocks.
+			 * Clock rates are left at whatever LK configured.
+			 * Setting them here at core_initcall (before any
+			 * regulator or power domain is ready) is suspected
+			 * of causing the ~2.8s hard reset — removed to match
+			 * downstream behavior.
+			 */
 		};
 
 		tcsr_mutex: syscon@1905000 {
@@ -1149,7 +1154,7 @@
 			compatible = "qcom,kpss-wdt";
 			reg = <0x0b017000 0x40>;
 			clocks = <&sleep_clk>;
-			timeout-sec = <10>;
+			timeout-sec = <30>;
 		};
 
 		timer@b020000 {

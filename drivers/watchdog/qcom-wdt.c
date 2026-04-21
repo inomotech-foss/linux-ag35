@@ -291,24 +291,9 @@ static int qcom_wdt_probe(struct platform_device *pdev)
 	 * to inform the WDT subsystem to ping the WDT
 	 */
 	if (qcom_wdt_is_running(&wdt->wdd)) {
-		dev_info(dev, "WDT alive from bootloader, taking over (rate=%lu bite=%us)\n",
-			 wdt->rate, wdt->wdd.timeout);
-	} else {
-		/*
-		 * MDM9607: Even when the bootloader doesn't leave the WDT
-		 * running, we must start it.  On this SoC the RPM firmware
-		 * monitors the APPS WDT status register; if the WDT is not
-		 * being serviced, the RPM hard-resets the SoC after ~3s.
-		 * The downstream 3.18 kernel always enables the WDT in
-		 * init_watchdog_data() regardless of the bootloader state.
-		 */
-		dev_info(dev, "WDT not running, force-starting (rate=%lu bite=%us)\n",
-			 wdt->rate, wdt->wdd.timeout);
+		qcom_wdt_start(&wdt->wdd);
+		set_bit(WDOG_HW_RUNNING, &wdt->wdd.status);
 	}
-
-	/* Always (re)program and start the WDT so the watchdog core pings it */
-	qcom_wdt_start(&wdt->wdd);
-	set_bit(WDOG_HW_RUNNING, &wdt->wdd.status);
 
 	ret = devm_watchdog_register_device(dev, &wdt->wdd);
 	if (ret)
