@@ -192,7 +192,7 @@ static int pm8916_wdt_probe(struct platform_device *pdev)
 		return err;
 	}
 
-	dev_dbg(dev, "POFF reason: %#x %#x\n", poff[0], poff[1]);
+	dev_info(dev, "POFF reason: %#x %#x\n", poff[0], poff[1]);
 	if (poff[0] & PON_POFF_REASON1_PMIC_WD)
 		wdt->wdev.bootstatus |= WDIOF_CARDRESET;
 	if (poff[1] & PON_POFF_REASON2_UVLO)
@@ -206,8 +206,20 @@ static int pm8916_wdt_probe(struct platform_device *pdev)
 		dev_err(dev, "failed to check if watchdog is active: %d\n", err);
 		return err;
 	}
-	if (val & S2_RESET_EN_BIT)
+	if (val & S2_RESET_EN_BIT) {
 		set_bit(WDOG_HW_RUNNING, &wdt->wdev.status);
+		/*
+		 * Pet the watchdog immediately to reset the HW timeout.
+		 * The watchdog framework will start a kthread to pet
+		 * periodically, but on slow-booting SoCs the kthread may
+		 * not be scheduled before the HW timeout expires.  Petting
+		 * here synchronously in probe buys us a full timeout period.
+		 */
+		regmap_write(wdt->regmap,
+			     wdt->baseaddr + PON_PMIC_WD_RESET_PET,
+			     WATCHDOG_PET_BIT);
+		dev_info(dev, "PMIC watchdog active, pet synchronously\n");
+	}
 
 	/* Configure watchdog to hard-reset mode */
 	err = regmap_write(wdt->regmap,
