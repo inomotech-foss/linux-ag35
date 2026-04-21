@@ -1374,14 +1374,29 @@ int __init_or_module do_one_initcall(initcall_t fn)
 {
 	int count = preempt_count();
 	char msgbuf[64];
+	ktime_t calltime, rettime;
 	int ret;
 
 	if (initcall_blacklisted(fn))
 		return -EPERM;
 
+	/*
+	 * Unconditional brute-force initcall trace.  Bypasses the
+	 * tracepoint-based initcall_debug machinery (which is silent
+	 * on this build for unknown reasons) so we can identify
+	 * exactly which initcall hangs/resets the machine.
+	 */
+	calltime = ktime_get();
+	printk(KERN_INFO "init: calling  %pS\n", fn);
+
 	do_trace_initcall_start(fn);
 	ret = fn();
 	do_trace_initcall_finish(fn, ret);
+
+	rettime = ktime_get();
+	printk(KERN_INFO "init: %pS returned %d after %lld us\n",
+	       fn, ret,
+	       (unsigned long long)ktime_us_delta(rettime, calltime));
 
 	msgbuf[0] = 0;
 
