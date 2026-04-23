@@ -1553,24 +1553,43 @@ void qcom_smd_unregister_edge(struct qcom_smd_edge *edge)
 }
 EXPORT_SYMBOL(qcom_smd_unregister_edge);
 
-static int qcom_smd_probe(struct platform_device *pdev)
-{
-	struct device_node *node;
-
-	if (!qcom_smem_is_available())
-		return -EPROBE_DEFER;
-
-	for_each_available_child_of_node(pdev->dev.of_node, node)
-		qcom_smd_register_edge(&pdev->dev, node);
-
-	return 0;
-}
-
 static int qcom_smd_remove_edge(struct device *dev, void *data)
 {
 	struct qcom_smd_edge *edge = to_smd_edge(dev);
 
 	qcom_smd_unregister_edge(edge);
+
+	return 0;
+}
+
+static int qcom_smd_probe(struct platform_device *pdev)
+{
+	struct qcom_smd_edge *edge;
+	struct device_node *node;
+
+	if (!qcom_smem_is_available())
+		return -EPROBE_DEFER;
+
+	for_each_available_child_of_node(pdev->dev.of_node, node) {
+		edge = qcom_smd_register_edge(&pdev->dev, node);
+		if (IS_ERR(edge)) {
+			int ret = PTR_ERR(edge);
+
+			if (ret == -EPROBE_DEFER) {
+				of_node_put(node);
+				/*
+				 * Undo any edges already registered in this
+				 * loop before returning deferred.
+				 */
+				device_for_each_child(&pdev->dev, NULL,
+						      qcom_smd_remove_edge);
+				return ret;
+			}
+			dev_warn(&pdev->dev,
+				 "failed to register edge %pOFn: %d\n",
+				 node, ret);
+		}
+	}
 
 	return 0;
 }
