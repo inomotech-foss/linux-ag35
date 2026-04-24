@@ -28,6 +28,20 @@
 #include <linux/timer.h>
 #include <linux/jiffies.h>
 
+/*
+ * KPSS WDT register offsets (from reg_offset_data_kpss in qcom-wdt.c).
+ * Physical base: 0x0b017000 (from DTS watchdog@b017000).
+ */
+#define KPSS_WDT_PHYS		0x0b017000
+#define KPSS_WDT_SIZE		0x40
+#define WDT_RST			0x04
+#define WDT_EN			0x08
+#define WDT_BARK_TIME		0x10
+#define WDT_BITE_TIME		0x14
+
+/* Sleep clock rate (from DTS: clocks = <&sleep_clk>, 32768 Hz) */
+#define WDT_CLK_RATE		32768
+
 /* SMEM item IDs — must match drivers/soc/qcom/smsm.c */
 #define SMEM_SMSM_SHARED_STATE	85
 
@@ -52,6 +66,45 @@ static const struct of_device_id qcom_early_devices[] __initconst = {
 	{ .compatible = "qcom,msm8916-apcs-kpss-global" },
 	{}
 };
+
+/*
+ * Enable the APPS KPSS watchdog as early as possible.
+ *
+ * The RPM firmware monitors the APPS WDT0_EN register.  When it sees
+ * the WDT enabled and being petted, it considers APPS alive and holds
+ * off its own ~5s supervision timer.  The downstream 3.18 kernel
+ * enables WDT at pure_initcall (~0.168s); upstream never enables it
+ * until the qcom_wdt driver probes at device_initcall (~2.8s kernel
+ * time), which is too late.
+ *
+ * The qcom_wdt driver handles handoff automatically: if WDT_EN reads
+ * back as set, it reconfigures timeouts, sets WDOG_HW_RUNNING, and
+ * the watchdog core starts auto-pinging.
+ */
+static int __init qcom_early_wdt_init(void)
+{
+	void __iomem *base;
+
+	base = ioremap(KPSS_WDT_PHYS, KPSS_WDT_SIZE);
+	if (!base)
+		return 0;
+
+	/* Set bark and bite timeouts to 30 seconds */
+	writel(30 * WDT_CLK_RATE, base + WDT_BARK_TIME);
+	writel(30 * WDT_CLK_RATE, base + WDT_BITE_TIME);
+
+	/* Enable the watchdog */
+	writel(1, base + WDT_EN);
+
+	/* Pet it once to start the countdown */
+	writel(1, base + WDT_RST);
+
+	iounmap(base);
+
+	pr_info("qcom_early_wdt: APPS WDT enabled (30s timeout)\n");
+	return 0;
+}
+postcore_initcall(qcom_early_wdt_init);
 
 static int __init qcom_early_device_init(void)
 {
