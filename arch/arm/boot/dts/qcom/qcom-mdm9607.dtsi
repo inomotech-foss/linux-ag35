@@ -390,6 +390,7 @@
 			interrupts = <GIC_SPI 184 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "uplow";
 			#thermal-sensor-cells = <1>;
+    		status = "disabled";
 		};
 
 		pcnoc: interconnect@500000 {
