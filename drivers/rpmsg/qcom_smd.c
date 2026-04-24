@@ -1508,6 +1508,16 @@ struct qcom_smd_edge *qcom_smd_register_edge(struct device *parent,
 
 	schedule_work(&edge->scan_work);
 
+	/*
+	 * Flush the scan work synchronously so that SMD channels are
+	 * discovered before the edge registration returns.  On single-
+	 * core systems (MDM9607) the kworker may not get CPU time for
+	 * hundreds of milliseconds if initcalls are running back-to-back.
+	 * The modem firmware expects channel discovery to complete
+	 * promptly after edge registration.
+	 */
+	flush_work(&edge->scan_work);
+
 	return edge;
 
 unregister_dev:
