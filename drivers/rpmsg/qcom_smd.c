@@ -1368,12 +1368,6 @@ static int qcom_smd_parse_edge(struct device *dev,
 	edge->mbox_client.knows_txdone = true;
 	edge->mbox_chan = mbox_request_channel(&edge->mbox_client, 0);
 	if (IS_ERR(edge->mbox_chan)) {
-		if (PTR_ERR(edge->mbox_chan) != -ENOENT) {
-			ret = dev_err_probe(dev, PTR_ERR(edge->mbox_chan),
-					    "failed to acquire IPC mailbox\n");
-			goto put_node;
-		}
-
 		edge->mbox_chan = NULL;
 
 		syscon_np = of_parse_phandle(node, "qcom,ipc", 0);
@@ -1572,23 +1566,10 @@ static int qcom_smd_probe(struct platform_device *pdev)
 
 	for_each_available_child_of_node(pdev->dev.of_node, node) {
 		edge = qcom_smd_register_edge(&pdev->dev, node);
-		if (IS_ERR(edge)) {
-			int ret = PTR_ERR(edge);
-
-			if (ret == -EPROBE_DEFER) {
-				of_node_put(node);
-				/*
-				 * Undo any edges already registered in this
-				 * loop before returning deferred.
-				 */
-				device_for_each_child(&pdev->dev, NULL,
-						      qcom_smd_remove_edge);
-				return ret;
-			}
+		if (IS_ERR(edge))
 			dev_warn(&pdev->dev,
-				 "failed to register edge %pOFn: %d\n",
-				 node, ret);
-		}
+				 "failed to register edge %pOFn: %ld\n",
+				 node, PTR_ERR(edge));
 	}
 
 	return 0;
