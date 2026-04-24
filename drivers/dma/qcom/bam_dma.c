@@ -1282,6 +1282,10 @@ static int bam_dma_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	dev_info(bdev->dev, "BAM probe: clk=%pC enabled, ee=%u num_ch=%u num_ees=%u controlled_remotely=%d\n",
+		 bdev->bamclk, bdev->ee, bdev->num_channels, bdev->num_ees,
+		 bdev->controlled_remotely);
+
 	ret = bam_init(bdev);
 	if (ret)
 		goto err_disable_clk;
