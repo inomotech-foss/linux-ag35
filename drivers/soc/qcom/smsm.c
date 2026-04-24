@@ -654,9 +654,10 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 	 */
 #define SMSM_INIT	BIT(0)
 #define SMSM_SMDINIT	BIT(3)
-	smsm_update_bits(smsm, SMSM_INIT | SMSM_SMDINIT,
-			 SMSM_INIT | SMSM_SMDINIT);
-	dev_info(&pdev->dev, "APPS SMSM state set: SMSM_INIT | SMSM_SMDINIT\n");
+#define SMSM_RPCINIT	BIT(5)
+	smsm_update_bits(smsm, SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT,
+			 SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT);
+	dev_info(&pdev->dev, "APPS SMSM state set: INIT|SMDINIT|RPCINIT\n");
 
 	return 0;
 
