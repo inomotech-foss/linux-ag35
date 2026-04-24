@@ -50,6 +50,7 @@
 #define SMSM_INIT		BIT(0)
 #define SMSM_SMDINIT		BIT(3)
 #define SMSM_RPCINIT		BIT(5)
+#define SMSM_PROC_AWAKE	BIT(12)
 
 /* Number of SMSM entries (apps, modem, adsp, wcnss) */
 #define SMSM_NUM_ENTRIES	4
@@ -154,7 +155,7 @@ static int __init qcom_early_smsm_handshake(void)
 
 	/* Set APPS entry (index 0) with the handshake bits */
 	val = readl(&states[0]);
-	val |= SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT;
+	val |= SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT | SMSM_PROC_AWAKE;
 	writel(val, &states[0]);
 
 	/* Ensure the write is visible before kicking the modem */
@@ -167,7 +168,7 @@ static int __init qcom_early_smsm_handshake(void)
 		iounmap(apcs_ipc);
 	}
 
-	pr_info("qcom_early_smsm: APPS SMSM state set to %#x, modem notified\n",
+	pr_info("qcom_early_smsm: APPS SMSM state set to %#x (INIT|SMDINIT|RPCINIT|PROC_AWAKE), modem notified\n",
 		val);
 	return 0;
 }
