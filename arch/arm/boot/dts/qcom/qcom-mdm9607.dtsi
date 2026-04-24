@@ -222,6 +222,20 @@
 				};
 			};
 		};
+
+		/*
+		 * Modem SMD edge — the modem firmware is loaded by SBL1
+		 * (not Linux remoteproc) and is running from POR.  This
+		 * edge must be registered so the modem can communicate
+		 * with APPS.
+		 */
+		modem {
+			interrupts = <GIC_SPI 25 IRQ_TYPE_EDGE_RISING>;
+			mboxes = <&apcs 12>;
+			qcom,ipc = <&apcs 8 12>;
+			qcom,smd-edge = <0>;
+			label = "modem";
+		};
 	};
 
 	smem {
