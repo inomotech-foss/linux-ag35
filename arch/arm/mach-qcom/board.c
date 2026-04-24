@@ -25,9 +25,8 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/soc/qcom/smem.h>
-#include <linux/kthread.h>
-#include <linux/delay.h>
-#include <linux/sched.h>
+#include <linux/timer.h>
+#include <linux/jiffies.h>
 
 /*
  * KPSS WDT register offsets (from reg_offset_data_kpss in qcom-wdt.c).
@@ -68,45 +67,6 @@ static const struct of_device_id qcom_early_devices[] __initconst = {
 	{ .compatible = "qcom,msm8916-apcs-kpss-global" },
 	{}
 };
-
-/*
- * Enable the APPS KPSS watchdog as early as possible.
- *
- * The RPM firmware monitors the APPS WDT0_EN register.  When it sees
- * the WDT enabled and being petted, it considers APPS alive and holds
- * off its own ~5s supervision timer.  The downstream 3.18 kernel
- * enables WDT at pure_initcall (~0.168s); upstream never enables it
- * until the qcom_wdt driver probes at device_initcall (~2.8s kernel
- * time), which is too late.
- *
- * The qcom_wdt driver handles handoff automatically: if WDT_EN reads
- * back as set, it reconfigures timeouts, sets WDOG_HW_RUNNING, and
- * the watchdog core starts auto-pinging.
- */
-static int __init qcom_early_wdt_init(void)
-{
-	void __iomem *base;
-
-	base = ioremap(KPSS_WDT_PHYS, KPSS_WDT_SIZE);
-	if (!base)
-		return 0;
-
-	/* Set bark and bite timeouts to 30 seconds */
-	writel(30 * WDT_CLK_RATE, base + WDT_BARK_TIME);
-	writel(30 * WDT_CLK_RATE, base + WDT_BITE_TIME);
-
-	/* Enable the watchdog */
-	writel(1, base + WDT_EN);
-
-	/* Pet it once to start the countdown */
-	writel(1, base + WDT_RST);
-
-	iounmap(base);
-
-	pr_info("qcom_early_wdt: APPS WDT enabled (30s timeout)\n");
-	return 0;
-}
-postcore_initcall(qcom_early_wdt_init);
 
 static int __init qcom_early_device_init(void)
 {
@@ -175,60 +135,32 @@ static int __init qcom_early_smsm_handshake(void)
 subsys_initcall(qcom_early_smsm_handshake);
 
 /*
- * Diagnostic RT thread — polls WDT registers every ~10ms using udelay()
- * so it doesn't depend on timer interrupts or softirqs.  Runs as
- * SCHED_FIFO priority 99.  If the CPU is alive and executing, this
- * thread will print; if the prints stop, the CPU was externally reset.
- *
- * On single-core MDM9607, schedule() is called each iteration to let
- * the rest of the system (initcalls, deferred probes) make progress.
- * Remove once the reset cause is identified.
+ * Debug heartbeat — prints WDT state and pets the watchdog every 500ms.
+ * Remove once boot is stable.
  */
-static int heartbeat_thread_fn(void *data)
+static struct timer_list heartbeat_timer;
+static unsigned int heartbeat_count;
+static void __iomem *hb_wdt_base;
+
+static void heartbeat_fn(struct timer_list *t)
 {
-	void __iomem *wdt_base = data;
-	unsigned int count = 0;
-	u32 sts, en;
+	u32 sts = 0, en = 0;
 
-	while (!kthread_should_stop()) {
-		sts = readl(wdt_base + 0x0C);	/* WDT_STS */
-		en = readl(wdt_base + 0x08);	/* WDT_EN */
-		pr_info("hb #%u WDT_STS=%#x EN=%#x\n", ++count, sts, en);
-
-		/*
-		 * Yield so the single-core system can make progress,
-		 * then busy-wait 10ms.  schedule() doesn't need timer
-		 * interrupts — it just invokes the scheduler.  The
-		 * udelay ensures we don't spin faster than 10ms even
-		 * if schedule() returns immediately.
-		 */
-		schedule();
-		mdelay(10);
+	if (hb_wdt_base) {
+		sts = readl(hb_wdt_base + 0x0C);	/* WDT_STS */
+		en = readl(hb_wdt_base + 0x08);		/* WDT_EN */
+		writel(1, hb_wdt_base + WDT_RST);	/* pet the WDT */
 	}
-	return 0;
+	pr_info("hb #%u WDT_STS=%#x EN=%#x\n", ++heartbeat_count, sts, en);
+	mod_timer(t, jiffies + msecs_to_jiffies(500));
 }
 
 static int __init heartbeat_init(void)
 {
-	struct task_struct *t;
-	void __iomem *wdt_base;
-
-	wdt_base = ioremap(KPSS_WDT_PHYS, KPSS_WDT_SIZE);
-	if (!wdt_base) {
-		pr_err("heartbeat: failed to map WDT registers\n");
-		return -ENOMEM;
-	}
-
-	t = kthread_create(heartbeat_thread_fn, wdt_base, "hb_diag");
-	if (IS_ERR(t)) {
-		iounmap(wdt_base);
-		return PTR_ERR(t);
-	}
-
-	sched_set_fifo(t);
-	wake_up_process(t);
-
-	pr_info("heartbeat: started RT diagnostic thread (10ms udelay poll)\n");
+	hb_wdt_base = ioremap(KPSS_WDT_PHYS, KPSS_WDT_SIZE);
+	pr_info("heartbeat: starting 500ms debug heartbeat (with WDT pet)\n");
+	timer_setup(&heartbeat_timer, heartbeat_fn, 0);
+	mod_timer(&heartbeat_timer, jiffies + msecs_to_jiffies(500));
 	return 0;
 }
 late_initcall(heartbeat_init);
