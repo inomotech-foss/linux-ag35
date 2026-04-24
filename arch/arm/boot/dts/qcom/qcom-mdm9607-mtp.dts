@@ -59,7 +59,7 @@
 /* &usb { ... status = "okay"; }; */
 
 /* QPIC NAND */
-/* &qpic_bam { status = "okay"; }; */
-/* &qpic_nand { status = "okay"; ... }; */
+&qpic_bam { status = "okay"; };
+&qpic_nand { status = "okay"; };
 
 /* &pm8019_mpps { ... }; */
