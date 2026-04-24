@@ -27,6 +27,8 @@
 #include <linux/soc/qcom/smem.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
+#include <linux/panic_notifier.h>
+#include <linux/kdebug.h>
 
 /*
  * KPSS WDT register offsets (from reg_offset_data_kpss in qcom-wdt.c).
@@ -133,6 +135,57 @@ static int __init qcom_early_smsm_handshake(void)
 	return 0;
 }
 subsys_initcall(qcom_early_smsm_handshake);
+
+/*
+ * Panic and die notifiers — distinguish kernel panic / oops from an
+ * external RPM-driven PS_HOLD reset.  If the panic notifier fires we
+ * stamp a magic value into IMEM reboot-mode so the next boot can tell
+ * it was a kernel crash.
+ */
+#define IMEM_REBOOT_MODE_PHYS	0x0860065c
+static void __iomem *imem_reboot_mode;
+
+static int qcom_panic_event(struct notifier_block *nb, unsigned long action,
+			    void *data)
+{
+	pr_emerg(">>> PANIC NOTIFIER FIRED — kernel panic caused this reset <<<\n");
+	if (imem_reboot_mode)
+		writel(0xDEAD0A1C, imem_reboot_mode);
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block qcom_panic_nb = {
+	.notifier_call = qcom_panic_event,
+	.priority = 255,
+};
+
+static int qcom_die_notify(struct notifier_block *nb, unsigned long action,
+			   void *data)
+{
+	struct die_args *args = data;
+
+	if (action == DIE_OOPS) {
+		pr_emerg(">>> DIE_OOPS: PC=%pS LR=%pS <<<\n",
+			 (void *)instruction_pointer(args->regs),
+			 (void *)args->regs->ARM_lr);
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block qcom_die_nb = {
+	.notifier_call = qcom_die_notify,
+	.priority = 255,
+};
+
+static int __init qcom_panic_notifier_init(void)
+{
+	imem_reboot_mode = ioremap(IMEM_REBOOT_MODE_PHYS, 4);
+	atomic_notifier_chain_register(&panic_notifier_list, &qcom_panic_nb);
+	register_die_notifier(&qcom_die_nb);
+	pr_info("qcom_panic_notifier: registered (imem=%p)\n", imem_reboot_mode);
+	return 0;
+}
+postcore_initcall(qcom_panic_notifier_init);
 
 /*
  * Debug heartbeat — prints WDT state and pets the watchdog every 500ms.
