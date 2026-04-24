@@ -21,6 +21,8 @@
 #include <linux/init.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
+#include <linux/timer.h>
+#include <linux/jiffies.h>
 
 static const struct of_device_id qcom_early_devices[] __initconst = {
 	{ .compatible = "qcom,tcsr-mutex" },
@@ -43,3 +45,26 @@ static int __init qcom_early_device_init(void)
 	return 0;
 }
 postcore_initcall(qcom_early_device_init);
+
+/*
+ * Debug heartbeat — prints a message every 500ms so we can see exactly
+ * when the kernel stops being alive before a mysterious reset.
+ * Remove once the reset cause is identified.
+ */
+static struct timer_list heartbeat_timer;
+static unsigned int heartbeat_count;
+
+static void heartbeat_fn(struct timer_list *t)
+{
+	pr_info("heartbeat: alive #%u\n", ++heartbeat_count);
+	mod_timer(t, jiffies + msecs_to_jiffies(500));
+}
+
+static int __init heartbeat_init(void)
+{
+	pr_info("heartbeat: starting 500ms debug heartbeat\n");
+	timer_setup(&heartbeat_timer, heartbeat_fn, 0);
+	mod_timer(&heartbeat_timer, jiffies + msecs_to_jiffies(500));
+	return 0;
+}
+late_initcall(heartbeat_init);

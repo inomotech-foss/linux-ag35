@@ -9,6 +9,9 @@
 #include <linux/regmap.h>
 #include <linux/watchdog.h>
 
+#define PON_PON_REASON1			0x08
+#define PON_WARM_RESET_REASON1		0x0a
+#define PON_WARM_RESET_REASON2		0x0b
 #define PON_POFF_REASON1		0x0c
 #define PON_POFF_REASON1_PMIC_WD	BIT(2)
 #define PON_POFF_REASON2		0x0d
@@ -193,6 +196,21 @@ static int pm8916_wdt_probe(struct platform_device *pdev)
 	}
 
 	dev_info(dev, "POFF reason: %#x %#x\n", poff[0], poff[1]);
+
+	/* Read additional PON registers for reset cause diagnosis */
+	{
+		unsigned int pon_reason, warm1, warm2;
+
+		regmap_read(wdt->regmap, wdt->baseaddr + PON_PON_REASON1,
+			    &pon_reason);
+		regmap_read(wdt->regmap, wdt->baseaddr + PON_WARM_RESET_REASON1,
+			    &warm1);
+		regmap_read(wdt->regmap, wdt->baseaddr + PON_WARM_RESET_REASON2,
+			    &warm2);
+		dev_info(dev, "PON reason: %#x, WARM_RESET reason: %#x %#x\n",
+			 pon_reason, warm1, warm2);
+	}
+
 	if (poff[0] & PON_POFF_REASON1_PMIC_WD)
 		wdt->wdev.bootstatus |= WDIOF_CARDRESET;
 	if (poff[1] & PON_POFF_REASON2_UVLO)

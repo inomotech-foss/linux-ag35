@@ -273,8 +273,12 @@ static int qcom_wdt_probe(struct platform_device *pdev)
 	wdt->wdd.parent = dev;
 	wdt->layout = data->offset;
 
-	if (readl(wdt_addr(wdt, WDT_STS)) & 1)
+	if (readl(wdt_addr(wdt, WDT_STS)) & 1) {
 		wdt->wdd.bootstatus = WDIOF_CARDRESET;
+		dev_warn(dev, "APPS WDT STS indicates PREVIOUS reset was WDT bite!\n");
+	} else {
+		dev_info(dev, "APPS WDT STS clean (no WDT bite on previous boot)\n");
+	}
 
 	/*
 	 * If 'timeout-sec' unspecified in devicetree, assume a 30 second
