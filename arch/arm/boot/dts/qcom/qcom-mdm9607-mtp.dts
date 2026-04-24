@@ -25,17 +25,6 @@
 	chosen {
 		stdout-path = "serial0:115200n8";
 	};
-
-	reserved-memory {
-		ramoops@8601000 {
-			compatible = "ramoops";
-			reg = <0x08601000 0x10000>;
-			no-map;
-			record-size = <0x4000>;
-			console-size = <0x4000>;
-			pmsg-size = <0x1000>;
-		};
-	};
 };
 
 /* BLSP1 UART2 (gpio4/5): debug console */
