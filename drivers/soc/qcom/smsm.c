@@ -642,6 +642,22 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, smsm);
 	of_node_put(local_node);
 
+	/*
+	 * Signal to all remote processors that APPS is alive and SMD is
+	 * ready.  The modem firmware (loaded by SBL1, not by Linux
+	 * remoteproc) polls these bits and will trigger its watchdog if
+	 * APPS doesn't assert them within a few seconds of POR.
+	 *
+	 * Downstream kernels set these bits from the SMSM IRQ handler
+	 * when mirroring the modem's state.  The upstream driver has no
+	 * such mirroring, so set them explicitly here.
+	 */
+#define SMSM_INIT	BIT(0)
+#define SMSM_SMDINIT	BIT(3)
+	smsm_update_bits(smsm, SMSM_INIT | SMSM_SMDINIT,
+			 SMSM_INIT | SMSM_SMDINIT);
+	dev_info(&pdev->dev, "APPS SMSM state set: SMSM_INIT | SMSM_SMDINIT\n");
+
 	return 0;
 
 unwind_interfaces:
