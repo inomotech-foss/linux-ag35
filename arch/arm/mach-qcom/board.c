@@ -25,8 +25,9 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/soc/qcom/smem.h>
-#include <linux/timer.h>
-#include <linux/jiffies.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
+#include <linux/sched.h>
 
 /*
  * KPSS WDT register offsets (from reg_offset_data_kpss in qcom-wdt.c).
@@ -173,32 +174,60 @@ static int __init qcom_early_smsm_handshake(void)
 subsys_initcall(qcom_early_smsm_handshake);
 
 /*
- * Debug heartbeat — prints a message every 50ms with WDT register
- * state so we can see exactly when the kernel dies and whether the
- * WDT is being maintained.  Remove once the reset cause is identified.
+ * Diagnostic RT thread — polls WDT registers every ~10ms using udelay()
+ * so it doesn't depend on timer interrupts or softirqs.  Runs as
+ * SCHED_FIFO priority 99.  If the CPU is alive and executing, this
+ * thread will print; if the prints stop, the CPU was externally reset.
+ *
+ * On single-core MDM9607, schedule() is called each iteration to let
+ * the rest of the system (initcalls, deferred probes) make progress.
+ * Remove once the reset cause is identified.
  */
-static struct timer_list heartbeat_timer;
-static unsigned int heartbeat_count;
-static void __iomem *hb_wdt_base;
-
-static void heartbeat_fn(struct timer_list *t)
+static int heartbeat_thread_fn(void *data)
 {
-	u32 sts = 0, en = 0;
+	void __iomem *wdt_base = data;
+	unsigned int count = 0;
+	u32 sts, en;
 
-	if (hb_wdt_base) {
-		sts = readl(hb_wdt_base + 0x0C);	/* WDT_STS */
-		en = readl(hb_wdt_base + 0x08);	/* WDT_EN */
+	while (!kthread_should_stop()) {
+		sts = readl(wdt_base + 0x0C);	/* WDT_STS */
+		en = readl(wdt_base + 0x08);	/* WDT_EN */
+		pr_info("hb #%u WDT_STS=%#x EN=%#x\n", ++count, sts, en);
+
+		/*
+		 * Yield so the single-core system can make progress,
+		 * then busy-wait 10ms.  schedule() doesn't need timer
+		 * interrupts — it just invokes the scheduler.  The
+		 * udelay ensures we don't spin faster than 10ms even
+		 * if schedule() returns immediately.
+		 */
+		schedule();
+		mdelay(10);
 	}
-	pr_info("hb #%u WDT_STS=%#x EN=%#x\n", ++heartbeat_count, sts, en);
-	mod_timer(t, jiffies + msecs_to_jiffies(50));
+	return 0;
 }
 
 static int __init heartbeat_init(void)
 {
-	hb_wdt_base = ioremap(KPSS_WDT_PHYS, KPSS_WDT_SIZE);
-	pr_info("heartbeat: starting 50ms debug heartbeat\n");
-	timer_setup(&heartbeat_timer, heartbeat_fn, 0);
-	mod_timer(&heartbeat_timer, jiffies + msecs_to_jiffies(50));
+	struct task_struct *t;
+	void __iomem *wdt_base;
+
+	wdt_base = ioremap(KPSS_WDT_PHYS, KPSS_WDT_SIZE);
+	if (!wdt_base) {
+		pr_err("heartbeat: failed to map WDT registers\n");
+		return -ENOMEM;
+	}
+
+	t = kthread_create(heartbeat_thread_fn, wdt_base, "hb_diag");
+	if (IS_ERR(t)) {
+		iounmap(wdt_base);
+		return PTR_ERR(t);
+	}
+
+	sched_set_fifo(t);
+	wake_up_process(t);
+
+	pr_info("heartbeat: started RT diagnostic thread (10ms udelay poll)\n");
 	return 0;
 }
 late_initcall(heartbeat_init);
