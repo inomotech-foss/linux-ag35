@@ -1258,6 +1258,7 @@ static void qcom_channel_scan_worker(struct work_struct *work)
 		}
 	}
 
+	dev_info(&edge->dev, "scan complete\n");
 	schedule_work(&edge->state_work);
 }
 
@@ -1293,6 +1294,10 @@ static void qcom_channel_state_worker(struct work_struct *work)
 		 * required on some SoCs like msm8953.
 		 */
 		remote_state = GET_RX_CHANNEL_INFO(channel, state);
+
+		dev_info(&edge->dev, "ch '%s' remote_state=%u registered=%d\n",
+			 channel->name, remote_state, channel->registered);
+
 		if (remote_state != SMD_CHANNEL_OPENING &&
 		    remote_state != SMD_CHANNEL_OPENED &&
 		    strcmp(channel->name, "rpm_requests"))
@@ -1517,6 +1522,7 @@ struct qcom_smd_edge *qcom_smd_register_edge(struct device *parent,
 	 * promptly after edge registration.
 	 */
 	flush_work(&edge->scan_work);
+	flush_work(&edge->state_work);
 
 	return edge;
 

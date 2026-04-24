@@ -173,24 +173,32 @@ static int __init qcom_early_smsm_handshake(void)
 subsys_initcall(qcom_early_smsm_handshake);
 
 /*
- * Debug heartbeat — prints a message every 500ms so we can see exactly
- * when the kernel stops being alive before a mysterious reset.
- * Remove once the reset cause is identified.
+ * Debug heartbeat — prints a message every 50ms with WDT register
+ * state so we can see exactly when the kernel dies and whether the
+ * WDT is being maintained.  Remove once the reset cause is identified.
  */
 static struct timer_list heartbeat_timer;
 static unsigned int heartbeat_count;
+static void __iomem *hb_wdt_base;
 
 static void heartbeat_fn(struct timer_list *t)
 {
-	pr_info("heartbeat: alive #%u\n", ++heartbeat_count);
-	mod_timer(t, jiffies + msecs_to_jiffies(500));
+	u32 sts = 0, en = 0;
+
+	if (hb_wdt_base) {
+		sts = readl(hb_wdt_base + 0x0C);	/* WDT_STS */
+		en = readl(hb_wdt_base + 0x08);	/* WDT_EN */
+	}
+	pr_info("hb #%u WDT_STS=%#x EN=%#x\n", ++heartbeat_count, sts, en);
+	mod_timer(t, jiffies + msecs_to_jiffies(50));
 }
 
 static int __init heartbeat_init(void)
 {
-	pr_info("heartbeat: starting 500ms debug heartbeat\n");
+	hb_wdt_base = ioremap(KPSS_WDT_PHYS, KPSS_WDT_SIZE);
+	pr_info("heartbeat: starting 50ms debug heartbeat\n");
 	timer_setup(&heartbeat_timer, heartbeat_fn, 0);
-	mod_timer(&heartbeat_timer, jiffies + msecs_to_jiffies(500));
+	mod_timer(&heartbeat_timer, jiffies + msecs_to_jiffies(50));
 	return 0;
 }
 late_initcall(heartbeat_init);
