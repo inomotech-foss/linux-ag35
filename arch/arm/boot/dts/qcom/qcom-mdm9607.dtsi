@@ -975,7 +975,6 @@
 			clock-names = "bam_clk";
 			#dma-cells = <1>;
 			qcom,ee = <0>;
-			qcom,controlled-remotely;
 			num-channels = <24>;
 			qcom,num-ees = <2>;
 		};
@@ -1106,7 +1105,6 @@
 			clock-names = "bam_clk";
 			#dma-cells = <1>;
 			qcom,ee = <0>;
-			qcom,controlled-remotely;
 			num-channels = <7>;
 			qcom,num-ees = <2>;
 			status = "disabled";
