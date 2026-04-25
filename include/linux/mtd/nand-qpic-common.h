@@ -102,6 +102,13 @@
 /* NAND_DEV_CMD1 bits */
 #define	READ_ADDR_MASK			GENMASK(7, 0)
 
+/*
+ * Hardware default for NAND_DEV_CMD1.  Used when direct register read is not
+ * possible (e.g. TZ-protected QPIC on MDM9607).  The register encodes NAND
+ * flash opcodes; the default matches what the bootloader leaves programmed.
+ */
+#define	NAND_DEV_CMD1_DEFAULT		0x1080
+
 /* NAND_DEV_CMD_VLD bits */
 #define	READ_START_VLD			BIT(0)
 #define	READ_STOP_VLD			BIT(1)
@@ -452,6 +459,7 @@ struct qcom_nandc_props {
 	bool nandc_part_of_qpic;
 	bool qpic_version2;
 	bool use_codeword_fixup;
+	bool tz_protected_regs;
 };
 
 void qcom_free_bam_transaction(struct qcom_nand_controller *nandc);

@@ -2041,6 +2041,19 @@ static int qcom_nandc_setup(struct qcom_nand_controller *nandc)
 	if (!nandc->props->nandc_part_of_qpic)
 		nandc_write(nandc, SFLASHC_BURST_CFG, 0);
 
+	/*
+	 * On MDM9607, TZ owns the QPIC BAM global config and may restrict
+	 * direct CPU writes to certain NAND controller registers.  The
+	 * bootloader (LK/TZ) already programmed NAND_DEV_CMD_VLD and
+	 * enabled BAM mode, so skip those writes and assume BAM mode.
+	 * NAND_DEV_CMD1 may also be inaccessible; use known defaults.
+	 */
+	if (nandc->props->tz_protected_regs) {
+		nandc->cmd1 = NAND_DEV_CMD1_DEFAULT;
+		nandc->vld = NAND_DEV_CMD_VLD_VAL;
+		return 0;
+	}
+
 	if (!nandc->props->qpic_version2)
 		nandc_write(nandc, dev_cmd_reg_addr(nandc, NAND_DEV_CMD_VLD),
 			    NAND_DEV_CMD_VLD_VAL);
@@ -2383,6 +2396,15 @@ static const struct qcom_nandc_props ipq4019_nandc_props = {
 	.bam_offset = 0x30000,
 };
 
+static const struct qcom_nandc_props mdm9607_nandc_props = {
+	.ecc_modes = (ECC_BCH_4BIT | ECC_BCH_8BIT),
+	.supports_bam = true,
+	.nandc_part_of_qpic = true,
+	.dev_cmd_reg_start = 0x0,
+	.bam_offset = 0x30000,
+	.tz_protected_regs = true,
+};
+
 static const struct qcom_nandc_props ipq8074_nandc_props = {
 	.ecc_modes = (ECC_BCH_4BIT | ECC_BCH_8BIT),
 	.supports_bam = true,
@@ -2408,6 +2430,10 @@ static const struct of_device_id qcom_nandc_of_match[] = {
 	{
 		.compatible = "qcom,ipq806x-nand",
 		.data = &ipq806x_nandc_props,
+	},
+	{
+		.compatible = "qcom,mdm9607-nand",
+		.data = &mdm9607_nandc_props,
 	},
 	{
 		.compatible = "qcom,ipq4019-nand",

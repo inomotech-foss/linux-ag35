@@ -969,7 +969,7 @@
 
 		blsp1_dma: dma-controller@7884000 {
 			compatible = "qcom,bam-v1.7.0";
-			reg = <0x07884000 0x23000>;
+			reg = <0x07884000 0x2b000>;
 			interrupts = <GIC_SPI 238 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&gcc GCC_BLSP1_AHB_CLK>;
 			clock-names = "bam_clk";
@@ -1111,7 +1111,7 @@
 		};
 
 		qpic_nand: nand@79b0000 {
-			compatible = "qcom,ipq4019-nand";
+			compatible = "qcom,mdm9607-nand", "qcom,ipq4019-nand";
 			reg = <0x079b0000 0x10000>;
 			#address-cells = <1>;
 			#size-cells = <0>;
