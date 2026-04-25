@@ -1187,8 +1187,17 @@ static int bam_init(struct bam_device *bdev)
 	}
 
 	/* Reset BAM now if fully controlled locally */
-	if (!bdev->controlled_remotely && !bdev->powered_remotely)
+	if (!bdev->controlled_remotely && !bdev->powered_remotely) {
 		bam_reset(bdev);
+	} else {
+		/*
+		 * For remotely-controlled BAMs, TZ already initialized the
+		 * global config including BAM_IRQ_EN.  Don't touch global
+		 * registers here — they may be XPU-protected.  Per-pipe
+		 * IRQ setup (P_IRQ_EN + BAM_IRQ_SRCS_MSK_EE per-pipe bit)
+		 * is handled later by bam_chan_init_hw().
+		 */
+	}
 
 	return 0;
 }
