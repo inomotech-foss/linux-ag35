@@ -263,6 +263,7 @@ static struct clk_rcg2 system_noc_bfdcd_clk_src = {
 		.parent_data = gcc_xo_gpll0_bimc,
 		.num_parents = ARRAY_SIZE(gcc_xo_gpll0_bimc),
 		.ops = &clk_rcg2_ops,
+		.flags = CLK_IS_CRITICAL,
 	},
 };
 
@@ -784,6 +785,7 @@ static struct clk_branch gcc_blsp1_ahb_clk = {
 			.parent_hws = (const struct clk_hw *[]){ &pcnoc_bfdcd_clk_src.clkr.hw },
 			.num_parents = 1,
 			.ops = &clk_branch2_ops,
+			.flags = CLK_IS_CRITICAL,
 		},
 	},
 };
@@ -1454,6 +1456,7 @@ static struct clk_branch gcc_apss_ahb_clk = {
 			.parent_hws = (const struct clk_hw *[]){ &pcnoc_bfdcd_clk_src.clkr.hw },
 			.num_parents = 1,
 			.ops = &clk_branch2_ops,
+			.flags = CLK_IS_CRITICAL,
 		},
 	},
 };
@@ -1469,6 +1472,7 @@ static struct clk_branch gcc_apss_axi_clk = {
 			.parent_hws = (const struct clk_hw *[]){ &pcnoc_bfdcd_clk_src.clkr.hw },
 			.num_parents = 1,
 			.ops = &clk_branch2_ops,
+			.flags = CLK_IS_CRITICAL,
 		},
 	},
 };

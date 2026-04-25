@@ -75,6 +75,8 @@ static int __init qcom_early_device_init(void)
 	const struct of_device_id *match;
 	struct device_node *np;
 
+	pr_info("qcom_early: boot_command_line: %s\n", boot_command_line);
+
 	for (match = qcom_early_devices; match->compatible[0]; match++) {
 		np = of_find_compatible_node(NULL, NULL, match->compatible);
 		if (np) {

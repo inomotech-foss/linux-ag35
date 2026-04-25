@@ -1260,20 +1260,27 @@ static int bam_dma_probe(struct platform_device *pdev)
 	if (IS_ERR(bdev->bamclk))
 		return PTR_ERR(bdev->bamclk);
 
-	if (!bdev->bamclk) {
-		ret = of_property_read_u32(pdev->dev.of_node, "num-channels",
-					   &bdev->num_channels);
-		if (ret) {
-			dev_err(bdev->dev, "num-channels unspecified in dt\n");
-			return ret;
-		}
+	/*
+	 * Read num-channels / num-ees from DT when available, regardless
+	 * of whether a clock was found.  The upstream code only reads these
+	 * when bamclk is NULL, but controlled-remotely BAMs may provide
+	 * both a clock AND these properties to avoid register reads during
+	 * bam_init() (the BAM registers may be inaccessible until the
+	 * clock is enabled).
+	 */
+	of_property_read_u32(pdev->dev.of_node, "num-channels",
+			     &bdev->num_channels);
+	of_property_read_u32(pdev->dev.of_node, "qcom,num-ees",
+			     &bdev->num_ees);
 
-		ret = of_property_read_u32(pdev->dev.of_node, "qcom,num-ees",
-					   &bdev->num_ees);
-		if (ret) {
-			dev_err(bdev->dev, "num-ees unspecified in dt\n");
-			return ret;
-		}
+	if (!bdev->bamclk && !bdev->num_channels) {
+		dev_err(bdev->dev, "num-channels unspecified in dt\n");
+		return -EINVAL;
+	}
+
+	if (!bdev->bamclk && !bdev->num_ees) {
+		dev_err(bdev->dev, "num-ees unspecified in dt\n");
+		return -EINVAL;
 	}
 
 	ret = clk_prepare_enable(bdev->bamclk);
@@ -1282,13 +1289,13 @@ static int bam_dma_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	dev_info(bdev->dev, "BAM probe: clk=%pC enabled, ee=%u num_ch=%u num_ees=%u controlled_remotely=%d\n",
-		 bdev->bamclk, bdev->ee, bdev->num_channels, bdev->num_ees,
-		 bdev->controlled_remotely);
-
 	ret = bam_init(bdev);
 	if (ret)
 		goto err_disable_clk;
+
+	dev_info(bdev->dev, "BAM probe: clk=%pC ee=%u num_ch=%u num_ees=%u controlled_remotely=%d\n",
+		 bdev->bamclk, bdev->ee, bdev->num_channels, bdev->num_ees,
+		 bdev->controlled_remotely);
 
 	tasklet_setup(&bdev->task, dma_tasklet);
 

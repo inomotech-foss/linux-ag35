@@ -163,7 +163,7 @@ static struct rpmpd cx_s2a_lvl_ao = {
 
 static struct rpmpd cx_s3a_lvl_ao;
 static struct rpmpd cx_s3a_lvl = {
-	.pd = { .name = "cx", },
+	.pd = { .name = "cx", .flags = GENPD_FLAG_ALWAYS_ON, },
 	.peer = &cx_s3a_lvl_ao,
 	.res_type = RPMPD_SMPA,
 	.res_id = 3,
@@ -375,7 +375,7 @@ static struct rpmpd mx_l3a_lvl_ao = {
 
 static struct rpmpd mx_l12a_lvl_ao;
 static struct rpmpd mx_l12a_lvl = {
-	.pd = { .name = "mx", },
+	.pd = { .name = "mx", .flags = GENPD_FLAG_ALWAYS_ON, },
 	.peer = &mx_l12a_lvl_ao,
 	.res_type = RPMPD_LDOA,
 	.res_id = 12,

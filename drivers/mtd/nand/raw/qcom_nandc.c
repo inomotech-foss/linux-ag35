@@ -2280,6 +2280,7 @@ static int qcom_nandc_probe(struct platform_device *pdev)
 
 	nandc->props = dev_data;
 
+	dev_info(dev, "nandc_probe: getting clocks\n");
 	nandc->core_clk = devm_clk_get(dev, "core");
 	if (IS_ERR(nandc->core_clk))
 		return PTR_ERR(nandc->core_clk);
@@ -2303,27 +2304,32 @@ static int qcom_nandc_probe(struct platform_device *pdev)
 	if (dma_mapping_error(dev, nandc->base_dma))
 		return -ENXIO;
 
+	dev_info(dev, "nandc_probe: enabling core_clk\n");
 	ret = clk_prepare_enable(nandc->core_clk);
 	if (ret)
 		goto err_core_clk;
 
+	dev_info(dev, "nandc_probe: enabling aon_clk\n");
 	ret = clk_prepare_enable(nandc->aon_clk);
 	if (ret)
 		goto err_aon_clk;
 
+	dev_info(dev, "nandc_probe: calling qcom_nandc_alloc\n");
 	ret = qcom_nandc_alloc(nandc);
 	if (ret)
 		goto err_nandc_alloc;
 
+	dev_info(dev, "nandc_probe: calling qcom_nandc_setup\n");
 	ret = qcom_nandc_setup(nandc);
 	if (ret)
 		goto err_setup;
 
+	dev_info(dev, "nandc_probe: calling qcom_probe_nand_devices\n");
 	ret = qcom_probe_nand_devices(nandc);
 	if (ret)
 		goto err_setup;
 
-	return 0;
+	dev_info(dev, "nandc_probe: done\n");
 
 err_setup:
 	qcom_nandc_unalloc(nandc);

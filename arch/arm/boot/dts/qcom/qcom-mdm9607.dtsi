@@ -975,6 +975,9 @@
 			clock-names = "bam_clk";
 			#dma-cells = <1>;
 			qcom,ee = <0>;
+			qcom,controlled-remotely;
+			num-channels = <24>;
+			qcom,num-ees = <2>;
 		};
 
 		blsp1_uart2: serial@78b0000 {
@@ -1104,8 +1107,8 @@
 			#dma-cells = <1>;
 			qcom,ee = <0>;
 			qcom,controlled-remotely;
-			num-channels = <16>;
-			qcom,num-ees = <4>;
+			num-channels = <7>;
+			qcom,num-ees = <2>;
 			status = "disabled";
 		};
 
