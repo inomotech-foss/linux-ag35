@@ -611,14 +611,20 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 				dma_st = dma_async_is_tx_complete(
 						nandc->cmd_chan, cookie,
 						NULL, NULL);
-				if (dma_st == DMA_COMPLETE)
+				if (dma_st == DMA_COMPLETE) {
+					if (poll_ms > 0)
+						dev_info(nandc->dev,
+							 "submit_descs: done after %d polls\n",
+							 poll_ms);
 					break;
+				}
 				udelay(100);
 			}
 
 			if (dma_st != DMA_COMPLETE) {
 				dev_err(nandc->dev,
-					"BAM DMA timeout! tx=%d rx=%d cmd=%d\n",
+					"BAM DMA timeout! cookie=%d tx=%d rx=%d cmd=%d\n",
+					cookie,
 					bam_txn->tx_sgl_pos -
 						bam_txn->tx_sgl_start,
 					bam_txn->rx_sgl_pos -

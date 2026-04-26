@@ -1066,7 +1066,7 @@ static enum dma_status bam_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
 		for (i = 0; i < bdev->num_channels; i++) {
 			struct bam_chan *bc = &bdev->channels[i];
 
-			if (!list_empty(&bc->desc_list))
+			if (bc->initialized && !list_empty(&bc->desc_list))
 				bam_process_pipe_completions(bdev, i);
 		}
 	}
