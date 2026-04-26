@@ -845,6 +845,11 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		 * controlled-remotely BAMs where TZ services interrupts.
 		 * Go straight to P_SW_OFSTS like the downstream SPS driver.
 		 */
+		dev_info_ratelimited(bdev->dev,
+			"poll: pipe %u P_SW_OFSTS=0x%x head=%u\n",
+			pipe,
+			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
+			bchan->head);
 	} else {
 		u32 pipe_stts;
 
@@ -928,6 +933,8 @@ static enum hrtimer_restart bam_poll_timer_fn(struct hrtimer *timer)
 					       poll_timer);
 	bool any_active = false;
 	unsigned int i;
+
+	dev_info_ratelimited(bdev->dev, "poll_timer fired\n");
 
 	for (i = 0; i < bdev->num_channels; i++) {
 		struct bam_chan *bchan = &bdev->channels[i];
@@ -1203,6 +1210,8 @@ static void dma_tasklet(struct tasklet_struct *t)
 	struct bam_device *bdev = from_tasklet(bdev, t, task);
 	struct bam_chan *bchan;
 	unsigned int i;
+
+	dev_info_ratelimited(bdev->dev, "dma_tasklet running\n");
 
 	/* go through the channels and kick off transactions */
 	for (i = 0; i < bdev->num_channels; i++) {
