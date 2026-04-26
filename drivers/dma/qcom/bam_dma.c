@@ -840,6 +840,12 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		 * controlled-remotely BAMs where TZ services interrupts.
 		 * Go straight to P_SW_OFSTS like the downstream SPS driver.
 		 */
+		dev_info_ratelimited(bdev->dev,
+			"poll pipe %u: P_SW_OFSTS=0x%x head=%u P_IRQ_STTS=0x%x\n",
+			pipe,
+			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
+			bchan->head,
+			readl_relaxed(bam_addr(bdev, pipe, BAM_P_IRQ_STTS)));
 	} else {
 		u32 pipe_stts;
 
@@ -1171,6 +1177,15 @@ static void bam_start_dma(struct bam_chan *bchan)
 	wmb();
 	writel_relaxed(bchan->tail * sizeof(struct bam_desc_hw),
 			bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
+
+	if (bdev->polling)
+		dev_info(bdev->dev,
+			 "pipe %u: doorbell=%u tail=%u head=%u P_CTRL=0x%x\n",
+			 bchan->id,
+			 bchan->tail * (u32)sizeof(struct bam_desc_hw),
+			 bchan->tail, bchan->head,
+			 readl_relaxed(bam_addr(bdev, bchan->id,
+						 BAM_P_CTRL)));
 
 	bam_start_poll_timer(bdev);
 

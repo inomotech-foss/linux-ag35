@@ -595,8 +595,14 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		dma_async_issue_pending(nandc->cmd_chan);
 
 		if (!wait_for_completion_timeout(&bam_txn->txn_done,
-						 QPIC_NAND_COMPLETION_TIMEOUT))
+						 QPIC_NAND_COMPLETION_TIMEOUT)) {
+			dev_err(nandc->dev,
+				"BAM DMA timeout! tx=%d rx=%d cmd=%d\n",
+				bam_txn->tx_sgl_pos - bam_txn->tx_sgl_start,
+				bam_txn->rx_sgl_pos - bam_txn->rx_sgl_start,
+				bam_txn->cmd_sgl_pos - bam_txn->cmd_sgl_start);
 			ret = -ETIMEDOUT;
+		}
 	} else {
 		if (dma_sync_wait(nandc->chan, cookie) != DMA_COMPLETE)
 			ret = -ETIMEDOUT;
