@@ -862,7 +862,7 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		 * controlled-remotely BAMs where TZ services interrupts.
 		 * Go straight to P_SW_OFSTS like the downstream SPS driver.
 		 */
-		dev_info_ratelimited(bdev->dev,
+		dev_dbg(bdev->dev,
 			"poll: pipe %u P_SW_OFSTS=0x%x head=%u\n",
 			pipe,
 			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
@@ -951,7 +951,7 @@ static enum hrtimer_restart bam_poll_timer_fn(struct hrtimer *timer)
 	bool any_active = false;
 	unsigned int i;
 
-	dev_info_ratelimited(bdev->dev, "poll_timer fired\n");
+	dev_dbg(bdev->dev, "poll_timer fired\n");
 
 	for (i = 0; i < bdev->num_channels; i++) {
 		struct bam_chan *bchan = &bdev->channels[i];
@@ -1054,13 +1054,22 @@ static enum dma_status bam_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
 	unsigned int i;
 
 	/*
-	 * In polling mode, process hardware completions before checking
-	 * cookie status.  This bypasses the hrtimer/tasklet chain which
-	 * may not work on platforms where timer interrupts don't fire
-	 * (e.g. controlled-remotely BAMs on single-core SoCs).
+	 * In polling mode, process hardware completions on ALL active
+	 * pipes before checking cookie status.  This is needed because
+	 * a multi-pipe peripheral (e.g. QPIC NAND with cmd/tx/rx pipes)
+	 * requires all pipes to be drained — otherwise completed
+	 * descriptors remain in desc_list, IS_BUSY stays true, and
+	 * subsequent operations on that pipe never get doorbelled.
+	 * This matches what bam_poll_timer_fn() already does.
 	 */
-	if (bdev->polling)
-		bam_process_pipe_completions(bdev, bchan->id);
+	if (bdev->polling) {
+		for (i = 0; i < bdev->num_channels; i++) {
+			struct bam_chan *bc = &bdev->channels[i];
+
+			if (!list_empty(&bc->desc_list))
+				bam_process_pipe_completions(bdev, i);
+		}
+	}
 
 	ret = dma_cookie_status(chan, cookie, txstate);
 	if (ret == DMA_COMPLETE)
@@ -1243,7 +1252,7 @@ static void dma_tasklet(struct tasklet_struct *t)
 	struct bam_chan *bchan;
 	unsigned int i;
 
-	dev_info_ratelimited(bdev->dev, "dma_tasklet running\n");
+	dev_dbg(bdev->dev, "dma_tasklet running\n");
 
 	/* go through the channels and kick off transactions */
 	for (i = 0; i < bdev->num_channels; i++) {

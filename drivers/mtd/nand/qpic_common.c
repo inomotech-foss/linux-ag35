@@ -106,7 +106,7 @@ void qcom_qpic_bam_dma_done(void *data)
 {
 	struct bam_transaction *bam_txn = data;
 
-	pr_info("qpic_bam_dma_done: callback fired\n");
+	pr_debug("qpic_bam_dma_done: callback fired\n");
 	complete(&bam_txn->txn_done);
 }
 EXPORT_SYMBOL(qcom_qpic_bam_dma_done);
