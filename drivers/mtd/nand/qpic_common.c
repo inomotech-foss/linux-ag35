@@ -592,8 +592,11 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 			nandc->tx_chan, nandc->rx_chan, nandc->cmd_chan);
 
 		dma_async_issue_pending(nandc->tx_chan);
+		dev_info(nandc->dev, "submit_descs: tx issued\n");
 		dma_async_issue_pending(nandc->rx_chan);
+		dev_info(nandc->dev, "submit_descs: rx issued\n");
 		dma_async_issue_pending(nandc->cmd_chan);
+		dev_info(nandc->dev, "submit_descs: cmd issued\n");
 
 		dev_info(nandc->dev, "submit_descs: waiting for completion\n");
 

@@ -28,6 +28,7 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
+#include <linux/delay.h>
 #include <linux/dmaengine.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -1202,7 +1203,12 @@ static void bam_start_dma(struct bam_chan *bchan)
 	writel_relaxed(bchan->tail * sizeof(struct bam_desc_hw),
 			bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 
-	if (bdev->polling)
+	if (bdev->polling) {
+		struct bam_desc_hw *fifo_dump = PTR_ALIGN(bchan->fifo_virt,
+						sizeof(struct bam_desc_hw));
+		u32 sw_ofsts, irq_stts, bam_irq_stts, bam_irq_srcs;
+		int j;
+
 		dev_info(bdev->dev,
 			 "pipe %u: doorbell=%u tail=%u head=%u P_CTRL=0x%x\n",
 			 bchan->id,
@@ -1210,6 +1216,51 @@ static void bam_start_dma(struct bam_chan *bchan)
 			 bchan->tail, bchan->head,
 			 readl_relaxed(bam_addr(bdev, bchan->id,
 						 BAM_P_CTRL)));
+
+		/* Dump descriptor FIFO entries */
+		for (j = 0; j < bchan->tail && j < 8; j++)
+			dev_info(bdev->dev,
+				 "  desc[%d]: addr=0x%08x size=%u flags=0x%04x\n",
+				 j, le32_to_cpu(fifo_dump[j].addr),
+				 le16_to_cpu(fifo_dump[j].size),
+				 le16_to_cpu(fifo_dump[j].flags));
+
+		/* Read BAM status BEFORE any delay */
+		sw_ofsts = readl_relaxed(bam_addr(bdev, bchan->id,
+						  BAM_P_SW_OFSTS));
+		irq_stts = readl_relaxed(bam_addr(bdev, bchan->id,
+						  BAM_P_IRQ_STTS));
+		bam_irq_stts = readl_relaxed(bam_addr(bdev, 0,
+						      BAM_IRQ_STTS));
+		bam_irq_srcs = readl_relaxed(bam_addr(bdev, 0,
+						      BAM_IRQ_SRCS_EE));
+		dev_info(bdev->dev,
+			 "pipe %u: [T+0] P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x BAM_IRQ_STTS=0x%x BAM_IRQ_SRCS=0x%x\n",
+			 bchan->id, sw_ofsts, irq_stts,
+			 bam_irq_stts, bam_irq_srcs);
+
+		/* Wait ~1ms and read again to see if BAM processes */
+		mdelay(1);
+		sw_ofsts = readl_relaxed(bam_addr(bdev, bchan->id,
+						  BAM_P_SW_OFSTS));
+		irq_stts = readl_relaxed(bam_addr(bdev, bchan->id,
+						  BAM_P_IRQ_STTS));
+		dev_info(bdev->dev,
+			 "pipe %u: [T+1ms] P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x\n",
+			 bchan->id, sw_ofsts, irq_stts);
+
+		/* Wait ~10ms more and read again */
+		mdelay(10);
+		sw_ofsts = readl_relaxed(bam_addr(bdev, bchan->id,
+						  BAM_P_SW_OFSTS));
+		irq_stts = readl_relaxed(bam_addr(bdev, bchan->id,
+						  BAM_P_IRQ_STTS));
+		bam_irq_stts = readl_relaxed(bam_addr(bdev, 0,
+						      BAM_IRQ_STTS));
+		dev_info(bdev->dev,
+			 "pipe %u: [T+11ms] P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x BAM_IRQ_STTS=0x%x\n",
+			 bchan->id, sw_ofsts, irq_stts, bam_irq_stts);
+	}
 
 	bam_start_poll_timer(bdev);
 
