@@ -510,11 +510,16 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	writel_relaxed(BAM_FIFO_SIZE,
 			bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES));
 
-	/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
-	writel_relaxed(P_DEFAULT_IRQS_EN,
-			bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	if (bdev->polling) {
+		/* In polling mode, disable pipe IRQs entirely to avoid
+		 * level-triggered IRQ storm — we poll P_SW_OFSTS instead.
+		 */
+		writel_relaxed(0, bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	} else {
+		/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
+		writel_relaxed(P_DEFAULT_IRQS_EN,
+				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
 
-	if (!bdev->polling) {
 		/* unmask the specific pipe and EE combo */
 		val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 		val |= BIT(bchan->id);
@@ -863,22 +868,10 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 	if (offset < bchan->head)
 		avail--;
 
-	if (bdev->polling)
-		dev_info_ratelimited(bdev->dev,
-			"pipe %u: offset=%u head=%u avail=%u desc_list_empty=%d\n",
-			pipe, offset, bchan->head, avail,
-			list_empty(&bchan->desc_list));
-
 	list_for_each_entry_safe(async_desc, tmp,
 				 &bchan->desc_list, desc_node) {
-		if (avail < async_desc->xfer_len) {
-			if (bdev->polling)
-				dev_info_ratelimited(bdev->dev,
-					"pipe %u: stall xfer_len=%u avail=%u num_desc=%u\n",
-					pipe, async_desc->xfer_len, avail,
-					async_desc->num_desc);
+		if (avail < async_desc->xfer_len)
 			break;
-		}
 
 		bchan->head += async_desc->xfer_len;
 		bchan->head %= MAX_DESCRIPTORS;
@@ -888,11 +881,6 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		avail -= async_desc->xfer_len;
 
 		if (!async_desc->num_desc) {
-			if (bdev->polling)
-				dev_info(bdev->dev,
-					 "pipe %u: completing desc xfer_len=%u head=%u\n",
-					 pipe, async_desc->xfer_len,
-					 bchan->head);
 			vchan_cookie_complete(&async_desc->vd);
 		} else {
 			list_add(&async_desc->vd.node,
@@ -957,10 +945,6 @@ static enum hrtimer_restart bam_poll_timer_fn(struct hrtimer *timer)
 
 		if (!list_empty(&bchan->desc_list) ||
 		    !list_empty(&bchan->vc.desc_issued)) {
-			dev_info_ratelimited(bdev->dev,
-				"timer: ch%u active desc_list=%d issued=%d\n",
-				i, !list_empty(&bchan->desc_list),
-				!list_empty(&bchan->vc.desc_issued));
 			any_active = true;
 			break;
 		}
@@ -1447,10 +1431,12 @@ static int bam_dma_probe(struct platform_device *pdev)
 	for (i = 0; i < bdev->num_channels; i++)
 		bam_channel_init(bdev, &bdev->channels[i], i);
 
-	ret = devm_request_irq(bdev->dev, bdev->irq, bam_dma_irq,
-			IRQF_TRIGGER_HIGH, "bam_dma", bdev);
-	if (ret)
-		goto err_bam_channel_exit;
+	if (!bdev->polling) {
+		ret = devm_request_irq(bdev->dev, bdev->irq, bam_dma_irq,
+				IRQF_TRIGGER_HIGH, "bam_dma", bdev);
+		if (ret)
+			goto err_bam_channel_exit;
+	}
 
 	/* set max dma segment size */
 	bdev->common.dev = bdev->dev;
