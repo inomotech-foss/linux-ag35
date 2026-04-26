@@ -840,12 +840,6 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		 * controlled-remotely BAMs where TZ services interrupts.
 		 * Go straight to P_SW_OFSTS like the downstream SPS driver.
 		 */
-		dev_info_ratelimited(bdev->dev,
-			"poll pipe %u: P_SW_OFSTS=0x%x head=%u P_IRQ_STTS=0x%x\n",
-			pipe,
-			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
-			bchan->head,
-			readl_relaxed(bam_addr(bdev, pipe, BAM_P_IRQ_STTS)));
 	} else {
 		u32 pipe_stts;
 
@@ -869,10 +863,22 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 	if (offset < bchan->head)
 		avail--;
 
+	if (bdev->polling)
+		dev_info_ratelimited(bdev->dev,
+			"pipe %u: offset=%u head=%u avail=%u desc_list_empty=%d\n",
+			pipe, offset, bchan->head, avail,
+			list_empty(&bchan->desc_list));
+
 	list_for_each_entry_safe(async_desc, tmp,
 				 &bchan->desc_list, desc_node) {
-		if (avail < async_desc->xfer_len)
+		if (avail < async_desc->xfer_len) {
+			if (bdev->polling)
+				dev_info_ratelimited(bdev->dev,
+					"pipe %u: stall xfer_len=%u avail=%u num_desc=%u\n",
+					pipe, async_desc->xfer_len, avail,
+					async_desc->num_desc);
 			break;
+		}
 
 		bchan->head += async_desc->xfer_len;
 		bchan->head %= MAX_DESCRIPTORS;
@@ -882,6 +888,11 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		avail -= async_desc->xfer_len;
 
 		if (!async_desc->num_desc) {
+			if (bdev->polling)
+				dev_info(bdev->dev,
+					 "pipe %u: completing desc xfer_len=%u head=%u\n",
+					 pipe, async_desc->xfer_len,
+					 bchan->head);
 			vchan_cookie_complete(&async_desc->vd);
 		} else {
 			list_add(&async_desc->vd.node,
@@ -946,6 +957,10 @@ static enum hrtimer_restart bam_poll_timer_fn(struct hrtimer *timer)
 
 		if (!list_empty(&bchan->desc_list) ||
 		    !list_empty(&bchan->vc.desc_issued)) {
+			dev_info_ratelimited(bdev->dev,
+				"timer: ch%u active desc_list=%d issued=%d\n",
+				i, !list_empty(&bchan->desc_list),
+				!list_empty(&bchan->vc.desc_issued));
 			any_active = true;
 			break;
 		}
