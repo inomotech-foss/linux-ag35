@@ -489,11 +489,12 @@ static void bam_reset_channel(struct bam_chan *bchan)
  * bam_chan_init_hw - Initialize channel hardware
  * @bchan: bam channel
  * @dir: DMA transfer direction
+ * @is_cmd_pipe: true if this pipe carries BAM command descriptors
  *
  * This function resets and initializes the BAM channel
  */
 static void bam_chan_init_hw(struct bam_chan *bchan,
-	enum dma_transfer_direction dir)
+	enum dma_transfer_direction dir, bool is_cmd_pipe)
 {
 	struct bam_device *bdev = bchan->bdev;
 	u32 val;
@@ -509,6 +510,9 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 			bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR));
 	writel_relaxed(BAM_FIFO_SIZE,
 			bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES));
+
+	/* Explicitly set event threshold to 0 (generate event per descriptor) */
+	writel_relaxed(0, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
 
 	if (bdev->polling) {
 		/* In polling mode, disable pipe IRQs entirely to avoid
@@ -534,13 +538,23 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	if (dir == DMA_DEV_TO_MEM)
 		val |= P_DIRECTION;
 
+	/*
+	 * CMD pipes must be in a separate lock group from data pipes.
+	 * The downstream SPS driver uses lock_group=1 for CMD and 0 for
+	 * data.  Without this, the BAM's internal arbitration can deadlock
+	 * when CMD and data pipes share the same group.
+	 */
+	if (is_cmd_pipe)
+		val |= 1 << P_LOCK_GROUP_SHIFT;
+
 	writel_relaxed(val, bam_addr(bdev, bchan->id, BAM_P_CTRL));
 
 	bchan->initialized = 1;
 
 	if (bdev->polling)
-		dev_dbg(bdev->dev, "pipe %u initialized (polling mode, dir=%s)\n",
-			bchan->id, dir == DMA_DEV_TO_MEM ? "DEV_TO_MEM" : "MEM_TO_DEV");
+		dev_dbg(bdev->dev, "pipe %u initialized (polling mode, dir=%s, cmd=%d)\n",
+			bchan->id, dir == DMA_DEV_TO_MEM ? "DEV_TO_MEM" : "MEM_TO_DEV",
+			is_cmd_pipe);
 
 	/* init FIFO pointers */
 	bchan->head = 0;
@@ -757,7 +771,9 @@ static int bam_dma_terminate_all(struct dma_chan *chan)
 		if (!list_empty(&bchan->desc_list)) {
 			async_desc = list_first_entry(&bchan->desc_list,
 						      struct bam_async_desc, desc_node);
-			bam_chan_init_hw(bchan, async_desc->dir);
+			bam_chan_init_hw(bchan, async_desc->dir,
+					 async_desc->desc[0].flags &
+					 cpu_to_le16(DESC_FLAG_CMD));
 		}
 
 		list_for_each_entry_safe(async_desc, tmp,
@@ -1122,7 +1138,9 @@ static void bam_start_dma(struct bam_chan *bchan)
 
 		/* on first use, initialize the channel hardware */
 		if (!bchan->initialized)
-			bam_chan_init_hw(bchan, async_desc->dir);
+			bam_chan_init_hw(bchan, async_desc->dir,
+					 async_desc->desc[0].flags &
+					 cpu_to_le16(DESC_FLAG_CMD));
 
 		/* apply new slave config changes, if necessary */
 		if (bchan->reconfigure)
