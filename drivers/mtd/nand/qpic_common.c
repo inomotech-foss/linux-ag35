@@ -598,7 +598,23 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		dma_async_issue_pending(nandc->cmd_chan);
 		dev_info(nandc->dev, "submit_descs: cmd issued\n");
 
-		dev_info(nandc->dev, "submit_descs: waiting for completion\n");
+		/* Diagnostic: busy-poll to test if completion ever fires */
+		{
+			int poll_i;
+			for (poll_i = 0; poll_i < 200; poll_i++) {
+				if (completion_done(&bam_txn->txn_done)) {
+					dev_info(nandc->dev,
+						 "submit_descs: completion done after %d ms\n",
+						 poll_i);
+					break;
+				}
+				if (poll_i % 50 == 0)
+					dev_info(nandc->dev,
+						 "submit_descs: polling %d ms, not done\n",
+						 poll_i);
+				mdelay(1);
+			}
+		}
 
 		if (!wait_for_completion_timeout(&bam_txn->txn_done,
 						 QPIC_NAND_COMPLETION_TIMEOUT)) {
