@@ -862,7 +862,7 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		 * controlled-remotely BAMs where TZ services interrupts.
 		 * Go straight to P_SW_OFSTS like the downstream SPS driver.
 		 */
-		dev_dbg(bdev->dev,
+		dev_info(bdev->dev,
 			"poll: pipe %u P_SW_OFSTS=0x%x head=%u\n",
 			pipe,
 			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
@@ -1157,10 +1157,18 @@ static void bam_start_dma(struct bam_chan *bchan)
 		async_desc = container_of(vd, struct bam_async_desc, vd);
 
 		/* on first use, initialize the channel hardware */
-		if (!bchan->initialized)
+		if (!bchan->initialized) {
+			dev_info(bdev->dev,
+				 "pipe %u: first use, initializing (dir=%d cmd=%d)\n",
+				 bchan->id, async_desc->dir,
+				 !!(async_desc->desc[0].flags &
+				    cpu_to_le16(DESC_FLAG_CMD)));
 			bam_chan_init_hw(bchan, async_desc->dir,
 					 async_desc->desc[0].flags &
 					 cpu_to_le16(DESC_FLAG_CMD));
+			dev_info(bdev->dev,
+				 "pipe %u: initialized OK\n", bchan->id);
+		}
 
 		/* apply new slave config changes, if necessary */
 		if (bchan->reconfigure)
@@ -1227,7 +1235,7 @@ static void bam_start_dma(struct bam_chan *bchan)
 
 		sw_ofsts = readl_relaxed(bam_addr(bdev, bchan->id,
 						  BAM_P_SW_OFSTS));
-		dev_dbg(bdev->dev,
+		dev_info(bdev->dev,
 			"pipe %u: doorbell=%u tail=%u P_SW_OFSTS=0x%x\n",
 			bchan->id,
 			bchan->tail * (u32)sizeof(struct bam_desc_hw),

@@ -1920,20 +1920,32 @@ static int qcom_param_page_type_exec(struct nand_chip *chip,  const struct nand_
 	op_id = q_op.data_instr_idx;
 	len = nand_subop_get_data_len(subop, op_id);
 
+	nandc->buf_count = 512;
+	memset(nandc->data_buffer, 0xff, nandc->buf_count);
+
+	/*
+	 * READ_LOCATION size must match the data pipe DMA descriptor size
+	 * (buf_count), not the ONFI param page size (len).  The NAND
+	 * controller reads UD_SIZE_BYTES (512) from flash into its buffer;
+	 * READ_LOCATION tells it how many bytes to push into the BAM data
+	 * pipe.  Values are copied into BAM command elements at
+	 * qcom_write_reg_dma() call time, so this must be set BEFORE
+	 * config_nand_single_cw_page_read().
+	 */
 	if (nandc->props->qpic_version2)
-		nandc_set_read_loc_last(chip, reg_base, 0, len, 1);
+		nandc_set_read_loc_last(chip, reg_base, 0, nandc->buf_count, 1);
 	else
-		nandc_set_read_loc_first(chip, reg_base, 0, len, 1);
+		nandc_set_read_loc_first(chip, reg_base, 0, nandc->buf_count, 1);
 
 	if (!nandc->props->qpic_version2) {
 		qcom_write_reg_dma(nandc, &nandc->regs->vld, NAND_DEV_CMD_VLD, 1, 0);
 		qcom_write_reg_dma(nandc, &nandc->regs->cmd1, NAND_DEV_CMD1, 1, NAND_BAM_NEXT_SGL);
 	}
 
-	nandc->buf_count = 512;
-	memset(nandc->data_buffer, 0xff, nandc->buf_count);
-
+	dev_info(nandc->dev, "param_page: before config_nand_single_cw_page_read\n");
 	config_nand_single_cw_page_read(chip, false, 0);
+	dev_info(nandc->dev, "param_page: after config, queuing data DMA (%d bytes)\n",
+		 nandc->buf_count);
 
 	qcom_read_data_dma(nandc, FLASH_BUF_ACC, nandc->data_buffer,
 			   nandc->buf_count, 0);

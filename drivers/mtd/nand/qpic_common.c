@@ -560,20 +560,28 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 	int ret = 0;
 
 	if (nandc->props->supports_bam) {
-		if (bam_txn->rx_sgl_pos > bam_txn->rx_sgl_start) {
+		int has_rx = bam_txn->rx_sgl_pos > bam_txn->rx_sgl_start;
+		int has_tx = bam_txn->tx_sgl_pos > bam_txn->tx_sgl_start;
+		int has_cmd_extra = bam_txn->cmd_sgl_pos > bam_txn->cmd_sgl_start;
+
+		dev_info(nandc->dev,
+			 "submit_descs: rx=%d tx=%d cmd_extra=%d\n",
+			 has_rx, has_tx, has_cmd_extra);
+
+		if (has_rx) {
 			ret = qcom_prepare_bam_async_desc(nandc, nandc->rx_chan, 0);
 			if (ret)
 				goto err_unmap_free_desc;
 		}
 
-		if (bam_txn->tx_sgl_pos > bam_txn->tx_sgl_start) {
+		if (has_tx) {
 			ret = qcom_prepare_bam_async_desc(nandc, nandc->tx_chan,
 							  DMA_PREP_INTERRUPT);
 			if (ret)
 				goto err_unmap_free_desc;
 		}
 
-		if (bam_txn->cmd_sgl_pos > bam_txn->cmd_sgl_start) {
+		if (has_cmd_extra) {
 			ret = qcom_prepare_bam_async_desc(nandc, nandc->cmd_chan,
 							  DMA_PREP_CMD);
 			if (ret)
@@ -588,12 +596,15 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		bam_txn->last_cmd_desc->callback = qcom_qpic_bam_dma_done;
 		bam_txn->last_cmd_desc->callback_param = bam_txn;
 
-		dev_dbg(nandc->dev, "submit_descs: issuing DMA (tx=%p rx=%p cmd=%p)\n",
+		dev_info(nandc->dev, "submit_descs: issuing DMA (tx=%p rx=%p cmd=%p)\n",
 			nandc->tx_chan, nandc->rx_chan, nandc->cmd_chan);
 
 		dma_async_issue_pending(nandc->tx_chan);
+		dev_info(nandc->dev, "submit_descs: tx issued\n");
 		dma_async_issue_pending(nandc->rx_chan);
+		dev_info(nandc->dev, "submit_descs: rx issued\n");
 		dma_async_issue_pending(nandc->cmd_chan);
+		dev_info(nandc->dev, "submit_descs: cmd issued, entering poll\n");
 
 		/*
 		 * Synchronous polling: call dma_async_is_tx_complete()
