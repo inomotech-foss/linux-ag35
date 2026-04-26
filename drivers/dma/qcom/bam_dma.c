@@ -1195,6 +1195,10 @@ static void bam_start_dma(struct bam_chan *bchan)
 
 	bam_start_poll_timer(bdev);
 
+	if (bdev->polling)
+		dev_info(bdev->dev, "pipe %u: poll timer started, returning\n",
+			 bchan->id);
+
 	pm_runtime_mark_last_busy(bdev->dev);
 	pm_runtime_put_autosuspend(bdev->dev);
 }

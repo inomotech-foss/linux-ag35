@@ -595,6 +595,8 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		dma_async_issue_pending(nandc->rx_chan);
 		dma_async_issue_pending(nandc->cmd_chan);
 
+		dev_info(nandc->dev, "submit_descs: waiting for completion\n");
+
 		if (!wait_for_completion_timeout(&bam_txn->txn_done,
 						 QPIC_NAND_COMPLETION_TIMEOUT)) {
 			dev_err(nandc->dev,
