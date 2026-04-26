@@ -831,14 +831,26 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 {
 	struct bam_chan *bchan = &bdev->channels[pipe];
 	struct bam_async_desc *async_desc, *tmp;
-	u32 pipe_stts, offset;
+	u32 offset;
 	unsigned int avail;
 
-	pipe_stts = readl_relaxed(bam_addr(bdev, pipe, BAM_P_IRQ_STTS));
-	if (!pipe_stts)
-		return;
+	if (bdev->polling) {
+		/*
+		 * In polling mode, skip P_IRQ_STTS — it may read 0 on
+		 * controlled-remotely BAMs where TZ services interrupts.
+		 * Go straight to P_SW_OFSTS like the downstream SPS driver.
+		 */
+	} else {
+		u32 pipe_stts;
 
-	writel_relaxed(pipe_stts, bam_addr(bdev, pipe, BAM_P_IRQ_CLR));
+		pipe_stts = readl_relaxed(bam_addr(bdev, pipe,
+						   BAM_P_IRQ_STTS));
+		if (!pipe_stts)
+			return;
+
+		writel_relaxed(pipe_stts, bam_addr(bdev, pipe,
+						   BAM_P_IRQ_CLR));
+	}
 
 	guard(spinlock_irqsave)(&bchan->vc.lock);
 
