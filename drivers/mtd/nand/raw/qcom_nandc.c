@@ -2029,10 +2029,37 @@ static const struct nand_controller_ops qcom_nandc_ops = {
 	.exec_op = qcom_nand_exec_op,
 };
 
+/**
+ * qcom_nandc_enable_bam_mode() - enable BAM mode via DMA command descriptor
+ * @nandc: qpic nand controller
+ *
+ * On TZ-protected platforms (e.g. MDM9607), NAND_CTRL is an operational
+ * register that the CPU cannot write directly in non-BAM mode.  Use the
+ * BAM command pipe to write BAM_MODE_EN to NAND_CTRL.
+ */
+static int qcom_nandc_enable_bam_mode(struct qcom_nand_controller *nandc)
+{
+	int ret;
+
+	qcom_clear_read_regs(nandc);
+	qcom_clear_bam_transaction(nandc);
+
+	nandc->regs->nand_ctrl = cpu_to_le32(BAM_MODE_EN);
+	qcom_write_reg_dma(nandc, &nandc->regs->nand_ctrl, NAND_CTRL, 1,
+			   NAND_BAM_NEXT_SGL);
+
+	ret = qcom_submit_descs(nandc);
+	if (ret)
+		dev_err(nandc->dev, "failed to enable BAM mode via DMA\n");
+
+	return ret;
+}
+
 /* one time setup of a few nand controller registers */
 static int qcom_nandc_setup(struct qcom_nand_controller *nandc)
 {
 	u32 nand_ctrl;
+	int ret;
 
 	nand_controller_init(nandc->controller);
 	nandc->controller->ops = &qcom_nandc_ops;
@@ -2042,13 +2069,11 @@ static int qcom_nandc_setup(struct qcom_nand_controller *nandc)
 		nandc_write(nandc, SFLASHC_BURST_CFG, 0);
 
 	/*
-	 * On MDM9607, TZ owns the QPIC BAM global config but the NAND
-	 * controller registers themselves are accessible.  NAND_CTRL is
-	 * an operational register — CPU writes are silently ignored when
-	 * BAM mode is already enabled (not a TZ fault).  Skip the
-	 * NAND_DEV_CMD_VLD write (BAM mode makes it read-only) and use
-	 * hardcoded defaults for cmd1/vld since NAND_DEV_CMD1 may not
-	 * be readable in BAM mode.
+	 * On MDM9607, TZ owns the QPIC BAM global config and may restrict
+	 * direct CPU writes to certain NAND controller registers.  The
+	 * bootloader (LK/TZ) already programmed NAND_DEV_CMD_VLD and
+	 * enabled BAM mode, so skip those writes and assume BAM mode.
+	 * NAND_DEV_CMD1 may also be inaccessible; use known defaults.
 	 */
 	if (nandc->props->tz_protected_regs) {
 		nandc->cmd1 = NAND_DEV_CMD1_DEFAULT;
@@ -2062,16 +2087,19 @@ static int qcom_nandc_setup(struct qcom_nand_controller *nandc)
 	/* enable ADM or BAM DMA */
 	if (nandc->props->supports_bam) {
 		nand_ctrl = nandc_read(nandc, NAND_CTRL);
+		dev_info(nandc->dev, "nandc_setup: NAND_CTRL=0x%x BAM_MODE_EN=%d\n",
+			 nand_ctrl, !!(nand_ctrl & BAM_MODE_EN));
 
-		/*
-		 * NAND_CTRL is an operational register, and CPU
-		 * access to operational registers are read only
-		 * in BAM mode. So update the NAND_CTRL register
-		 * only if it is not in BAM mode. In most cases BAM
-		 * mode will be enabled in bootloader.
-		 */
-		if (!(nand_ctrl & BAM_MODE_EN))
-			nandc_write(nandc, NAND_CTRL, nand_ctrl | BAM_MODE_EN);
+		if (!(nand_ctrl & BAM_MODE_EN)) {
+			if (nandc->props->tz_protected_regs) {
+				ret = qcom_nandc_enable_bam_mode(nandc);
+				if (ret)
+					return ret;
+			} else {
+				nandc_write(nandc, NAND_CTRL,
+					    nand_ctrl | BAM_MODE_EN);
+			}
+		}
 	} else {
 		nandc_write(nandc, NAND_FLASH_CHIP_SELECT, DM_EN);
 	}

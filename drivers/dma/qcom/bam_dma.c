@@ -40,6 +40,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/hrtimer.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 
@@ -399,6 +400,11 @@ struct bam_device {
 
 	/* dma start transaction tasklet */
 	struct tasklet_struct task;
+
+	/* polling mode for controlled-remotely BAMs */
+	bool polling;
+	struct hrtimer poll_timer;
+	atomic_t poll_timer_active;
 };
 
 /**
@@ -508,10 +514,12 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	writel_relaxed(P_DEFAULT_IRQS_EN,
 			bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
 
-	/* unmask the specific pipe and EE combo */
-	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-	val |= BIT(bchan->id);
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+	if (!bdev->polling) {
+		/* unmask the specific pipe and EE combo */
+		val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		val |= BIT(bchan->id);
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+	}
 
 	/* don't allow cpu to reorder the channel enable done below */
 	wmb();
@@ -524,6 +532,10 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	writel_relaxed(val, bam_addr(bdev, bchan->id, BAM_P_CTRL));
 
 	bchan->initialized = 1;
+
+	if (bdev->polling)
+		dev_dbg(bdev->dev, "pipe %u initialized (polling mode, dir=%s)\n",
+			bchan->id, dir == DMA_DEV_TO_MEM ? "DEV_TO_MEM" : "MEM_TO_DEV");
 
 	/* init FIFO pointers */
 	bchan->head = 0;
@@ -592,9 +604,11 @@ static void bam_free_chan(struct dma_chan *chan)
 	bchan->fifo_virt = NULL;
 
 	/* mask irq for pipe/channel */
-	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-	val &= ~BIT(bchan->id);
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+	if (!bdev->polling) {
+		val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		val &= ~BIT(bchan->id);
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+	}
 
 	/* disable irq */
 	writel_relaxed(0, bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
@@ -806,6 +820,60 @@ static int bam_resume(struct dma_chan *chan)
 }
 
 /**
+ * bam_process_pipe_completions - process completions on a single pipe
+ * @bdev: bam controller
+ * @pipe: pipe/channel index
+ *
+ * Reads the pipe IRQ status and SW offset to determine which descriptors
+ * have completed.  Usable from both IRQ and polling contexts.
+ */
+static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
+{
+	struct bam_chan *bchan = &bdev->channels[pipe];
+	struct bam_async_desc *async_desc, *tmp;
+	u32 pipe_stts, offset;
+	unsigned int avail;
+
+	pipe_stts = readl_relaxed(bam_addr(bdev, pipe, BAM_P_IRQ_STTS));
+	if (!pipe_stts)
+		return;
+
+	writel_relaxed(pipe_stts, bam_addr(bdev, pipe, BAM_P_IRQ_CLR));
+
+	guard(spinlock_irqsave)(&bchan->vc.lock);
+
+	offset = readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)) &
+			       P_SW_OFSTS_MASK;
+	offset /= sizeof(struct bam_desc_hw);
+
+	avail = CIRC_CNT(offset, bchan->head, MAX_DESCRIPTORS + 1);
+
+	if (offset < bchan->head)
+		avail--;
+
+	list_for_each_entry_safe(async_desc, tmp,
+				 &bchan->desc_list, desc_node) {
+		if (avail < async_desc->xfer_len)
+			break;
+
+		bchan->head += async_desc->xfer_len;
+		bchan->head %= MAX_DESCRIPTORS;
+
+		async_desc->num_desc -= async_desc->xfer_len;
+		async_desc->curr_desc += async_desc->xfer_len;
+		avail -= async_desc->xfer_len;
+
+		if (!async_desc->num_desc) {
+			vchan_cookie_complete(&async_desc->vd);
+		} else {
+			list_add(&async_desc->vd.node,
+				 &bchan->vc.desc_issued);
+		}
+		list_del(&async_desc->desc_node);
+	}
+}
+
+/**
  * process_channel_irqs - processes the channel interrupts
  * @bdev: bam controller
  *
@@ -814,8 +882,7 @@ static int bam_resume(struct dma_chan *chan)
  */
 static u32 process_channel_irqs(struct bam_device *bdev)
 {
-	u32 i, srcs, pipe_stts, offset, avail;
-	struct bam_async_desc *async_desc, *tmp;
+	u32 i, srcs;
 
 	srcs = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_EE));
 
@@ -824,58 +891,65 @@ static u32 process_channel_irqs(struct bam_device *bdev)
 		return srcs;
 
 	for (i = 0; i < bdev->num_channels; i++) {
-		struct bam_chan *bchan = &bdev->channels[i];
-
-		if (!(srcs & BIT(i)))
-			continue;
-
-		/* clear pipe irq */
-		pipe_stts = readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS));
-
-		writel_relaxed(pipe_stts, bam_addr(bdev, i, BAM_P_IRQ_CLR));
-
-		guard(spinlock_irqsave)(&bchan->vc.lock);
-
-		offset = readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)) &
-				       P_SW_OFSTS_MASK;
-		offset /= sizeof(struct bam_desc_hw);
-
-		/* Number of bytes available to read */
-		avail = CIRC_CNT(offset, bchan->head, MAX_DESCRIPTORS + 1);
-
-		if (offset < bchan->head)
-			avail--;
-
-		list_for_each_entry_safe(async_desc, tmp,
-					 &bchan->desc_list, desc_node) {
-			/* Not enough data to read */
-			if (avail < async_desc->xfer_len)
-				break;
-
-			/* manage FIFO */
-			bchan->head += async_desc->xfer_len;
-			bchan->head %= MAX_DESCRIPTORS;
-
-			async_desc->num_desc -= async_desc->xfer_len;
-			async_desc->curr_desc += async_desc->xfer_len;
-			avail -= async_desc->xfer_len;
-
-			/*
-			 * if complete, process cookie. Otherwise
-			 * push back to front of desc_issued so that
-			 * it gets restarted by the tasklet
-			 */
-			if (!async_desc->num_desc) {
-				vchan_cookie_complete(&async_desc->vd);
-			} else {
-				list_add(&async_desc->vd.node,
-					 &bchan->vc.desc_issued);
-			}
-			list_del(&async_desc->desc_node);
-		}
+		if (srcs & BIT(i))
+			bam_process_pipe_completions(bdev, i);
 	}
 
 	return srcs;
+}
+
+/**
+ * bam_poll_timer_fn - hrtimer callback for polling-mode BAMs
+ * @timer: hrtimer embedded in bam_device
+ *
+ * For controlled-remotely BAMs where IRQs may not reach the APPS CPU,
+ * this timer polls pipe completion status periodically.
+ */
+static enum hrtimer_restart bam_poll_timer_fn(struct hrtimer *timer)
+{
+	struct bam_device *bdev = container_of(timer, struct bam_device,
+					       poll_timer);
+	bool any_active = false;
+	unsigned int i;
+
+	for (i = 0; i < bdev->num_channels; i++) {
+		struct bam_chan *bchan = &bdev->channels[i];
+
+		if (list_empty(&bchan->desc_list))
+			continue;
+
+		bam_process_pipe_completions(bdev, i);
+	}
+
+	tasklet_schedule(&bdev->task);
+
+	for (i = 0; i < bdev->num_channels; i++) {
+		struct bam_chan *bchan = &bdev->channels[i];
+
+		if (!list_empty(&bchan->desc_list) ||
+		    !list_empty(&bchan->vc.desc_issued)) {
+			any_active = true;
+			break;
+		}
+	}
+
+	if (any_active) {
+		hrtimer_forward_now(timer, ns_to_ktime(100000));
+		return HRTIMER_RESTART;
+	}
+
+	atomic_set(&bdev->poll_timer_active, 0);
+	return HRTIMER_NORESTART;
+}
+
+static void bam_start_poll_timer(struct bam_device *bdev)
+{
+	if (!bdev->polling)
+		return;
+
+	if (!atomic_xchg(&bdev->poll_timer_active, 1))
+		hrtimer_start(&bdev->poll_timer, ns_to_ktime(50000),
+			      HRTIMER_MODE_REL);
 }
 
 /**
@@ -1086,6 +1160,8 @@ static void bam_start_dma(struct bam_chan *bchan)
 	writel_relaxed(bchan->tail * sizeof(struct bam_desc_hw),
 			bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 
+	bam_start_poll_timer(bdev);
+
 	pm_runtime_mark_last_busy(bdev->dev);
 	pm_runtime_put_autosuspend(bdev->dev);
 }
@@ -1261,6 +1337,13 @@ static int bam_dma_probe(struct platform_device *pdev)
 	bdev->powered_remotely = of_property_read_bool(pdev->dev.of_node,
 						"qcom,powered-remotely");
 
+	bdev->polling = bdev->controlled_remotely;
+	if (bdev->polling) {
+		hrtimer_setup(&bdev->poll_timer, bam_poll_timer_fn,
+			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		atomic_set(&bdev->poll_timer_active, 0);
+	}
+
 	if (bdev->controlled_remotely || bdev->powered_remotely)
 		bdev->bamclk = devm_clk_get_optional(bdev->dev, "bam_clk");
 	else
@@ -1393,11 +1476,15 @@ static void bam_dma_remove(struct platform_device *pdev)
 
 	pm_runtime_force_suspend(&pdev->dev);
 
+	if (bdev->polling)
+		hrtimer_cancel(&bdev->poll_timer);
+
 	of_dma_controller_free(pdev->dev.of_node);
 	dma_async_device_unregister(&bdev->common);
 
 	/* mask all interrupts for this execution environment */
-	writel_relaxed(0, bam_addr(bdev, 0,  BAM_IRQ_SRCS_MSK_EE));
+	if (!bdev->polling)
+		writel_relaxed(0, bam_addr(bdev, 0,  BAM_IRQ_SRCS_MSK_EE));
 
 	devm_free_irq(bdev->dev, bdev->irq, bdev);
 

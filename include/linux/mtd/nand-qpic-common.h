@@ -320,6 +320,8 @@ struct nandc_regs {
 	__le32 orig_cmd1;
 	__le32 orig_vld;
 
+	__le32 nand_ctrl;
+
 	__le32 ecc_buf_cfg;
 	__le32 read_location0;
 	__le32 read_location1;
