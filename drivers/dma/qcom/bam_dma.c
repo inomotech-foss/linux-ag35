@@ -475,12 +475,13 @@ static void bam_reset_channel(struct bam_chan *bchan)
 
 	lockdep_assert_held(&bchan->vc.lock);
 
-	/* reset channel */
-	writel_relaxed(1, bam_addr(bdev, bchan->id, BAM_P_RST));
-	writel_relaxed(0, bam_addr(bdev, bchan->id, BAM_P_RST));
-
-	/* don't allow cpu to reorder BAM register accesses done after this */
-	wmb();
+	/*
+	 * Reset channel.  Use writel() (ordered) to match downstream
+	 * iowrite32 semantics — ensures the reset assert/deassert
+	 * sequence completes at the BAM before subsequent register writes.
+	 */
+	writel(1, bam_addr(bdev, bchan->id, BAM_P_RST));
+	writel(0, bam_addr(bdev, bchan->id, BAM_P_RST));
 
 	/* make sure hw is initialized when channel is used the first time  */
 	bchan->initialized = 0;
@@ -492,7 +493,18 @@ static void bam_reset_channel(struct bam_chan *bchan)
  * @dir: DMA transfer direction
  * @is_cmd_pipe: true if this pipe carries BAM command descriptors
  *
- * This function resets and initializes the BAM channel
+ * This function resets and initializes the BAM channel.
+ *
+ * Downstream Qualcomm SPS driver initializes all pipes eagerly at
+ * sps_connect() time, well before any DMA operations.  It also uses
+ * iowrite32 (= writel on ARM, with implicit __iowmb barrier) for ALL
+ * register writes.  We match both behaviors here:
+ *  - Use writel() (ordered) instead of writel_relaxed() for pipe
+ *    register writes, matching downstream's iowrite32 semantics.
+ *  - This function can be called from bam_prep_slave_sg() (early
+ *    init path) to initialize pipes before any doorbell is written,
+ *    avoiding the problematic pattern where pipe N is reset while
+ *    pipe M has an active DMA session.
  */
 static void bam_chan_init_hw(struct bam_chan *bchan,
 	enum dma_transfer_direction dir, bool is_cmd_pipe)
@@ -505,24 +517,30 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	/*
 	 * write out 8 byte aligned address.  We have enough space for this
-	 * because we allocated 1 more descriptor (8 bytes) than we can use
+	 * because we allocated 1 more descriptor (8 bytes) than we can use.
+	 *
+	 * Use writel() (ordered writes) to match downstream iowrite32
+	 * semantics.  The implicit dsb(st) barrier in writel() ensures
+	 * each register write completes at the BAM before the next one
+	 * is issued.  writel_relaxed() could allow the CPU write buffer
+	 * to reorder or coalesce these writes.
 	 */
-	writel_relaxed(ALIGN(bchan->fifo_phys, sizeof(struct bam_desc_hw)),
+	writel(ALIGN(bchan->fifo_phys, sizeof(struct bam_desc_hw)),
 			bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR));
-	writel_relaxed(BAM_FIFO_SIZE,
+	writel(BAM_FIFO_SIZE,
 			bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES));
 
 	/* Explicitly set event threshold to 0 (generate event per descriptor) */
-	writel_relaxed(0, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
+	writel(0, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
 
 	if (bdev->polling) {
 		/* In polling mode, disable pipe IRQs entirely to avoid
 		 * level-triggered IRQ storm — we poll P_SW_OFSTS instead.
 		 */
-		writel_relaxed(0, bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+		writel(0, bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
 	} else {
 		/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
-		writel_relaxed(P_DEFAULT_IRQS_EN,
+		writel(P_DEFAULT_IRQS_EN,
 				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
 	}
 
@@ -536,10 +554,7 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 */
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 	val |= BIT(bchan->id);
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-
-	/* don't allow cpu to reorder the channel enable done below */
-	wmb();
+	writel(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
 	/*
 	 * Use read-modify-write for P_CTRL to preserve any bits that
@@ -564,16 +579,22 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	if (is_cmd_pipe)
 		val |= 1 << P_LOCK_GROUP_SHIFT;
 
-	writel_relaxed(val, bam_addr(bdev, bchan->id, BAM_P_CTRL));
+	writel(val, bam_addr(bdev, bchan->id, BAM_P_CTRL));
+
+	/*
+	 * Read back P_CTRL to ensure the BAM has processed the pipe
+	 * enable before any subsequent register writes (e.g. doorbell).
+	 * This matches downstream behavior where iowrite32's implicit
+	 * barrier ensures completion.
+	 */
+	val = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
 
 	bchan->initialized = 1;
 
-	if (bdev->polling)
-		dev_info(bdev->dev,
-			 "pipe %u init: dir=%d cmd=%d P_CTRL=0x%x IRQ_SRCS_MSK=0x%x\n",
-			 bchan->id, dir, is_cmd_pipe,
-			 readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
-			 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+	dev_info(bdev->dev,
+		 "pipe %u init: dir=%d cmd=%d P_CTRL=0x%x IRQ_SRCS_MSK=0x%x\n",
+		 bchan->id, dir, is_cmd_pipe, val,
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
@@ -710,6 +731,31 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 	if (!is_slave_direction(direction)) {
 		dev_err(bdev->dev, "invalid dma direction\n");
 		return NULL;
+	}
+
+	/*
+	 * Eagerly initialize the pipe hardware on first descriptor
+	 * preparation, rather than deferring to bam_start_dma().
+	 *
+	 * The downstream Qualcomm SPS driver initializes ALL pipes at
+	 * sps_connect() time (probe), well before any DMA operations.
+	 * The mainline driver historically did lazy init inside
+	 * bam_start_dma(), which meant pipe N could be reset (P_RST)
+	 * while pipe M was actively processing descriptors.  On
+	 * controlled-remotely BAMs (e.g. QPIC on MDM9607), this caused
+	 * the BAM to become unresponsive to subsequent register writes.
+	 *
+	 * By initializing here at prep time, all pipes are set up before
+	 * any issue_pending() calls write doorbells.  This matches the
+	 * downstream init ordering.
+	 */
+	if (!bchan->initialized) {
+		bool is_cmd = !!(flags & DMA_PREP_CMD);
+
+		scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
+			if (!bchan->initialized)
+				bam_chan_init_hw(bchan, direction, is_cmd);
+		}
 	}
 
 	/* allocate enough room to accommodate the number of entries */
@@ -1185,18 +1231,20 @@ static void bam_start_dma(struct bam_chan *bchan)
 				 bchan->id, async_desc->num_desc,
 				 async_desc->flags);
 
-		/* on first use, initialize the channel hardware */
+		/*
+		 * Fallback init: normally the pipe is initialized eagerly
+		 * in bam_prep_slave_sg().  This handles edge cases where
+		 * prep didn't initialize (e.g. terminate_all + reuse).
+		 */
 		if (!bchan->initialized) {
 			dev_info(bdev->dev,
-				 "pipe %u: first use, initializing (dir=%d cmd=%d)\n",
+				 "pipe %u: late init in bam_start_dma (dir=%d cmd=%d)\n",
 				 bchan->id, async_desc->dir,
 				 !!(async_desc->desc[0].flags &
 				    cpu_to_le16(DESC_FLAG_CMD)));
 			bam_chan_init_hw(bchan, async_desc->dir,
 					 async_desc->desc[0].flags &
 					 cpu_to_le16(DESC_FLAG_CMD));
-			dev_info(bdev->dev,
-				 "pipe %u: initialized OK\n", bchan->id);
 		}
 
 		/* apply new slave config changes, if necessary */
@@ -1254,15 +1302,33 @@ static void bam_start_dma(struct bam_chan *bchan)
 		list_add_tail(&async_desc->desc_node, &bchan->desc_list);
 	}
 
-	if (bdev->polling)
-		dev_info(bdev->dev,
-			 "pipe %u: writing doorbell tail=%u (%u bytes)\n",
-			 bchan->id, bchan->tail,
-			 bchan->tail * (u32)sizeof(struct bam_desc_hw));
+	if (bdev->polling) {
+		u32 irq_stts, p_ctrl;
 
-	/* ensure descriptor writes and dma start not reordered */
+		/*
+		 * Diagnostic: read BAM global and pipe status BEFORE the
+		 * doorbell write.  If these reads hang, the BAM is already
+		 * unresponsive (e.g. from a previous pipe init).  If they
+		 * succeed but the doorbell write hangs, the issue is
+		 * specific to the doorbell/event register.
+		 */
+		irq_stts = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_STTS));
+		p_ctrl = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
+		dev_info(bdev->dev,
+			 "pipe %u: pre-doorbell BAM_IRQ_STTS=0x%x P_CTRL=0x%x tail=%u (%u bytes)\n",
+			 bchan->id, irq_stts, p_ctrl, bchan->tail,
+			 bchan->tail * (u32)sizeof(struct bam_desc_hw));
+	}
+
+	/*
+	 * Ensure descriptor FIFO writes are visible to the BAM before
+	 * the doorbell write.  Use writel() (ordered) for the doorbell
+	 * itself, matching downstream's iowrite32 semantics.  The
+	 * downstream uses bam_write_reg_field() which does ioread32 +
+	 * iowrite32 for the doorbell register.
+	 */
 	wmb();
-	writel_relaxed(bchan->tail * sizeof(struct bam_desc_hw),
+	writel(bchan->tail * sizeof(struct bam_desc_hw),
 			bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 
 	if (bdev->polling) {
