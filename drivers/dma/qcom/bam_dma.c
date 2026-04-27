@@ -1080,9 +1080,6 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 
 	avail = CIRC_CNT(offset, bchan->head, MAX_DESCRIPTORS + 1);
 
-	if (offset < bchan->head)
-		avail--;
-
 	list_for_each_entry_safe(async_desc, tmp,
 				 &bchan->desc_list, desc_node) {
 		if (avail < async_desc->xfer_len)
