@@ -564,8 +564,7 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		int has_tx = bam_txn->tx_sgl_pos > bam_txn->tx_sgl_start;
 		int has_cmd_extra = bam_txn->cmd_sgl_pos > bam_txn->cmd_sgl_start;
 
-		dev_info(nandc->dev,
-			 "submit_descs: rx=%d tx=%d cmd_extra=%d\n",
+		dev_info(nandc->dev, "submit: rx=%d tx=%d cmd=%d\n",
 			 has_rx, has_tx, has_cmd_extra);
 
 		if (has_rx) {
@@ -596,35 +595,9 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		bam_txn->last_cmd_desc->callback = qcom_qpic_bam_dma_done;
 		bam_txn->last_cmd_desc->callback_param = bam_txn;
 
-		dev_info(nandc->dev, "submit_descs: issuing DMA (tx=%p rx=%p cmd=%p)\n",
-			nandc->tx_chan, nandc->rx_chan, nandc->cmd_chan);
-
 		dma_async_issue_pending(nandc->tx_chan);
-		dev_info(nandc->dev, "submit_descs: tx issued\n");
-
-		/*
-		 * Issue CMD pipe BEFORE RX pipe.
-		 *
-		 * Each issue_pending triggers bam_start_dma which writes
-		 * the doorbell register.  If we write the RX (data producer)
-		 * doorbell first, the BAM sees a pending descriptor on the
-		 * data producer pipe and may try to fetch data from the NAND
-		 * FIFO — which is empty (no CMD has been issued yet).  On
-		 * controlled-remotely QPIC BAMs, this appears to stall the
-		 * BAM's internal AHB bus, blocking subsequent register writes
-		 * (causing the doorbell writel() for the CMD pipe to hang).
-		 *
-		 * By issuing CMD first, the BAM starts programming the NAND
-		 * controller before the RX pipe is armed.  The CMD pipe's
-		 * NWD (Notify When Done) descriptor ensures the BAM waits
-		 * for the NAND read to complete — the NAND FIFO (typically
-		 * 512-528 bytes) can hold the data until the RX pipe drains
-		 * it.  Writing the RX doorbell immediately after CMD ensures
-		 * the data transfer starts before the NAND FIFO overflows.
-		 */
-		dma_async_issue_pending(nandc->cmd_chan);
 		dma_async_issue_pending(nandc->rx_chan);
-		dev_info(nandc->dev, "submit_descs: cmd+rx issued, entering poll\n");
+		dma_async_issue_pending(nandc->cmd_chan);
 
 		/*
 		 * Synchronous polling: call dma_async_is_tx_complete()
@@ -642,13 +615,8 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 				dma_st = dma_async_is_tx_complete(
 						nandc->cmd_chan, cookie,
 						NULL, NULL);
-				if (dma_st == DMA_COMPLETE) {
-					if (poll_ms > 0)
-						dev_info(nandc->dev,
-							 "submit_descs: done after %d polls\n",
-							 poll_ms);
+				if (dma_st == DMA_COMPLETE)
 					break;
-				}
 				udelay(100);
 			}
 

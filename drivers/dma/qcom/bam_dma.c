@@ -345,7 +345,7 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
 
 #define BAM_DESC_FIFO_SIZE	SZ_32K
 #define MAX_DESCRIPTORS (BAM_DESC_FIFO_SIZE / sizeof(struct bam_desc_hw) - 1)
-#define BAM_FIFO_SIZE	(SZ_32K - 8)
+#define BAM_MAX_DATA_SIZE	(SZ_32K - 8)
 #define IS_BUSY(chan)	(CIRC_SPACE(bchan->tail, bchan->head,\
 			 MAX_DESCRIPTORS + 1) == 0)
 
@@ -534,7 +534,7 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 */
 	writel(ALIGN(bchan->fifo_phys, sizeof(struct bam_desc_hw)),
 			bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR));
-	writel(BAM_FIFO_SIZE,
+	writel(BAM_MAX_DATA_SIZE,
 			bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES));
 
 	/* Explicitly set event threshold to 0 (generate event per descriptor) */
@@ -605,10 +605,10 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	bchan->initialized = 1;
 
-	dev_info(bdev->dev,
-		 "pipe %u init: dir=%d cmd=%d P_CTRL=0x%x IRQ_SRCS_MSK=0x%x\n",
-		 bchan->id, dir, is_cmd_pipe, val,
-		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+	dev_dbg(bdev->dev,
+		"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x IRQ_SRCS_MSK=0x%x\n",
+		bchan->id, dir, is_cmd_pipe, val,
+		readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
@@ -636,7 +636,7 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
  * a safe default — the BAM won't process any descriptors on these pipes
  * since no doorbell will be written.
  */
-static void bam_init_peer_pipes(struct bam_device *bdev)
+static void __maybe_unused bam_init_peer_pipes(struct bam_device *bdev)
 {
 	unsigned int i;
 
@@ -653,9 +653,9 @@ static void bam_init_peer_pipes(struct bam_device *bdev)
 		else
 			dir = DMA_MEM_TO_DEV;
 
-		dev_info(bdev->dev,
-			 "pipe %u: force-init peer (dir=%d known=%d)\n",
-			 peer->id, dir, peer->dir_known);
+		dev_dbg(bdev->dev,
+			"pipe %u: force-init peer (dir=%d known=%d)\n",
+			peer->id, dir, peer->dir_known);
 
 		bam_chan_init_hw(peer, dir, false);
 	}
@@ -801,89 +801,21 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 	 */
 	{
 		bool needs_init = !bchan->initialized;
-		bool needs_dir_fixup = bchan->initialized && !bchan->dir_known;
 
 		bchan->last_dir = direction;
 		bchan->dir_known = true;
 
-		/*
-		 * Eagerly initialize the pipe hardware on first descriptor
-		 * preparation, rather than deferring to bam_start_dma().
-		 *
-		 * The downstream Qualcomm SPS driver initializes ALL pipes
-		 * at sps_connect() time (probe), well before any DMA ops.
-		 * We match this by:
-		 *  1. Initializing this pipe at first prep (needs_init)
-		 *  2. Calling bam_init_peer_pipes() to also initialize all
-		 *     allocated but uninitialized peer pipes (e.g. pipe 0/TX
-		 *     during read-only operations)
-		 */
 		if (needs_init) {
 			bool is_cmd = !!(flags & DMA_PREP_CMD);
 
 			scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
 				bam_chan_init_hw(bchan, direction, is_cmd);
-				bam_init_peer_pipes(bdev);
-			}
-		} else if (needs_dir_fixup) {
-			/*
-			 * This pipe was force-initialized by bam_init_peer_pipes()
-			 * with a default direction (MEM_TO_DEV).  Now we know the
-			 * real direction.  Update P_CTRL in-place WITHOUT resetting
-			 * the pipe (P_RST).
-			 *
-			 * CRITICAL: The downstream SPS driver never resets a pipe
-			 * after initial setup.  Resetting a pipe mid-operation
-			 * (after other pipes have accumulated IRQ/descriptor state)
-			 * appears to corrupt the BAM's internal arbiter state,
-			 * causing subsequent doorbell writes to other pipes to hang
-			 * the AHB bus.  This was observed on QPIC BAM (MDM9607):
-			 * resetting pipe 1 while pipe 2 had P_IRQ_STTS=0x5 caused
-			 * the next writel() to pipe 2's P_EVNT_REG to freeze the
-			 * CPU.
-			 */
-			u32 val;
-
-			scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
-				val = readl_relaxed(bam_addr(bdev, bchan->id,
-							    BAM_P_CTRL));
-				if (direction == DMA_DEV_TO_MEM)
-					val |= P_DIRECTION;
-				else
-					val &= ~P_DIRECTION;
-				writel(val, bam_addr(bdev, bchan->id,
-						    BAM_P_CTRL));
-				val = readl_relaxed(bam_addr(bdev, bchan->id,
-							    BAM_P_CTRL));
-			}
-
-			dev_info(bdev->dev,
-				 "pipe %u: dir fixup (no reset) P_CTRL=0x%x\n",
-				 bchan->id, val);
-
-			/*
-			 * Diagnostic: after dir fixup, verify BAM is still
-			 * writable by writing P_IRQ_CLR on pipe 2 (CMD pipe).
-			 * If this hangs, the dir fixup itself broke the BAM.
-			 */
-			if (bdev->polling) {
-				unsigned int j;
-
-				for (j = 0; j < bdev->num_channels && j < 3; j++) {
-					writel(0x1f, bam_addr(bdev, j,
-							      BAM_P_IRQ_CLR));
-					dev_info(bdev->dev,
-						 "pipe %u: post-fixup p%u IRQ_CLR OK, P_IRQ=0x%x\n",
-						 bchan->id, j,
-						 readl_relaxed(bam_addr(bdev, j,
-								BAM_P_IRQ_STTS)));
-				}
 			}
 		}
 	}
 
 	/* allocate enough room to accommodate the number of entries */
-	num_alloc = sg_nents_for_dma(sgl, sg_len, BAM_FIFO_SIZE);
+	num_alloc = sg_nents_for_dma(sgl, sg_len, BAM_MAX_DATA_SIZE);
 	async_desc = kzalloc_flex(*async_desc, desc, num_alloc, GFP_NOWAIT);
 	if (!async_desc)
 		return NULL;
@@ -911,10 +843,10 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 			desc->addr = cpu_to_le32(sg_dma_address(sg) +
 						 curr_offset);
 
-			if (remainder > BAM_FIFO_SIZE) {
-				desc->size = cpu_to_le16(BAM_FIFO_SIZE);
-				remainder -= BAM_FIFO_SIZE;
-				curr_offset += BAM_FIFO_SIZE;
+			if (remainder > BAM_MAX_DATA_SIZE) {
+				desc->size = cpu_to_le16(BAM_MAX_DATA_SIZE);
+				remainder -= BAM_MAX_DATA_SIZE;
+				curr_offset += BAM_MAX_DATA_SIZE;
 			} else {
 				desc->size = cpu_to_le16(remainder);
 				remainder = 0;
@@ -1050,7 +982,7 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		 * controlled-remotely BAMs where TZ services interrupts.
 		 * Go straight to P_SW_OFSTS like the downstream SPS driver.
 		 */
-		dev_info(bdev->dev,
+		dev_dbg(bdev->dev,
 			"poll: pipe %u P_SW_OFSTS=0x%x head=%u\n",
 			pipe,
 			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
@@ -1355,11 +1287,6 @@ static void bam_start_dma(struct bam_chan *bchan)
 		 * prep didn't initialize (e.g. terminate_all + reuse).
 		 */
 		if (!bchan->initialized) {
-			dev_info(bdev->dev,
-				 "pipe %u: late init in bam_start_dma (dir=%d cmd=%d)\n",
-				 bchan->id, async_desc->dir,
-				 !!(async_desc->desc[0].flags &
-				    cpu_to_le16(DESC_FLAG_CMD)));
 			bam_chan_init_hw(bchan, async_desc->dir,
 					 async_desc->desc[0].flags &
 					 cpu_to_le16(DESC_FLAG_CMD));
@@ -1462,107 +1389,18 @@ static void bam_start_dma(struct bam_chan *bchan)
 			cpu_to_le16(DESC_FLAG_LOCK);
 		fifo[last_cmd_fifo_idx].flags |=
 			cpu_to_le16(DESC_FLAG_UNLOCK);
-
-		if (bdev->polling)
-			dev_info(bdev->dev,
-				 "pipe %u: LOCK on fifo[%d] UNLOCK on fifo[%d]\n",
-				 bchan->id, first_cmd_fifo_idx,
-				 last_cmd_fifo_idx);
-	}
-
-	if (bdev->polling) {
-		u32 irq_stts, p_ctrl, evnt_reg, p_irq_stts;
-		unsigned int i;
-
-		/*
-		 * Diagnostic: read BAM global status, pipe status, per-pipe
-		 * IRQ status, and the target register (P_EVNT_REG) BEFORE
-		 * the doorbell write.
-		 */
-		irq_stts = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_STTS));
-		p_ctrl = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
-		p_irq_stts = readl_relaxed(bam_addr(bdev, bchan->id,
-						   BAM_P_IRQ_STTS));
-		evnt_reg = readl_relaxed(bam_addr(bdev, bchan->id,
-						  BAM_P_EVNT_REG));
-		dev_info(bdev->dev,
-			 "pipe %u: pre-db IRQ=0x%x P_CTRL=0x%x P_IRQ=0x%x EVNT=0x%x wr=%u\n",
-			 bchan->id, irq_stts, p_ctrl, p_irq_stts, evnt_reg,
-			 bchan->tail * (u32)sizeof(struct bam_desc_hw));
-
-		/* Dump ALL first 3 pipe states (including pipe 0 TZ state) */
-		for (i = 0; i < bdev->num_channels && i < 3; i++) {
-			dev_info(bdev->dev,
-				 "  p%u: CTRL=0x%x SW=0x%x EVNT=0x%x IRQ=0x%x\n",
-				 i,
-				 readl_relaxed(bam_addr(bdev, i, BAM_P_CTRL)),
-				 readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)),
-				 readl_relaxed(bam_addr(bdev, i, BAM_P_EVNT_REG)),
-				 readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS)));
-		}
-
-		/*
-		 * Diagnostic writes: test if the BAM is writable before
-		 * the doorbell.  These writes are "safe" — P_IRQ_CLR just
-		 * clears pending interrupt status bits, and reading
-		 * P_IRQ_STTS after verifies the write took effect.
-		 *
-		 * This answers: does the BAM freeze on ANY write, or
-		 * specifically on the P_EVNT_REG doorbell write?
-		 */
-		for (i = 0; i < bdev->num_channels && i < 3; i++) {
-			writel(0x1f, bam_addr(bdev, i, BAM_P_IRQ_CLR));
-			dev_info(bdev->dev,
-				 "  p%u: IRQ_CLR write OK, P_IRQ now=0x%x\n",
-				 i,
-				 readl_relaxed(bam_addr(bdev, i,
-							BAM_P_IRQ_STTS)));
-		}
 	}
 
 	/*
 	 * Ensure descriptor FIFO writes are visible to the BAM before
 	 * the doorbell write.
-	 *
-	 * CRITICAL: Use read-modify-write for the P_EVNT_REG doorbell,
-	 * matching the downstream bam_pipe_set_desc_write_offset().
-	 *
-	 * P_EVNT_REG has two fields:
-	 *   [31:16] P_BYTES_CONSUMED (read-only, BAM's byte counter)
-	 *   [15:0]  P_DESC_FIFO_PEER_OFST (the doorbell / write pointer)
-	 *
-	 * The downstream uses bam_write_reg_field() which does:
-	 *   val = ioread32(reg);
-	 *   val &= ~0xffff;
-	 *   val |= next_write;
-	 *   iowrite32(val, reg);
-	 *
-	 * A plain writel(offset, reg) writes 0x00000098 (for offset=152),
-	 * zeroing bits [31:16].  Although P_BYTES_CONSUMED is documented
-	 * as read-only, on BAM v1.7 (NDP_4K) writing zeros to those bits
-	 * appears to cause the BAM to hang the AHB bus.  This was
-	 * confirmed by testing: all other register writes succeed, but
-	 * the raw writel() to P_EVNT_REG freezes the CPU.
 	 */
 	wmb();
-	{
-		void __iomem *evnt_addr = bam_addr(bdev, bchan->id,
-						   BAM_P_EVNT_REG);
-		u32 evnt_val = readl_relaxed(evnt_addr);
+	writel(bchan->tail * sizeof(struct bam_desc_hw),
+	       bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 
-		evnt_val &= ~0xffff;  /* clear P_DESC_FIFO_PEER_OFST */
-		evnt_val |= (bchan->tail * sizeof(struct bam_desc_hw))
-			    & 0xffff;
-		writel(evnt_val, evnt_addr);
-	}
-
-	if (bdev->polling) {
-		dev_info(bdev->dev,
-			 "pipe %u: doorbell OK, SW=0x%x\n",
-			 bchan->id,
-			 readl_relaxed(bam_addr(bdev, bchan->id,
-						BAM_P_SW_OFSTS)));
-	}
+	if (bdev->polling)
+		dev_dbg(bdev->dev, "pipe %u: doorbell written\n", bchan->id);
 
 	bam_start_poll_timer(bdev);
 
@@ -1796,31 +1634,9 @@ static int bam_dma_probe(struct platform_device *pdev)
 		 bdev->controlled_remotely);
 
 	if (bdev->controlled_remotely || bdev->powered_remotely) {
-		u32 cnfg, irq_srcs, irq_en, ctrl;
-
-		ctrl = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-		cnfg = readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS));
-		irq_srcs = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-		irq_en = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN));
-		dev_info(bdev->dev,
-			 "BAM TZ state: CTRL=0x%x CNFG_BITS=0x%x IRQ_SRCS_MSK=0x%x IRQ_EN=0x%x\n",
-			 ctrl, cnfg, irq_srcs, irq_en);
-
-		/* Dump per-pipe state left by TZ for first 3 pipes */
-		{
-			int i;
-
-			for (i = 0; i < 3 && i < (int)bdev->num_channels; i++) {
-				u32 p_ctrl, p_irq_stts, p_irq_en;
-
-				p_ctrl = readl_relaxed(bam_addr(bdev, i, BAM_P_CTRL));
-				p_irq_stts = readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS));
-				p_irq_en = readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_EN));
-				dev_info(bdev->dev,
-					 "  pipe %d TZ state: P_CTRL=0x%x P_IRQ_STTS=0x%x P_IRQ_EN=0x%x\n",
-					 i, p_ctrl, p_irq_stts, p_irq_en);
-			}
-		}
+		dev_dbg(bdev->dev, "BAM TZ state: CTRL=0x%x IRQ_SRCS_MSK=0x%x\n",
+			readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
 	}
 
 	tasklet_setup(&bdev->task, dma_tasklet);
@@ -1848,7 +1664,7 @@ static int bam_dma_probe(struct platform_device *pdev)
 
 	/* set max dma segment size */
 	bdev->common.dev = bdev->dev;
-	dma_set_max_seg_size(bdev->common.dev, BAM_FIFO_SIZE);
+	dma_set_max_seg_size(bdev->common.dev, BAM_MAX_DATA_SIZE);
 
 	platform_set_drvdata(pdev, bdev);
 
