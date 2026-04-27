@@ -611,10 +611,18 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	bchan->initialized = 1;
 
-	dev_dbg(bdev->dev,
-		"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x IRQ_SRCS_MSK=0x%x\n",
-		bchan->id, dir, is_cmd_pipe, val,
-		readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+	dev_info(bdev->dev,
+		"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x P_FIFO_SIZES=0x%x "
+		"P_DESC_FIFO_ADDR=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
+		"IRQ_SRCS_MSK=0x%x P_IRQ_STTS=0x%x\n",
+		bchan->id, dir, is_cmd_pipe,
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_EVNT_REG)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS)),
+		readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_STTS)));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
@@ -988,7 +996,7 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		 * controlled-remotely BAMs where TZ services interrupts.
 		 * Go straight to P_SW_OFSTS like the downstream SPS driver.
 		 */
-		dev_dbg(bdev->dev,
+		dev_info_ratelimited(bdev->dev,
 			"poll: pipe %u P_SW_OFSTS=0x%x head=%u\n",
 			pipe,
 			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
@@ -1397,16 +1405,51 @@ static void bam_start_dma(struct bam_chan *bchan)
 			cpu_to_le16(DESC_FLAG_UNLOCK);
 	}
 
+	/* Dump first few FIFO descriptors for debugging */
+	{
+		unsigned int n, count;
+
+		count = (bchan->tail > fifo_start)
+			? bchan->tail - fifo_start
+			: MAX_DESCRIPTORS - fifo_start + bchan->tail;
+		if (count > 4)
+			count = 4;
+		for (n = 0; n < count; n++) {
+			unsigned int idx = (fifo_start + n) % MAX_DESCRIPTORS;
+
+			dev_info(bdev->dev,
+				"pipe %u: desc[%u] addr=0x%08x size=%u flags=0x%04x\n",
+				bchan->id, idx,
+				le32_to_cpu(fifo[idx].addr),
+				le16_to_cpu(fifo[idx].size),
+				le16_to_cpu(fifo[idx].flags));
+		}
+	}
+
 	/*
 	 * Ensure descriptor FIFO writes are visible to the BAM before
 	 * the doorbell write.
 	 */
 	wmb();
-	writel(bchan->tail * sizeof(struct bam_desc_hw),
-	       bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
+	{
+		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
 
-	if (bdev->polling)
-		dev_dbg(bdev->dev, "pipe %u: doorbell written\n", bchan->id);
+		dev_info(bdev->dev,
+			"pipe %u: PRE doorbell=%u P_SW_OFSTS=0x%x P_EVNT_REG=0x%x P_CTRL=0x%x\n",
+			bchan->id, db_val,
+			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS)),
+			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_EVNT_REG)),
+			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)));
+
+		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
+
+		dev_info(bdev->dev,
+			"pipe %u: POST doorbell P_SW_OFSTS=0x%x P_EVNT_REG=0x%x P_IRQ_STTS=0x%x\n",
+			bchan->id,
+			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS)),
+			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_EVNT_REG)),
+			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_STTS)));
+	}
 
 	bam_start_poll_timer(bdev);
 
