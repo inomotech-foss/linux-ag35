@@ -1216,11 +1216,6 @@ static void bam_start_dma(struct bam_chan *bchan)
 	if (!vd)
 		return;
 
-	if (bdev->polling)
-		dev_info(bdev->dev,
-			 "bam_start_dma: pipe %u head=%u tail=%u\n",
-			 bchan->id, bchan->head, bchan->tail);
-
 	ret = pm_runtime_get_sync(bdev->dev);
 	if (ret < 0)
 		return;
@@ -1231,12 +1226,6 @@ static void bam_start_dma(struct bam_chan *bchan)
 		list_del(&vd->node);
 
 		async_desc = container_of(vd, struct bam_async_desc, vd);
-
-		if (bdev->polling)
-			dev_info(bdev->dev,
-				 "pipe %u: processing async_desc num_desc=%u flags=0x%x\n",
-				 bchan->id, async_desc->num_desc,
-				 async_desc->flags);
 
 		/*
 		 * Fallback init: normally the pipe is initialized eagerly
@@ -1360,34 +1349,34 @@ static void bam_start_dma(struct bam_chan *bchan)
 	}
 
 	if (bdev->polling) {
-		u32 irq_stts, p_ctrl, evnt_reg;
+		u32 irq_stts, p_ctrl, evnt_reg, p_irq_stts;
 		unsigned int i;
 
 		/*
-		 * Diagnostic: read BAM global status, pipe status, and
-		 * the target register (P_EVNT_REG) BEFORE the doorbell
-		 * write.  Also dump all active pipe states.
+		 * Diagnostic: read BAM global status, pipe status, per-pipe
+		 * IRQ status, and the target register (P_EVNT_REG) BEFORE
+		 * the doorbell write.
 		 */
 		irq_stts = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_STTS));
 		p_ctrl = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
+		p_irq_stts = readl_relaxed(bam_addr(bdev, bchan->id,
+						   BAM_P_IRQ_STTS));
 		evnt_reg = readl_relaxed(bam_addr(bdev, bchan->id,
 						  BAM_P_EVNT_REG));
 		dev_info(bdev->dev,
-			 "pipe %u: pre-doorbell IRQ_STTS=0x%x P_CTRL=0x%x P_EVNT_REG=0x%x writing=%u\n",
-			 bchan->id, irq_stts, p_ctrl, evnt_reg,
+			 "pipe %u: pre-db IRQ=0x%x P_CTRL=0x%x P_IRQ=0x%x EVNT=0x%x wr=%u\n",
+			 bchan->id, irq_stts, p_ctrl, p_irq_stts, evnt_reg,
 			 bchan->tail * (u32)sizeof(struct bam_desc_hw));
 
-		/* Dump all pipe states when this is pipe 2 and pipe 1 is active */
+		/* Dump ALL first 3 pipe states (including pipe 0 TZ state) */
 		for (i = 0; i < bdev->num_channels && i < 3; i++) {
-			struct bam_chan *ch = &bdev->channels[i];
-
-			if (ch->initialized || !list_empty(&ch->desc_list))
-				dev_info(bdev->dev,
-					 "  pipe %u: init=%d head=%u tail=%u P_CTRL=0x%x P_SW_OFSTS=0x%x P_EVNT_REG=0x%x\n",
-					 i, ch->initialized, ch->head, ch->tail,
-					 readl_relaxed(bam_addr(bdev, i, BAM_P_CTRL)),
-					 readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)),
-					 readl_relaxed(bam_addr(bdev, i, BAM_P_EVNT_REG)));
+			dev_info(bdev->dev,
+				 "  p%u: CTRL=0x%x SW=0x%x EVNT=0x%x IRQ=0x%x\n",
+				 i,
+				 readl_relaxed(bam_addr(bdev, i, BAM_P_CTRL)),
+				 readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)),
+				 readl_relaxed(bam_addr(bdev, i, BAM_P_EVNT_REG)),
+				 readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS)));
 		}
 	}
 
@@ -1403,16 +1392,11 @@ static void bam_start_dma(struct bam_chan *bchan)
 			bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 
 	if (bdev->polling) {
-		u32 sw_ofsts;
-
 		dev_info(bdev->dev,
-			 "pipe %u: doorbell written, reading P_SW_OFSTS\n",
-			 bchan->id);
-		sw_ofsts = readl_relaxed(bam_addr(bdev, bchan->id,
-						  BAM_P_SW_OFSTS));
-		dev_info(bdev->dev,
-			"pipe %u: P_SW_OFSTS=0x%x\n",
-			bchan->id, sw_ofsts);
+			 "pipe %u: doorbell OK, SW=0x%x\n",
+			 bchan->id,
+			 readl_relaxed(bam_addr(bdev, bchan->id,
+						BAM_P_SW_OFSTS)));
 	}
 
 	bam_start_poll_timer(bdev);
@@ -1645,6 +1629,34 @@ static int bam_dma_probe(struct platform_device *pdev)
 	dev_info(bdev->dev, "BAM probe: clk=%pC ee=%u num_ch=%u num_ees=%u controlled_remotely=%d\n",
 		 bdev->bamclk, bdev->ee, bdev->num_channels, bdev->num_ees,
 		 bdev->controlled_remotely);
+
+	if (bdev->controlled_remotely || bdev->powered_remotely) {
+		u32 cnfg, irq_srcs, irq_en, ctrl;
+
+		ctrl = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
+		cnfg = readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS));
+		irq_srcs = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		irq_en = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN));
+		dev_info(bdev->dev,
+			 "BAM TZ state: CTRL=0x%x CNFG_BITS=0x%x IRQ_SRCS_MSK=0x%x IRQ_EN=0x%x\n",
+			 ctrl, cnfg, irq_srcs, irq_en);
+
+		/* Dump per-pipe state left by TZ for first 3 pipes */
+		{
+			int i;
+
+			for (i = 0; i < 3 && i < (int)bdev->num_channels; i++) {
+				u32 p_ctrl, p_irq_stts, p_irq_en;
+
+				p_ctrl = readl_relaxed(bam_addr(bdev, i, BAM_P_CTRL));
+				p_irq_stts = readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS));
+				p_irq_en = readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_EN));
+				dev_info(bdev->dev,
+					 "  pipe %d TZ state: P_CTRL=0x%x P_IRQ_STTS=0x%x P_IRQ_EN=0x%x\n",
+					 i, p_ctrl, p_irq_stts, p_irq_en);
+			}
+		}
+	}
 
 	tasklet_setup(&bdev->task, dma_tasklet);
 
