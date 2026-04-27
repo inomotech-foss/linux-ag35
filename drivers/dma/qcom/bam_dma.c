@@ -796,12 +796,12 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 	/*
 	 * Track init state before updating direction.  A pipe that was
 	 * force-initialized by bam_init_peer_pipes() has initialized=1
-	 * but dir_known=false.  Such pipes need re-initialization with
-	 * the correct direction when they're actually prepped.
+	 * but dir_known=false.  Such pipes need their P_DIRECTION bit
+	 * updated when they're actually prepped with the real direction.
 	 */
 	{
 		bool needs_init = !bchan->initialized;
-		bool needs_reinit = bchan->initialized && !bchan->dir_known;
+		bool needs_dir_fixup = bchan->initialized && !bchan->dir_known;
 
 		bchan->last_dir = direction;
 		bchan->dir_known = true;
@@ -817,17 +817,49 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 		 *  2. Calling bam_init_peer_pipes() to also initialize all
 		 *     allocated but uninitialized peer pipes (e.g. pipe 0/TX
 		 *     during read-only operations)
-		 *  3. Re-initializing force-inited pipes with the correct
-		 *     direction when they're actually prepped (needs_reinit)
 		 */
-		if (needs_init || needs_reinit) {
+		if (needs_init) {
 			bool is_cmd = !!(flags & DMA_PREP_CMD);
 
 			scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
 				bam_chan_init_hw(bchan, direction, is_cmd);
-				if (needs_init)
-					bam_init_peer_pipes(bdev);
+				bam_init_peer_pipes(bdev);
 			}
+		} else if (needs_dir_fixup) {
+			/*
+			 * This pipe was force-initialized by bam_init_peer_pipes()
+			 * with a default direction (MEM_TO_DEV).  Now we know the
+			 * real direction.  Update P_CTRL in-place WITHOUT resetting
+			 * the pipe (P_RST).
+			 *
+			 * CRITICAL: The downstream SPS driver never resets a pipe
+			 * after initial setup.  Resetting a pipe mid-operation
+			 * (after other pipes have accumulated IRQ/descriptor state)
+			 * appears to corrupt the BAM's internal arbiter state,
+			 * causing subsequent doorbell writes to other pipes to hang
+			 * the AHB bus.  This was observed on QPIC BAM (MDM9607):
+			 * resetting pipe 1 while pipe 2 had P_IRQ_STTS=0x5 caused
+			 * the next writel() to pipe 2's P_EVNT_REG to freeze the
+			 * CPU.
+			 */
+			u32 val;
+
+			scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
+				val = readl_relaxed(bam_addr(bdev, bchan->id,
+							    BAM_P_CTRL));
+				if (direction == DMA_DEV_TO_MEM)
+					val |= P_DIRECTION;
+				else
+					val &= ~P_DIRECTION;
+				writel(val, bam_addr(bdev, bchan->id,
+						    BAM_P_CTRL));
+				val = readl_relaxed(bam_addr(bdev, bchan->id,
+							    BAM_P_CTRL));
+			}
+
+			dev_info(bdev->dev,
+				 "pipe %u: dir fixup (no reset) P_CTRL=0x%x\n",
+				 bchan->id, val);
 		}
 	}
 
