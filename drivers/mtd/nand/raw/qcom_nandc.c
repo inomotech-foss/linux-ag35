@@ -1564,10 +1564,20 @@ static int qcom_op_cmd_mapping(struct nand_chip *chip, u8 opcode,
 		cmd = OP_FETCH_ID;
 		break;
 	case NAND_CMD_PARAM:
-		if (nandc->props->qpic_version2)
-			cmd = OP_PAGE_READ_ONFI_READ;
-		else
-			cmd = OP_PAGE_READ;
+		/*
+		 * Use the dedicated OP_PAGE_READ_ONFI_READ (0x5) opcode for
+		 * all QPIC variants.  The hardware natively handles ONFI
+		 * parameter page reads with this opcode, sending the correct
+		 * 0xEC command to the flash chip.  This matches the
+		 * downstream MSM_NAND_CMD_PAGE_READ_ONFI (0x35 with flags).
+		 *
+		 * Previously, non-v2 used OP_PAGE_READ (0x2) and patched
+		 * DEV_CMD1/DEV_CMD_VLD registers to reroute the read command
+		 * through the parameter page opcode.  That workaround added
+		 * unnecessary CMD1/VLD writes and restore operations that the
+		 * downstream driver doesn't perform for ONFI reads.
+		 */
+		cmd = OP_PAGE_READ_ONFI_READ;
 		break;
 	case NAND_CMD_ERASE1:
 	case NAND_CMD_ERASE2:
@@ -1921,19 +1931,17 @@ static int qcom_param_page_type_exec(struct nand_chip *chip,  const struct nand_
 	if (!nandc->props->qpic_version2)
 		nandc->regs->ecc_buf_cfg = cpu_to_le32(ECC_CFG_ECC_DISABLE);
 
-	/* configure CMD1 and VLD for ONFI param probing in QPIC v1 */
-	if (!nandc->props->qpic_version2) {
-		nandc->regs->vld = cpu_to_le32((nandc->vld & ~READ_START_VLD));
-		nandc->regs->cmd1 = cpu_to_le32((nandc->cmd1 & ~READ_ADDR_MASK) |
-						FIELD_PREP(READ_ADDR_MASK, NAND_CMD_PARAM));
-	}
+	/*
+	 * CMD1/VLD patching is only needed on QPIC v1 when using
+	 * OP_PAGE_READ (0x2) as the flash command.  With the dedicated
+	 * OP_PAGE_READ_ONFI_READ (0x5) opcode, the hardware natively
+	 * sends 0xEC to the flash chip, so CMD1/VLD modification is
+	 * unnecessary.  Skip it to match downstream behavior (which
+	 * never touches CMD1/VLD for ONFI reads) and reduce the number
+	 * of BAM command descriptors.
+	 */
 
 	nandc->regs->exec = cpu_to_le32(1);
-
-	if (!nandc->props->qpic_version2) {
-		nandc->regs->orig_cmd1 = cpu_to_le32(nandc->cmd1);
-		nandc->regs->orig_vld = cpu_to_le32(nandc->vld);
-	}
 
 	instr = q_op.data_instr;
 	op_id = q_op.data_instr_idx;
@@ -1956,22 +1964,10 @@ static int qcom_param_page_type_exec(struct nand_chip *chip,  const struct nand_
 	else
 		nandc_set_read_loc_first(chip, reg_base, 0, nandc->buf_count, 1);
 
-	if (!nandc->props->qpic_version2) {
-		qcom_write_reg_dma(nandc, &nandc->regs->vld, NAND_DEV_CMD_VLD, 1, 0);
-		qcom_write_reg_dma(nandc, &nandc->regs->cmd1, NAND_DEV_CMD1, 1, NAND_BAM_NEXT_SGL);
-	}
-
 	config_nand_single_cw_page_read(chip, false, 0);
 
 	qcom_read_data_dma(nandc, FLASH_BUF_ACC, nandc->data_buffer,
 			   nandc->buf_count, 0);
-
-	/* restore CMD1 and VLD regs */
-	if (!nandc->props->qpic_version2) {
-		qcom_write_reg_dma(nandc, &nandc->regs->orig_cmd1, NAND_DEV_CMD1_RESTORE, 1, 0);
-		qcom_write_reg_dma(nandc, &nandc->regs->orig_vld, NAND_DEV_CMD_VLD_RESTORE, 1,
-				   NAND_BAM_NEXT_SGL);
-	}
 
 	ret = qcom_submit_descs(nandc);
 	if (ret) {
