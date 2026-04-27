@@ -858,24 +858,18 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 		} else if (needs_dir_fix) {
 			/*
 			 * Pipe was force-initialized with default direction
-			 * (consumer).  Update P_DIRECTION to match the
-			 * actual transfer direction.
+			 * (consumer).  The correct direction is now known.
+			 * Do a full P_RST + re-init rather than modifying
+			 * P_DIRECTION on a live (P_EN=1) pipe, which may
+			 * corrupt BAM internal pipe state.
 			 */
-			u32 val;
-
-			scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
-				val = readl_relaxed(bam_addr(bdev, bchan->id,
-							BAM_P_CTRL));
-				if (direction == DMA_DEV_TO_MEM)
-					val |= P_DIRECTION;
-				else
-					val &= ~P_DIRECTION;
-				writel(val, bam_addr(bdev, bchan->id,
-							BAM_P_CTRL));
-			}
 			dev_info(bdev->dev,
-				"pipe %u: dir fix P_CTRL=0x%x (dir=%d)\n",
-				bchan->id, val, direction);
+				"pipe %u: dir fix via re-init (dir=%d)\n",
+				bchan->id, direction);
+
+			bchan->initialized = 0;
+			scoped_guard(spinlock_irqsave, &bchan->vc.lock)
+				bam_chan_init_hw(bchan, direction, false);
 		}
 	}
 
@@ -1499,7 +1493,9 @@ static void bam_start_dma(struct bam_chan *bchan)
 	{
 		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
 
+		pr_emerg("DB%u=%u\n", bchan->id, db_val);
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
+		pr_emerg("DB%u ok\n", bchan->id);
 	}
 
 	bam_start_poll_timer(bdev);
