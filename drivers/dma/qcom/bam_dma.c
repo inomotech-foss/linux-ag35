@@ -552,10 +552,15 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	writel(0, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
 
 	if (bdev->polling) {
-		/* In polling mode, disable pipe IRQs entirely to avoid
-		 * level-triggered IRQ storm — we poll P_SW_OFSTS instead.
+		/*
+		 * Downstream SPS sets P_IRQ_EN to the ACTUAL mask even
+		 * for polling pipes (step 15a in bam_pipe_set_irq),
+		 * then clears IRQ_SRCS_MSK_EE to prevent interrupt
+		 * delivery.  Match this exactly — the BAM hardware
+		 * may behave differently when P_IRQ_EN=0 vs non-zero.
 		 */
-		writel(0, bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+		writel(P_DEFAULT_IRQS_EN,
+				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
 	} else {
 		/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
 		writel(P_DEFAULT_IRQS_EN,
@@ -575,9 +580,17 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 * We match this behavior exactly.
 	 */
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-	if (bdev->polling)
-		val &= ~BIT(bchan->id);
-	else
+	if (bdev->polling) {
+		/*
+		 * Clear ALL pipe bits, not just the current pipe's.
+		 * TZ pre-sets bits for pipes 0-2.  Downstream clears
+		 * all of them (each pipe's pipe_set_irq clears its own).
+		 * We must clear stale bits for pipes we never init
+		 * (e.g. pipe 0/TX) because a set bit with no IRQ
+		 * handler can cause undefined BAM behavior.
+		 */
+		val &= ~((1 << bdev->num_channels) - 1);
+	} else
 		val |= BIT(bchan->id);
 	writel(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
