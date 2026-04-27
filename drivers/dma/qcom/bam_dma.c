@@ -1089,7 +1089,7 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 			break;
 
 		bchan->head += async_desc->xfer_len;
-		bchan->head %= MAX_DESCRIPTORS;
+		bchan->head %= (MAX_DESCRIPTORS + 1);
 
 		async_desc->num_desc -= async_desc->xfer_len;
 		async_desc->curr_desc += async_desc->xfer_len;
@@ -1401,8 +1401,8 @@ static void bam_start_dma(struct bam_chan *bchan)
 			desc[async_desc->xfer_len - 1].flags |=
 				cpu_to_le16(DESC_FLAG_INT);
 
-		if (bchan->tail + async_desc->xfer_len > MAX_DESCRIPTORS) {
-			u32 partial = MAX_DESCRIPTORS - bchan->tail;
+		if (bchan->tail + async_desc->xfer_len > MAX_DESCRIPTORS + 1) {
+			u32 partial = MAX_DESCRIPTORS + 1 - bchan->tail;
 
 			memcpy(&fifo[bchan->tail], desc,
 			       partial * sizeof(struct bam_desc_hw));
@@ -1435,7 +1435,7 @@ static void bam_start_dma(struct bam_chan *bchan)
 		}
 
 		bchan->tail += async_desc->xfer_len;
-		bchan->tail %= MAX_DESCRIPTORS;
+		bchan->tail %= (MAX_DESCRIPTORS + 1);
 		list_add_tail(&async_desc->desc_node, &bchan->desc_list);
 	}
 
@@ -1469,11 +1469,11 @@ static void bam_start_dma(struct bam_chan *bchan)
 	{
 		unsigned int n, count;
 
-		count = (bchan->tail > fifo_start)
+		count = (bchan->tail >= fifo_start)
 			? bchan->tail - fifo_start
-			: MAX_DESCRIPTORS - fifo_start + bchan->tail;
+			: (MAX_DESCRIPTORS + 1) - fifo_start + bchan->tail;
 		for (n = 0; n < count; n++) {
-			unsigned int idx = (fifo_start + n) % MAX_DESCRIPTORS;
+			unsigned int idx = (fifo_start + n) % (MAX_DESCRIPTORS + 1);
 
 			dev_info(bdev->dev,
 				"pipe %u: desc[%u] addr=0x%08x size=%u flags=0x%04x\n",
