@@ -524,20 +524,35 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 		/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
 		writel_relaxed(P_DEFAULT_IRQS_EN,
 				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
-
-		/* unmask the specific pipe and EE combo */
-		val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-		val |= BIT(bchan->id);
-		writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 	}
+
+	/*
+	 * Always register this pipe in IRQ_SRCS_MSK_EE, regardless of
+	 * polling vs interrupt mode.  The downstream Qualcomm SPS driver
+	 * does this unconditionally in bam_pipe_init() for every pipe.
+	 * On controlled-remotely BAMs, bam_reset() is skipped so the
+	 * global IRQ_SRCS_MSK_EE is never initialized by the Linux
+	 * driver — pipes must register themselves individually.
+	 */
+	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+	val |= BIT(bchan->id);
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
 	/* don't allow cpu to reorder the channel enable done below */
 	wmb();
 
-	/* set fixed direction and mode, then enable channel */
-	val = P_EN | P_SYS_MODE;
+	/*
+	 * Use read-modify-write for P_CTRL to preserve any bits that
+	 * TrustZone may have set (e.g. on controlled-remotely BAMs).
+	 * The downstream SPS driver uses individual field RMW writes
+	 * for P_DIRECTION, P_SYS_MODE, P_LOCK_GROUP, and P_EN.
+	 */
+	val = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
+	val |= P_EN | P_SYS_MODE;
 	if (dir == DMA_DEV_TO_MEM)
 		val |= P_DIRECTION;
+	else
+		val &= ~P_DIRECTION;
 
 	/*
 	 * CMD pipes must be in a separate lock group from data pipes.
@@ -545,6 +560,7 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 * data.  Without this, the BAM's internal arbitration can deadlock
 	 * when CMD and data pipes share the same group.
 	 */
+	val &= ~(P_LOCK_GROUP_MASK << P_LOCK_GROUP_SHIFT);
 	if (is_cmd_pipe)
 		val |= 1 << P_LOCK_GROUP_SHIFT;
 
@@ -553,9 +569,11 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	bchan->initialized = 1;
 
 	if (bdev->polling)
-		dev_dbg(bdev->dev, "pipe %u initialized (polling mode, dir=%s, cmd=%d)\n",
-			bchan->id, dir == DMA_DEV_TO_MEM ? "DEV_TO_MEM" : "MEM_TO_DEV",
-			is_cmd_pipe);
+		dev_info(bdev->dev,
+			 "pipe %u init: dir=%d cmd=%d P_CTRL=0x%x IRQ_SRCS_MSK=0x%x\n",
+			 bchan->id, dir, is_cmd_pipe,
+			 readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
+			 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
