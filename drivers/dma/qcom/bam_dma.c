@@ -668,7 +668,7 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
  * a safe default — the BAM won't process any descriptors on these pipes
  * since no doorbell will be written.
  */
-static void __maybe_unused bam_init_peer_pipes(struct bam_device *bdev)
+static void bam_init_peer_pipes(struct bam_device *bdev)
 {
 	unsigned int i;
 
@@ -685,11 +685,12 @@ static void __maybe_unused bam_init_peer_pipes(struct bam_device *bdev)
 		else
 			dir = DMA_MEM_TO_DEV;
 
-		dev_dbg(bdev->dev,
+		dev_info(bdev->dev,
 			"pipe %u: force-init peer (dir=%d known=%d)\n",
 			peer->id, dir, peer->dir_known);
 
-		bam_chan_init_hw(peer, dir, false);
+		scoped_guard(spinlock_irqsave, &peer->vc.lock)
+			bam_chan_init_hw(peer, dir, false);
 	}
 }
 
@@ -833,6 +834,8 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 	 */
 	{
 		bool needs_init = !bchan->initialized;
+		bool needs_dir_fix = bchan->initialized &&
+				     !bchan->dir_known;
 
 		bchan->last_dir = direction;
 		bchan->dir_known = true;
@@ -843,6 +846,36 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 			scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
 				bam_chan_init_hw(bchan, direction, is_cmd);
 			}
+
+			/*
+			 * Match downstream SPS: initialize all peer pipes
+			 * now (before any DMA doorbell) to avoid resetting
+			 * a pipe while other pipes have active DMA sessions.
+			 * Downstream sps_connect() inits all pipes eagerly
+			 * during probe.
+			 */
+			bam_init_peer_pipes(bdev);
+		} else if (needs_dir_fix) {
+			/*
+			 * Pipe was force-initialized with default direction
+			 * (consumer).  Update P_DIRECTION to match the
+			 * actual transfer direction.
+			 */
+			u32 val;
+
+			scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
+				val = readl_relaxed(bam_addr(bdev, bchan->id,
+							BAM_P_CTRL));
+				if (direction == DMA_DEV_TO_MEM)
+					val |= P_DIRECTION;
+				else
+					val &= ~P_DIRECTION;
+				writel(val, bam_addr(bdev, bchan->id,
+							BAM_P_CTRL));
+			}
+			dev_info(bdev->dev,
+				"pipe %u: dir fix P_CTRL=0x%x (dir=%d)\n",
+				bchan->id, val, direction);
 		}
 	}
 
@@ -1451,11 +1484,12 @@ static void bam_start_dma(struct bam_chan *bchan)
 		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
 
 		dev_info(bdev->dev,
-			"pipe %u: PRE doorbell=%u P_SW_OFSTS=0x%x P_EVNT_REG=0x%x P_CTRL=0x%x\n",
+			"pipe %u: PRE doorbell=%u P_SW_OFSTS=0x%x P_EVNT_REG=0x%x P_CTRL=0x%x BAM_IRQ=0x%x\n",
 			bchan->id, db_val,
 			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS)),
 			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_EVNT_REG)),
-			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)));
+			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_STTS)));
 
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 
