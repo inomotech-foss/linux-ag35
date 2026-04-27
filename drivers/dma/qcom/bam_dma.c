@@ -1470,7 +1470,8 @@ static void bam_start_dma(struct bam_chan *bchan)
 			cpu_to_le16(DESC_FLAG_UNLOCK);
 	}
 
-	/* Dump ALL FIFO descriptors for debugging */
+	/* Dump ALL FIFO descriptors for debugging (disabled for freeze test) */
+#if 0
 	{
 		unsigned int n, count;
 
@@ -1488,6 +1489,7 @@ static void bam_start_dma(struct bam_chan *bchan)
 				le16_to_cpu(fifo[idx].flags));
 		}
 	}
+#endif
 
 	/*
 	 * Ensure descriptor FIFO writes are visible to the BAM before
@@ -1497,22 +1499,7 @@ static void bam_start_dma(struct bam_chan *bchan)
 	{
 		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
 
-		dev_info(bdev->dev,
-			"pipe %u: PRE doorbell=%u P_SW_OFSTS=0x%x P_EVNT_REG=0x%x P_CTRL=0x%x BAM_IRQ=0x%x\n",
-			bchan->id, db_val,
-			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS)),
-			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_EVNT_REG)),
-			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
-			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_STTS)));
-
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
-
-		dev_info(bdev->dev,
-			"pipe %u: POST doorbell P_SW_OFSTS=0x%x P_EVNT_REG=0x%x P_IRQ_STTS=0x%x\n",
-			bchan->id,
-			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS)),
-			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_EVNT_REG)),
-			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_STTS)));
 	}
 
 	bam_start_poll_timer(bdev);
