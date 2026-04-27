@@ -348,8 +348,13 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
  * bytes for the descriptor FIFO.  Using a larger FIFO (e.g. SZ_32K) causes
  * AHB bus lockup on controlled-remotely BAMs like QPIC when multiple pipes
  * are active simultaneously.
+ *
+ * IMPORTANT: The size MUST be a power of 2 because the driver uses
+ * CIRC_CNT/CIRC_SPACE macros from circ_buf.h which use bitwise AND
+ * with (size-1).  512 bytes = 64 descriptors (63 usable + 1 empty
+ * slot for circular buffer management).
  */
-#define BAM_DESC_FIFO_SIZE	520
+#define BAM_DESC_FIFO_SIZE	SZ_512
 #define MAX_DESCRIPTORS (BAM_DESC_FIFO_SIZE / sizeof(struct bam_desc_hw) - 1)
 #define BAM_MAX_DATA_SIZE	(SZ_32K - 8)
 #define IS_BUSY(chan)	(CIRC_SPACE(bchan->tail, bchan->head,\
