@@ -1886,10 +1886,19 @@ static int qcom_param_page_type_exec(struct nand_chip *chip,  const struct nand_
 	nandc->regs->addr0 = 0;
 	nandc->regs->addr1 = 0;
 
+	/*
+	 * CFG0 must match the downstream MSM_NAND_CFG0_RAW_ONFI_PARAM_INFO
+	 * value (0x88040000).  Key differences from a normal page read:
+	 *   - NUM_ADDR_CYCLES=1 (ONFI param page needs only 1 address cycle,
+	 *     not the 5 used for normal page reads)
+	 *   - SET_RD_MODE_AFTER_STATUS=1 (downstream always sets this for
+	 *     ONFI reads)
+	 */
 	nandc->regs->cfg0 = cpu_to_le32(FIELD_PREP(CW_PER_PAGE_MASK, 0) |
 					FIELD_PREP(UD_SIZE_BYTES_MASK, 512) |
-					FIELD_PREP(NUM_ADDR_CYCLES_MASK, 5) |
-					FIELD_PREP(SPARE_SIZE_BYTES_MASK, 0));
+					FIELD_PREP(NUM_ADDR_CYCLES_MASK, 1) |
+					FIELD_PREP(SPARE_SIZE_BYTES_MASK, 0) |
+					FIELD_PREP(SET_RD_MODE_AFTER_STATUS, 1));
 
 	nandc->regs->cfg1 = cpu_to_le32(FIELD_PREP(NAND_RECOVERY_CYCLES_MASK, 7) |
 					FIELD_PREP(BAD_BLOCK_BYTE_NUM_MASK, 17) |
@@ -1898,6 +1907,16 @@ static int qcom_param_page_type_exec(struct nand_chip *chip,  const struct nand_
 					FIELD_PREP(WR_RD_BSY_GAP_MASK, 2) |
 					FIELD_PREP(WIDE_FLASH, 0) |
 					FIELD_PREP(DEV0_CFG1_ECC_DISABLE, 1));
+
+	/*
+	 * config_nand_page_read() writes 3 contiguous registers starting
+	 * at NAND_DEV0_CFG0: cfg0 (0x20), cfg1 (0x24), ecc_bch_cfg (0x28).
+	 * We must explicitly set ecc_bch_cfg here; otherwise the stale value
+	 * from a previous operation is written to NAND_DEV0_ECC_CFG (0x28),
+	 * which can leave ECC enabled or write garbage to the ECC config.
+	 * Downstream sets this to (1 << ECC_CFG_ECC_DISABLE) = 1.
+	 */
+	nandc->regs->ecc_bch_cfg = cpu_to_le32(ECC_CFG_ECC_DISABLE);
 
 	if (!nandc->props->qpic_version2)
 		nandc->regs->ecc_buf_cfg = cpu_to_le32(ECC_CFG_ECC_DISABLE);
