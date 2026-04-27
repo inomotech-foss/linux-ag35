@@ -1147,6 +1147,11 @@ static void bam_start_dma(struct bam_chan *bchan)
 	if (!vd)
 		return;
 
+	if (bdev->polling)
+		dev_info(bdev->dev,
+			 "bam_start_dma: pipe %u head=%u tail=%u\n",
+			 bchan->id, bchan->head, bchan->tail);
+
 	ret = pm_runtime_get_sync(bdev->dev);
 	if (ret < 0)
 		return;
@@ -1155,6 +1160,12 @@ static void bam_start_dma(struct bam_chan *bchan)
 		list_del(&vd->node);
 
 		async_desc = container_of(vd, struct bam_async_desc, vd);
+
+		if (bdev->polling)
+			dev_info(bdev->dev,
+				 "pipe %u: processing async_desc num_desc=%u flags=0x%x\n",
+				 bchan->id, async_desc->num_desc,
+				 async_desc->flags);
 
 		/* on first use, initialize the channel hardware */
 		if (!bchan->initialized) {
@@ -1225,6 +1236,12 @@ static void bam_start_dma(struct bam_chan *bchan)
 		list_add_tail(&async_desc->desc_node, &bchan->desc_list);
 	}
 
+	if (bdev->polling)
+		dev_info(bdev->dev,
+			 "pipe %u: writing doorbell tail=%u (%u bytes)\n",
+			 bchan->id, bchan->tail,
+			 bchan->tail * (u32)sizeof(struct bam_desc_hw));
+
 	/* ensure descriptor writes and dma start not reordered */
 	wmb();
 	writel_relaxed(bchan->tail * sizeof(struct bam_desc_hw),
@@ -1233,13 +1250,14 @@ static void bam_start_dma(struct bam_chan *bchan)
 	if (bdev->polling) {
 		u32 sw_ofsts;
 
+		dev_info(bdev->dev,
+			 "pipe %u: doorbell written, reading P_SW_OFSTS\n",
+			 bchan->id);
 		sw_ofsts = readl_relaxed(bam_addr(bdev, bchan->id,
 						  BAM_P_SW_OFSTS));
 		dev_info(bdev->dev,
-			"pipe %u: doorbell=%u tail=%u P_SW_OFSTS=0x%x\n",
-			bchan->id,
-			bchan->tail * (u32)sizeof(struct bam_desc_hw),
-			bchan->tail, sw_ofsts);
+			"pipe %u: P_SW_OFSTS=0x%x\n",
+			bchan->id, sw_ofsts);
 	}
 
 	bam_start_poll_timer(bdev);
