@@ -343,7 +343,13 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
 /* BAM_P_SW_OFSTS */
 #define P_SW_OFSTS_MASK		0xffff
 
-#define BAM_DESC_FIFO_SIZE	SZ_32K
+/*
+ * Downstream Qualcomm SPS uses (SPS_MAX_DESC_NUM + 1) * 8 = 65 * 8 = 520
+ * bytes for the descriptor FIFO.  Using a larger FIFO (e.g. SZ_32K) causes
+ * AHB bus lockup on controlled-remotely BAMs like QPIC when multiple pipes
+ * are active simultaneously.
+ */
+#define BAM_DESC_FIFO_SIZE	520
 #define MAX_DESCRIPTORS (BAM_DESC_FIFO_SIZE / sizeof(struct bam_desc_hw) - 1)
 #define BAM_MAX_DATA_SIZE	(SZ_32K - 8)
 #define IS_BUSY(chan)	(CIRC_SPACE(bchan->tail, bchan->head,\
@@ -534,7 +540,7 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 */
 	writel(ALIGN(bchan->fifo_phys, sizeof(struct bam_desc_hw)),
 			bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR));
-	writel(BAM_MAX_DATA_SIZE,
+	writel(BAM_DESC_FIFO_SIZE,
 			bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES));
 
 	/* Explicitly set event threshold to 0 (generate event per descriptor) */
@@ -676,7 +682,7 @@ static int bam_alloc_chan(struct dma_chan *chan)
 		return 0;
 
 	/* allocate FIFO descriptor space, but only if necessary */
-	bchan->fifo_virt = dma_alloc_wc(bdev->dev, BAM_DESC_FIFO_SIZE,
+	bchan->fifo_virt = dma_alloc_coherent(bdev->dev, BAM_DESC_FIFO_SIZE,
 					&bchan->fifo_phys, GFP_KERNEL);
 
 	if (!bchan->fifo_virt) {
@@ -718,7 +724,7 @@ static void bam_free_chan(struct dma_chan *chan)
 	scoped_guard(spinlock_irqsave, &bchan->vc.lock)
 		bam_reset_channel(bchan);
 
-	dma_free_wc(bdev->dev, BAM_DESC_FIFO_SIZE, bchan->fifo_virt,
+	dma_free_coherent(bdev->dev, BAM_DESC_FIFO_SIZE, bchan->fifo_virt,
 		    bchan->fifo_phys);
 	bchan->fifo_virt = NULL;
 
@@ -1747,7 +1753,7 @@ static void bam_dma_remove(struct platform_device *pdev)
 		if (!bdev->channels[i].fifo_virt)
 			continue;
 
-		dma_free_wc(bdev->dev, BAM_DESC_FIFO_SIZE,
+		dma_free_coherent(bdev->dev, BAM_DESC_FIFO_SIZE,
 			    bdev->channels[i].fifo_virt,
 			    bdev->channels[i].fifo_phys);
 	}
