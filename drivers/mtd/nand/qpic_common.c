@@ -596,8 +596,8 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		bam_txn->last_cmd_desc->callback_param = bam_txn;
 
 		dma_async_issue_pending(nandc->tx_chan);
-		dma_async_issue_pending(nandc->cmd_chan);
 		dma_async_issue_pending(nandc->rx_chan);
+		dma_async_issue_pending(nandc->cmd_chan);
 
 		/*
 		 * Synchronous polling: call dma_async_is_tx_complete()

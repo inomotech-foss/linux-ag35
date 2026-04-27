@@ -1423,15 +1423,13 @@ static void bam_start_dma(struct bam_chan *bchan)
 			cpu_to_le16(DESC_FLAG_UNLOCK);
 	}
 
-	/* Dump first few FIFO descriptors for debugging */
+	/* Dump ALL FIFO descriptors for debugging */
 	{
 		unsigned int n, count;
 
 		count = (bchan->tail > fifo_start)
 			? bchan->tail - fifo_start
 			: MAX_DESCRIPTORS - fifo_start + bchan->tail;
-		if (count > 4)
-			count = 4;
 		for (n = 0; n < count; n++) {
 			unsigned int idx = (fifo_start + n) % MAX_DESCRIPTORS;
 
