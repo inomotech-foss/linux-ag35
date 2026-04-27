@@ -371,6 +371,11 @@ struct bam_chan {
 	unsigned int initialized;	/* is the channel hw initialized? */
 	unsigned int paused;		/* is the channel paused? */
 	unsigned int reconfigure;	/* new slave config? */
+
+	/* last known DMA direction (set by bam_prep_slave_sg) */
+	enum dma_transfer_direction last_dir;
+	bool dir_known;
+
 	/* list of descriptors currently processed */
 	struct list_head desc_list;
 
@@ -547,15 +552,22 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	}
 
 	/*
-	 * Always register this pipe in IRQ_SRCS_MSK_EE, regardless of
-	 * polling vs interrupt mode.  The downstream Qualcomm SPS driver
-	 * does this unconditionally in bam_pipe_init() for every pipe.
-	 * On controlled-remotely BAMs, bam_reset() is skipped so the
-	 * global IRQ_SRCS_MSK_EE is never initialized by the Linux
-	 * driver — pipes must register themselves individually.
+	 * IRQ_SRCS_MSK_EE handling: match the downstream SPS driver.
+	 *
+	 * Downstream bam_pipe_init() unconditionally SETS the pipe's
+	 * bit in IRQ_SRCS_MSK_EE.  Then pipe_set_irq() immediately
+	 * CLEARS it for polling-mode pipes.  The net effect for polling
+	 * pipes: bit CLEARED.  For interrupt-mode: bit SET.
+	 *
+	 * TZ pre-sets IRQ_SRCS_MSK_EE = 0x80000007 (BAM + pipes 0-2).
+	 * The downstream clears all pipe bits since QPIC uses poll mode.
+	 * We match this behavior exactly.
 	 */
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-	val |= BIT(bchan->id);
+	if (bdev->polling)
+		val &= ~BIT(bchan->id);
+	else
+		val |= BIT(bchan->id);
 	writel(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
 	/*
@@ -601,6 +613,52 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	/* init FIFO pointers */
 	bchan->head = 0;
 	bchan->tail = 0;
+}
+
+/**
+ * bam_init_peer_pipes - Initialize all allocated but uninitialized peer pipes
+ * @bdev: bam device
+ *
+ * The downstream Qualcomm SPS driver initializes ALL pipes at sps_connect()
+ * time during probe, before any DMA operations.  The QPIC BAM appears to
+ * require all participating pipes (0=TX, 1=RX, 2=CMD) to be enabled (P_EN=1)
+ * before multi-pipe operations.  Without this, writing a doorbell to one pipe
+ * while another pipe is enabled-but-uninitialized can hang the BAM's internal
+ * AHB bus.
+ *
+ * This function is called when the first pipe is initialized.  It iterates
+ * all channels and initializes any that have a descriptor FIFO allocated
+ * (i.e. dma_request_chan was called) but are not yet hardware-initialized.
+ *
+ * For pipes whose DMA direction has been set via bam_prep_slave_sg(), the
+ * stored direction is used.  For pipes that have never been prepped (e.g.
+ * TX pipe during read-only operations), MEM_TO_DEV (consumer) is used as
+ * a safe default — the BAM won't process any descriptors on these pipes
+ * since no doorbell will be written.
+ */
+static void bam_init_peer_pipes(struct bam_device *bdev)
+{
+	unsigned int i;
+
+	for (i = 0; i < bdev->num_channels; i++) {
+		struct bam_chan *peer = &bdev->channels[i];
+		enum dma_transfer_direction dir;
+
+		if (!peer->fifo_virt || peer->initialized)
+			continue;
+
+		/* Use stored direction if known, otherwise default to consumer */
+		if (peer->dir_known)
+			dir = peer->last_dir;
+		else
+			dir = DMA_MEM_TO_DEV;
+
+		dev_info(bdev->dev,
+			 "pipe %u: force-init peer (dir=%d known=%d)\n",
+			 peer->id, dir, peer->dir_known);
+
+		bam_chan_init_hw(peer, dir, false);
+	}
 }
 
 /**
@@ -736,27 +794,40 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 	}
 
 	/*
-	 * Eagerly initialize the pipe hardware on first descriptor
-	 * preparation, rather than deferring to bam_start_dma().
-	 *
-	 * The downstream Qualcomm SPS driver initializes ALL pipes at
-	 * sps_connect() time (probe), well before any DMA operations.
-	 * The mainline driver historically did lazy init inside
-	 * bam_start_dma(), which meant pipe N could be reset (P_RST)
-	 * while pipe M was actively processing descriptors.  On
-	 * controlled-remotely BAMs (e.g. QPIC on MDM9607), this caused
-	 * the BAM to become unresponsive to subsequent register writes.
-	 *
-	 * By initializing here at prep time, all pipes are set up before
-	 * any issue_pending() calls write doorbells.  This matches the
-	 * downstream init ordering.
+	 * Track init state before updating direction.  A pipe that was
+	 * force-initialized by bam_init_peer_pipes() has initialized=1
+	 * but dir_known=false.  Such pipes need re-initialization with
+	 * the correct direction when they're actually prepped.
 	 */
-	if (!bchan->initialized) {
-		bool is_cmd = !!(flags & DMA_PREP_CMD);
+	{
+		bool needs_init = !bchan->initialized;
+		bool needs_reinit = bchan->initialized && !bchan->dir_known;
 
-		scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
-			if (!bchan->initialized)
+		bchan->last_dir = direction;
+		bchan->dir_known = true;
+
+		/*
+		 * Eagerly initialize the pipe hardware on first descriptor
+		 * preparation, rather than deferring to bam_start_dma().
+		 *
+		 * The downstream Qualcomm SPS driver initializes ALL pipes
+		 * at sps_connect() time (probe), well before any DMA ops.
+		 * We match this by:
+		 *  1. Initializing this pipe at first prep (needs_init)
+		 *  2. Calling bam_init_peer_pipes() to also initialize all
+		 *     allocated but uninitialized peer pipes (e.g. pipe 0/TX
+		 *     during read-only operations)
+		 *  3. Re-initializing force-inited pipes with the correct
+		 *     direction when they're actually prepped (needs_reinit)
+		 */
+		if (needs_init || needs_reinit) {
+			bool is_cmd = !!(flags & DMA_PREP_CMD);
+
+			scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
 				bam_chan_init_hw(bchan, direction, is_cmd);
+				if (needs_init)
+					bam_init_peer_pipes(bdev);
+			}
 		}
 	}
 
