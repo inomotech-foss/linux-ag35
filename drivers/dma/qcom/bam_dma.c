@@ -1042,15 +1042,29 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 	unsigned int avail;
 
 	if (bdev->polling) {
+		u32 pipe_stts;
+
 		/*
-		 * In polling mode, skip P_IRQ_STTS — it may read 0 on
-		 * controlled-remotely BAMs where TZ services interrupts.
-		 * Go straight to P_SW_OFSTS like the downstream SPS driver.
+		 * Match downstream SPS driver: read and clear P_IRQ_STTS
+		 * even in polling mode.  The downstream pipe_handler()
+		 * calls bam_pipe_get_and_clear_irq_status() on every
+		 * poll iteration, which reads P_IRQ_STTS and writes the
+		 * value back to P_IRQ_CLR.  Without this, accumulated
+		 * IRQ status bits (P_PRCSD_DESC, P_WAKE, etc.) from
+		 * completed operations are never cleared, which may
+		 * affect BAM internal state on subsequent operations.
 		 */
+		pipe_stts = readl_relaxed(bam_addr(bdev, pipe,
+						   BAM_P_IRQ_STTS));
+		if (pipe_stts)
+			writel_relaxed(pipe_stts, bam_addr(bdev, pipe,
+						   BAM_P_IRQ_CLR));
+
 		dev_info_ratelimited(bdev->dev,
-			"poll: pipe %u P_SW_OFSTS=0x%x head=%u\n",
+			"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u\n",
 			pipe,
 			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
+			pipe_stts,
 			bchan->head);
 	} else {
 		u32 pipe_stts;
