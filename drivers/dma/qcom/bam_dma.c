@@ -1522,14 +1522,39 @@ static void bam_start_dma(struct bam_chan *bchan)
 
 	/*
 	 * Ensure descriptor FIFO writes are visible to the BAM before
-	 * the doorbell write.  Use writel() (ordered) for the doorbell
-	 * itself, matching downstream's iowrite32 semantics.  The
-	 * downstream uses bam_write_reg_field() which does ioread32 +
-	 * iowrite32 for the doorbell register.
+	 * the doorbell write.
+	 *
+	 * CRITICAL: Use read-modify-write for the P_EVNT_REG doorbell,
+	 * matching the downstream bam_pipe_set_desc_write_offset().
+	 *
+	 * P_EVNT_REG has two fields:
+	 *   [31:16] P_BYTES_CONSUMED (read-only, BAM's byte counter)
+	 *   [15:0]  P_DESC_FIFO_PEER_OFST (the doorbell / write pointer)
+	 *
+	 * The downstream uses bam_write_reg_field() which does:
+	 *   val = ioread32(reg);
+	 *   val &= ~0xffff;
+	 *   val |= next_write;
+	 *   iowrite32(val, reg);
+	 *
+	 * A plain writel(offset, reg) writes 0x00000098 (for offset=152),
+	 * zeroing bits [31:16].  Although P_BYTES_CONSUMED is documented
+	 * as read-only, on BAM v1.7 (NDP_4K) writing zeros to those bits
+	 * appears to cause the BAM to hang the AHB bus.  This was
+	 * confirmed by testing: all other register writes succeed, but
+	 * the raw writel() to P_EVNT_REG freezes the CPU.
 	 */
 	wmb();
-	writel(bchan->tail * sizeof(struct bam_desc_hw),
-			bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
+	{
+		void __iomem *evnt_addr = bam_addr(bdev, bchan->id,
+						   BAM_P_EVNT_REG);
+		u32 evnt_val = readl_relaxed(evnt_addr);
+
+		evnt_val &= ~0xffff;  /* clear P_DESC_FIFO_PEER_OFST */
+		evnt_val |= (bchan->tail * sizeof(struct bam_desc_hw))
+			    & 0xffff;
+		writel(evnt_val, evnt_addr);
+	}
 
 	if (bdev->polling) {
 		dev_info(bdev->dev,
