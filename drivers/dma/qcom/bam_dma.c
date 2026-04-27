@@ -61,6 +61,8 @@ struct bam_desc_hw {
 #define DESC_FLAG_EOB BIT(13)
 #define DESC_FLAG_NWD BIT(12)
 #define DESC_FLAG_CMD BIT(11)
+#define DESC_FLAG_LOCK BIT(10)
+#define DESC_FLAG_UNLOCK BIT(9)
 
 struct bam_async_desc {
 	struct virt_dma_desc vd;
@@ -1205,6 +1207,9 @@ static void bam_start_dma(struct bam_chan *bchan)
 	int ret;
 	unsigned int avail;
 	struct dmaengine_desc_callback cb;
+	unsigned int fifo_start;
+	int first_cmd_fifo_idx = -1;
+	int last_cmd_fifo_idx = -1;
 
 	lockdep_assert_held(&bchan->vc.lock);
 
@@ -1219,6 +1224,8 @@ static void bam_start_dma(struct bam_chan *bchan)
 	ret = pm_runtime_get_sync(bdev->dev);
 	if (ret < 0)
 		return;
+
+	fifo_start = bchan->tail;
 
 	while (vd && !IS_BUSY(bchan)) {
 		list_del(&vd->node);
@@ -1297,27 +1304,91 @@ static void bam_start_dma(struct bam_chan *bchan)
 			       sizeof(struct bam_desc_hw));
 		}
 
+		/*
+		 * Track first and last CMD descriptors in FIFO for
+		 * LOCK/UNLOCK flag insertion (see below).
+		 */
+		{
+			unsigned int i;
+
+			for (i = 0; i < async_desc->xfer_len; i++) {
+				unsigned int idx = (bchan->tail + i) %
+						   (MAX_DESCRIPTORS + 1);
+				if (fifo[idx].flags &
+				    cpu_to_le16(DESC_FLAG_CMD)) {
+					if (first_cmd_fifo_idx < 0)
+						first_cmd_fifo_idx = idx;
+					last_cmd_fifo_idx = idx;
+				}
+			}
+		}
+
 		bchan->tail += async_desc->xfer_len;
 		bchan->tail %= MAX_DESCRIPTORS;
 		list_add_tail(&async_desc->desc_node, &bchan->desc_list);
 	}
 
+	/*
+	 * Add LOCK/UNLOCK flags to CMD descriptors.
+	 *
+	 * The downstream Qualcomm SPS NAND driver sets LOCK (0x0400) on
+	 * the first CMD descriptor and UNLOCK (0x0200) on the last CMD
+	 * descriptor for every multi-descriptor CMD sequence.  These
+	 * flags control the BAM's internal pipe group arbiter:
+	 *
+	 *   LOCK:   Acquire the pipe's lock group before processing.
+	 *           Prevents the BAM from switching to pipes in other
+	 *           lock groups until UNLOCK is seen.
+	 *   UNLOCK: Release the pipe's lock group after processing.
+	 *
+	 * Without LOCK/UNLOCK, when the BAM sees pending descriptors on
+	 * pipes in different lock groups (e.g. CMD pipe in group 1 and
+	 * data pipe in group 0), the arbiter may deadlock internally,
+	 * causing the BAM to stop responding to register writes.
+	 */
+	if (first_cmd_fifo_idx >= 0) {
+		fifo[first_cmd_fifo_idx].flags |=
+			cpu_to_le16(DESC_FLAG_LOCK);
+		fifo[last_cmd_fifo_idx].flags |=
+			cpu_to_le16(DESC_FLAG_UNLOCK);
+
+		if (bdev->polling)
+			dev_info(bdev->dev,
+				 "pipe %u: LOCK on fifo[%d] UNLOCK on fifo[%d]\n",
+				 bchan->id, first_cmd_fifo_idx,
+				 last_cmd_fifo_idx);
+	}
+
 	if (bdev->polling) {
-		u32 irq_stts, p_ctrl;
+		u32 irq_stts, p_ctrl, evnt_reg;
+		unsigned int i;
 
 		/*
-		 * Diagnostic: read BAM global and pipe status BEFORE the
-		 * doorbell write.  If these reads hang, the BAM is already
-		 * unresponsive (e.g. from a previous pipe init).  If they
-		 * succeed but the doorbell write hangs, the issue is
-		 * specific to the doorbell/event register.
+		 * Diagnostic: read BAM global status, pipe status, and
+		 * the target register (P_EVNT_REG) BEFORE the doorbell
+		 * write.  Also dump all active pipe states.
 		 */
 		irq_stts = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_STTS));
 		p_ctrl = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
+		evnt_reg = readl_relaxed(bam_addr(bdev, bchan->id,
+						  BAM_P_EVNT_REG));
 		dev_info(bdev->dev,
-			 "pipe %u: pre-doorbell BAM_IRQ_STTS=0x%x P_CTRL=0x%x tail=%u (%u bytes)\n",
-			 bchan->id, irq_stts, p_ctrl, bchan->tail,
+			 "pipe %u: pre-doorbell IRQ_STTS=0x%x P_CTRL=0x%x P_EVNT_REG=0x%x writing=%u\n",
+			 bchan->id, irq_stts, p_ctrl, evnt_reg,
 			 bchan->tail * (u32)sizeof(struct bam_desc_hw));
+
+		/* Dump all pipe states when this is pipe 2 and pipe 1 is active */
+		for (i = 0; i < bdev->num_channels && i < 3; i++) {
+			struct bam_chan *ch = &bdev->channels[i];
+
+			if (ch->initialized || !list_empty(&ch->desc_list))
+				dev_info(bdev->dev,
+					 "  pipe %u: init=%d head=%u tail=%u P_CTRL=0x%x P_SW_OFSTS=0x%x P_EVNT_REG=0x%x\n",
+					 i, ch->initialized, ch->head, ch->tail,
+					 readl_relaxed(bam_addr(bdev, i, BAM_P_CTRL)),
+					 readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)),
+					 readl_relaxed(bam_addr(bdev, i, BAM_P_EVNT_REG)));
+		}
 	}
 
 	/*
