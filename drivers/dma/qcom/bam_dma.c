@@ -860,6 +860,25 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 			dev_info(bdev->dev,
 				 "pipe %u: dir fixup (no reset) P_CTRL=0x%x\n",
 				 bchan->id, val);
+
+			/*
+			 * Diagnostic: after dir fixup, verify BAM is still
+			 * writable by writing P_IRQ_CLR on pipe 2 (CMD pipe).
+			 * If this hangs, the dir fixup itself broke the BAM.
+			 */
+			if (bdev->polling) {
+				unsigned int j;
+
+				for (j = 0; j < bdev->num_channels && j < 3; j++) {
+					writel(0x1f, bam_addr(bdev, j,
+							      BAM_P_IRQ_CLR));
+					dev_info(bdev->dev,
+						 "pipe %u: post-fixup p%u IRQ_CLR OK, P_IRQ=0x%x\n",
+						 bchan->id, j,
+						 readl_relaxed(bam_addr(bdev, j,
+								BAM_P_IRQ_STTS)));
+				}
+			}
 		}
 	}
 
@@ -1480,6 +1499,24 @@ static void bam_start_dma(struct bam_chan *bchan)
 				 readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)),
 				 readl_relaxed(bam_addr(bdev, i, BAM_P_EVNT_REG)),
 				 readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS)));
+		}
+
+		/*
+		 * Diagnostic writes: test if the BAM is writable before
+		 * the doorbell.  These writes are "safe" — P_IRQ_CLR just
+		 * clears pending interrupt status bits, and reading
+		 * P_IRQ_STTS after verifies the write took effect.
+		 *
+		 * This answers: does the BAM freeze on ANY write, or
+		 * specifically on the P_EVNT_REG doorbell write?
+		 */
+		for (i = 0; i < bdev->num_channels && i < 3; i++) {
+			writel(0x1f, bam_addr(bdev, i, BAM_P_IRQ_CLR));
+			dev_info(bdev->dev,
+				 "  p%u: IRQ_CLR write OK, P_IRQ now=0x%x\n",
+				 i,
+				 readl_relaxed(bam_addr(bdev, i,
+							BAM_P_IRQ_STTS)));
 		}
 	}
 
