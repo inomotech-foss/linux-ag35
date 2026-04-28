@@ -254,6 +254,7 @@ struct q6v5 {
 };
 
 enum {
+	MSS_MDM9607,
 	MSS_MSM8226,
 	MSS_MSM8909,
 	MSS_MSM8916,
@@ -745,17 +746,23 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 			return ret;
 		}
 		goto pbl_wait;
-	} else if (qproc->version == MSS_MSM8909 ||
+	} else if (qproc->version == MSS_MDM9607 ||
+		   qproc->version == MSS_MSM8909 ||
 		   qproc->version == MSS_MSM8953 ||
 		   qproc->version == MSS_MSM8996 ||
 		   qproc->version == MSS_MSM8998 ||
 		   qproc->version == MSS_SDM660) {
 
 		if (qproc->version != MSS_MSM8909 &&
-		    qproc->version != MSS_MSM8953)
+		    qproc->version != MSS_MSM8953) {
+			u32 acc_val = QDSP6SS_ACC_OVERRIDE_VAL;
+
+			if (qproc->version == MSS_MDM9607)
+				acc_val = 0x80800000;
 			/* Override the ACC value if required */
-			writel(QDSP6SS_ACC_OVERRIDE_VAL,
+			writel(acc_val,
 			       qproc->reg_base + QDSP6SS_STRAP_ACC);
+		}
 
 		/* Assert resets, stop core */
 		val = readl(qproc->reg_base + QDSP6SS_RESET_REG);
@@ -810,7 +817,8 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 			writel(val, qproc->reg_base + QDSP6SS_PWR_CTL_REG);
 
 			/* Turn on L1, L2, ETB and JU memories 1 at a time */
-			if (qproc->version == MSS_MSM8953 ||
+			if (qproc->version == MSS_MDM9607 ||
+			    qproc->version == MSS_MSM8953 ||
 			    qproc->version == MSS_MSM8996) {
 				mem_pwr_ctl = QDSP6SS_MEM_PWR_CTL;
 				i = 19;
@@ -820,16 +828,37 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 				i = 28;
 			}
 			val = readl(qproc->reg_base + mem_pwr_ctl);
-			for (; i >= 0; i--) {
-				val |= BIT(i);
-				writel(val, qproc->reg_base + mem_pwr_ctl);
+			if (qproc->version == MSS_MDM9607) {
 				/*
-				 * Read back value to ensure the write is done then
-				 * wait for 1us for both memory peripheral and data
-				 * array to turn on.
+				 * MDM9607 uses inrush-current-aware
+				 * sequencing: power bits 19..6 first
+				 * (descending), then 0..5 (ascending)
+				 * to limit current spikes on the L2
+				 * data banks.
 				 */
-				val |= readl(qproc->reg_base + mem_pwr_ctl);
-				udelay(1);
+				for (i = 19; i >= 6; i--) {
+					val |= BIT(i);
+					writel(val, qproc->reg_base + mem_pwr_ctl);
+					udelay(1);
+				}
+				for (i = 0; i <= 5; i++) {
+					val |= BIT(i);
+					writel(val, qproc->reg_base + mem_pwr_ctl);
+					udelay(1);
+				}
+			} else {
+				for (; i >= 0; i--) {
+					val |= BIT(i);
+					writel(val, qproc->reg_base + mem_pwr_ctl);
+					/*
+					 * Read back value to ensure the
+					 * write is done then wait for 1us
+					 * for both memory peripheral and
+					 * data array to turn on.
+					 */
+					val |= readl(qproc->reg_base + mem_pwr_ctl);
+					udelay(1);
+				}
 			}
 		} else {
 			/* Turn on memories */
@@ -1303,7 +1332,8 @@ static void q6v5_mba_reclaim(struct q6v5 *qproc)
 		q6v5proc_halt_axi_port(qproc, qproc->halt_map, qproc->halt_vq6);
 	q6v5proc_halt_axi_port(qproc, qproc->halt_map, qproc->halt_modem);
 	q6v5proc_halt_axi_port(qproc, qproc->halt_map, qproc->halt_nc);
-	if (qproc->version == MSS_MSM8996) {
+	if (qproc->version == MSS_MDM9607 ||
+	    qproc->version == MSS_MSM8996) {
 		/*
 		 * To avoid high MX current during LPASS/MSS restart.
 		 */
@@ -2437,6 +2467,41 @@ static const struct rproc_hexagon_res msm8909_mss = {
 	.version = MSS_MSM8909,
 };
 
+static const struct rproc_hexagon_res mdm9607_mss = {
+	.hexagon_mba_image = "mba.mbn",
+	.proxy_supply = (struct qcom_mss_reg_res[]) {
+		{
+			.supply = "pll",
+			.uA = 100000,
+		},
+		{}
+	},
+	.proxy_clk_names = (char*[]){
+		"xo",
+		NULL
+	},
+	.active_clk_names = (char*[]){
+		"iface",
+		"bus",
+		"mem",
+		NULL
+	},
+	.proxy_pd_names = (char*[]){
+		"mx",
+		"cx",
+		NULL
+	},
+	.need_mem_protection = false,
+	.has_alt_reset = false,
+	.has_mba_logs = false,
+	.has_spare_reg = false,
+	.has_qaccept_regs = false,
+	.has_ext_bhs_reg = false,
+	.has_ext_cntl_regs = false,
+	.has_vq6 = false,
+	.version = MSS_MDM9607,
+};
+
 static const struct rproc_hexagon_res msm8916_mss = {
 	.hexagon_mba_image = "mba.mbn",
 	.proxy_supply = (struct qcom_mss_reg_res[]) {
@@ -2661,6 +2726,7 @@ static const struct of_device_id q6v5_of_match[] = {
 	{ .compatible = "qcom,msm8226-mss-pil", .data = &msm8226_mss},
 	{ .compatible = "qcom,msm8909-mss-pil", .data = &msm8909_mss},
 	{ .compatible = "qcom,msm8916-mss-pil", .data = &msm8916_mss},
+	{ .compatible = "qcom,mdm9607-mss-pil", .data = &mdm9607_mss},
 	{ .compatible = "qcom,msm8926-mss-pil", .data = &msm8926_mss},
 	{ .compatible = "qcom,msm8953-mss-pil", .data = &msm8953_mss},
 	{ .compatible = "qcom,msm8974-mss-pil", .data = &msm8974_mss},
