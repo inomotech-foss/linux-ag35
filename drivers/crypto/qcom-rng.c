@@ -30,6 +30,7 @@
 #define WORD_SZ			4
 
 #define QCOM_TRNG_QUALITY	1024
+#define QCOM_PRNG_QUALITY	700
 
 struct qcom_rng {
 	struct mutex lock;
@@ -46,6 +47,7 @@ struct qcom_rng_ctx {
 struct qcom_rng_match_data {
 	bool skip_init;
 	bool hwrng_support;
+	int hwrng_quality;
 };
 
 static struct qcom_rng *qcom_rng_dev;
@@ -116,8 +118,19 @@ static int qcom_rng_seed(struct crypto_rng *tfm, const u8 *seed,
 static int qcom_hwrng_read(struct hwrng *hwrng, void *data, size_t max, bool wait)
 {
 	struct qcom_rng *qrng = container_of(hwrng, struct qcom_rng, hwrng);
+	int ret;
 
-	return qcom_rng_read(qrng, data, max);
+	ret = clk_prepare_enable(qrng->clk);
+	if (ret)
+		return ret;
+
+	mutex_lock(&qrng->lock);
+	ret = qcom_rng_read(qrng, data, max);
+	mutex_unlock(&qrng->lock);
+
+	clk_disable_unprepare(qrng->clk);
+
+	return ret;
 }
 
 static int qcom_rng_enable(struct qcom_rng *rng)
@@ -209,7 +222,7 @@ static int qcom_rng_probe(struct platform_device *pdev)
 	if (rng->match_data->hwrng_support) {
 		rng->hwrng.name = "qcom_hwrng";
 		rng->hwrng.read = qcom_hwrng_read;
-		rng->hwrng.quality = QCOM_TRNG_QUALITY;
+		rng->hwrng.quality = rng->match_data->hwrng_quality;
 		ret = devm_hwrng_register(&pdev->dev, &rng->hwrng);
 		if (ret) {
 			dev_err(&pdev->dev, "Register hwrng failed: %d\n", ret);
@@ -233,7 +246,8 @@ static void qcom_rng_remove(struct platform_device *pdev)
 
 static struct qcom_rng_match_data qcom_prng_match_data = {
 	.skip_init = false,
-	.hwrng_support = false,
+	.hwrng_support = true,
+	.hwrng_quality = QCOM_PRNG_QUALITY,
 };
 
 static struct qcom_rng_match_data qcom_prng_ee_match_data = {
@@ -244,6 +258,7 @@ static struct qcom_rng_match_data qcom_prng_ee_match_data = {
 static struct qcom_rng_match_data qcom_trng_match_data = {
 	.skip_init = true,
 	.hwrng_support = true,
+	.hwrng_quality = QCOM_TRNG_QUALITY,
 };
 
 static const struct acpi_device_id __maybe_unused qcom_rng_acpi_match[] = {
