@@ -1613,6 +1613,7 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 		goto out_wl;
 	ubi_msg(ubi, "eba_init done");
 
+	ubi_msg(ubi, "destroy_ai start");
 #ifdef CONFIG_MTD_UBI_FASTMAP
 	if (ubi->fm && ubi_dbg_chk_fastmap(ubi)) {
 		struct ubi_attach_info *scan_ai;
@@ -1638,6 +1639,7 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 #endif
 
 	destroy_ai(ai);
+	ubi_msg(ubi, "destroy_ai done");
 	return 0;
 
 out_wl:
