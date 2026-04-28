@@ -1314,6 +1314,7 @@ static void destroy_ai(struct ubi_attach_info *ai)
 	struct ubi_ainf_volume *av;
 	struct rb_node *rb;
 
+	pr_err("UBI DBG: destroy_ai: freeing lists\n");
 	list_for_each_entry_safe(aeb, aeb_tmp, &ai->alien, u.list) {
 		list_del(&aeb->u.list);
 		ubi_free_aeb(ai, aeb);
@@ -1335,6 +1336,7 @@ static void destroy_ai(struct ubi_attach_info *ai)
 		ubi_free_aeb(ai, aeb);
 	}
 
+	pr_err("UBI DBG: destroy_ai: freeing volumes rb-tree\n");
 	/* Destroy the volume RB-tree */
 	rb = ai->volumes.rb_node;
 	while (rb) {
@@ -1357,7 +1359,9 @@ static void destroy_ai(struct ubi_attach_info *ai)
 		}
 	}
 
+	pr_err("UBI DBG: destroy_ai: kmem_cache_destroy start\n");
 	kmem_cache_destroy(ai->aeb_slab_cache);
+	pr_err("UBI DBG: destroy_ai: kmem_cache_destroy done\n");
 	kfree(ai);
 }
 
