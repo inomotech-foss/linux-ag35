@@ -877,8 +877,10 @@
 						<&rpmpd MDM9607_VDDMX>;
 			power-domain-names = "cx", "mx";
 
-			clocks = <&gcc GCC_MSS_Q6_BIMC_AXI_CLK>,
-				 <&gcc GCC_MSS_CFG_AHB_CLK>,
+			pll-supply = <&mdm9607_l3>;
+
+			clocks = <&gcc GCC_MSS_CFG_AHB_CLK>,
+				 <&gcc GCC_MSS_Q6_BIMC_AXI_CLK>,
 				 <&gcc GCC_BOOT_ROM_AHB_CLK>,
 				 <&xo_board>;
 			clock-names = "iface", "bus", "mem", "xo";
@@ -886,7 +888,7 @@
 			resets = <&gcc GCC_MSS_RESTART>;
 			reset-names = "mss_restart";
 
-			qcom,halt-regs = <&tcsr 0x1180 0x1200 0x1280>;
+			qcom,halt-regs = <&tcsr 0x18000 0x19000 0x1a000>;
 
 			qcom,smem-states = <&modem_smp2p_out 0>;
 			qcom,smem-state-names = "stop";
