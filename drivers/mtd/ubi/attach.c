@@ -1601,14 +1601,17 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 	err = ubi_read_volume_table(ubi, ai);
 	if (err)
 		goto out_fm;
+	ubi_msg(ubi, "vtbl done, wl_init start");
 
 	err = ubi_wl_init(ubi, ai);
 	if (err)
 		goto out_vtbl;
+	ubi_msg(ubi, "wl_init done, eba_init start");
 
 	err = ubi_eba_init(ubi, ai);
 	if (err)
 		goto out_wl;
+	ubi_msg(ubi, "eba_init done");
 
 #ifdef CONFIG_MTD_UBI_FASTMAP
 	if (ubi->fm && ubi_dbg_chk_fastmap(ubi)) {

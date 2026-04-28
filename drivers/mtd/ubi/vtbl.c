@@ -428,6 +428,7 @@ static struct ubi_vtbl_record *process_lvol(struct ubi_device *ubi,
 	err = -EINVAL;
 	if (leb[0]) {
 		leb_corrupted[0] = vtbl_check(ubi, leb[0]);
+		ubi_msg(ubi, "vtbl_check leb[0]=%d", leb_corrupted[0]);
 		if (leb_corrupted[0] < 0)
 			goto out_free;
 	}
@@ -847,17 +848,21 @@ int ubi_read_volume_table(struct ubi_device *ubi, struct ubi_attach_info *ai)
 	 * The layout volume is OK, initialize the corresponding in-RAM data
 	 * structures.
 	 */
+	ubi_msg(ubi, "init_volumes start");
 	err = init_volumes(ubi, ai, ubi->vtbl);
 	if (err)
 		goto out_free;
+	ubi_msg(ubi, "init_volumes done");
 
 	/*
 	 * Make sure that the attaching information is consistent to the
 	 * information stored in the volume table.
 	 */
+	ubi_msg(ubi, "check_attaching_info start");
 	err = check_attaching_info(ubi, ai);
 	if (err)
 		goto out_free;
+	ubi_msg(ubi, "check_attaching_info done");
 
 	return 0;
 

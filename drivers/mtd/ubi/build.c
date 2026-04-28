@@ -1007,6 +1007,7 @@ int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 			mtd->index, err);
 		goto out_free;
 	}
+	ubi_msg(ubi, "attach done, autoresize check");
 
 	if (ubi->autoresize_vol_id != -1) {
 		err = autoresize(ubi, ubi->autoresize_vol_id);
@@ -1014,9 +1015,11 @@ int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 			goto out_detach;
 	}
 
+	ubi_msg(ubi, "uif_init start");
 	err = uif_init(ubi);
 	if (err)
 		goto out_detach;
+	ubi_msg(ubi, "uif_init done");
 
 	err = ubi_debugfs_init_dev(ubi);
 	if (err)
