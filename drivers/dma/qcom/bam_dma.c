@@ -629,7 +629,7 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	bchan->initialized = 1;
 
-	dev_info(bdev->dev,
+	dev_dbg(bdev->dev,
 		"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x P_FIFO_SIZES=0x%x "
 		"P_DESC_FIFO_ADDR=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
 		"IRQ_SRCS_MSK=0x%x P_IRQ_STTS=0x%x\n",
@@ -685,7 +685,7 @@ static void bam_init_peer_pipes(struct bam_device *bdev)
 		else
 			dir = DMA_MEM_TO_DEV;
 
-		dev_info(bdev->dev,
+		dev_dbg(bdev->dev,
 			"pipe %u: force-init peer (dir=%d known=%d)\n",
 			peer->id, dir, peer->dir_known);
 
@@ -863,7 +863,7 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 			 * P_DIRECTION on a live (P_EN=1) pipe, which may
 			 * corrupt BAM internal pipe state.
 			 */
-			dev_info(bdev->dev,
+			dev_dbg(bdev->dev,
 				"pipe %u: dir fix via re-init (dir=%d)\n",
 				bchan->id, direction);
 
@@ -1054,7 +1054,7 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 			writel_relaxed(pipe_stts, bam_addr(bdev, pipe,
 						   BAM_P_IRQ_CLR));
 
-		dev_info_ratelimited(bdev->dev,
+		dev_dbg(bdev->dev,
 			"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u\n",
 			pipe,
 			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
@@ -1490,9 +1490,7 @@ static void bam_start_dma(struct bam_chan *bchan)
 	{
 		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
 
-		pr_emerg("DB%u=%u\n", bchan->id, db_val);
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
-		pr_emerg("DB%u ok\n", bchan->id);
 	}
 
 	bam_start_poll_timer(bdev);

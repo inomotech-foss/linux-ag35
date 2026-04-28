@@ -564,7 +564,7 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		int has_tx = bam_txn->tx_sgl_pos > bam_txn->tx_sgl_start;
 		int has_cmd_extra = bam_txn->cmd_sgl_pos > bam_txn->cmd_sgl_start;
 
-		dev_info(nandc->dev, "submit: rx=%d tx=%d cmd=%d\n",
+		dev_dbg(nandc->dev, "submit: rx=%d tx=%d cmd=%d\n",
 			 has_rx, has_tx, has_cmd_extra);
 
 		if (has_rx) {
