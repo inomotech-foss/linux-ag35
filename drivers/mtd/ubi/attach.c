@@ -1314,7 +1314,7 @@ static void destroy_ai(struct ubi_attach_info *ai)
 	struct ubi_ainf_volume *av;
 	struct rb_node *rb;
 
-	pr_err("UBI DBG: destroy_ai: freeing lists\n");
+	pr_debug("UBI DBG: destroy_ai: freeing lists\n");
 	list_for_each_entry_safe(aeb, aeb_tmp, &ai->alien, u.list) {
 		list_del(&aeb->u.list);
 		ubi_free_aeb(ai, aeb);
@@ -1336,7 +1336,7 @@ static void destroy_ai(struct ubi_attach_info *ai)
 		ubi_free_aeb(ai, aeb);
 	}
 
-	pr_err("UBI DBG: destroy_ai: freeing volumes rb-tree\n");
+	pr_debug("UBI DBG: destroy_ai: freeing volumes rb-tree\n");
 	/* Destroy the volume RB-tree */
 	rb = ai->volumes.rb_node;
 	while (rb) {
@@ -1359,9 +1359,13 @@ static void destroy_ai(struct ubi_attach_info *ai)
 		}
 	}
 
-	pr_err("UBI DBG: destroy_ai: kmem_cache_destroy start\n");
-	kmem_cache_destroy(ai->aeb_slab_cache);
-	pr_err("UBI DBG: destroy_ai: kmem_cache_destroy done\n");
+	/*
+	 * FIXME: kmem_cache_destroy() hangs on this platform due to
+	 * __kvfree_rcu_barrier() blocking indefinitely during early
+	 * boot. All slab objects have already been freed above, so we
+	 * only leak the empty cache descriptor (~200 bytes).
+	 */
+	pr_info("UBI: skipping kmem_cache_destroy (workaround for boot hang)\n");
 	kfree(ai);
 }
 

@@ -531,8 +531,12 @@ void kmem_cache_destroy(struct kmem_cache *s)
 	if (unlikely(!s) || !kasan_check_byte(s))
 		return;
 
+	pr_debug("kmem_cache_destroy(%s): kvfree_rcu_barrier_on_cache start\n",
+		 s->name);
 	/* in-flight kfree_rcu()'s may include objects from our cache */
 	kvfree_rcu_barrier_on_cache(s);
+	pr_debug("kmem_cache_destroy(%s): kvfree_rcu_barrier_on_cache done\n",
+		 s->name);
 
 	if (IS_ENABLED(CONFIG_SLUB_RCU_DEBUG) &&
 	    (s->flags & SLAB_TYPESAFE_BY_RCU)) {
