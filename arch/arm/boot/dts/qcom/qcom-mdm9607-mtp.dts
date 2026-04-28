@@ -44,6 +44,10 @@
 /* Modem remoteproc - loads and manages modem firmware */
 /* &remoteproc_mss { status = "okay"; firmware = ...; }; */
 
+/* BAM-DMUX: modem data path (modem is pre-loaded by SBL1) */
+&bam_dmux_dma { status = "okay"; };
+&bam_dmux { status = "okay"; };
+
 /* &blsp1_i2c2 { status = "okay"; }; */
 /* &blsp1_i2c4 { status = "okay"; }; */
 /* &blsp1_spi6 { status = "okay"; }; */
