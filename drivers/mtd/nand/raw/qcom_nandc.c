@@ -2391,6 +2391,8 @@ static int qcom_nandc_probe(struct platform_device *pdev)
 
 	dev_info(dev, "nandc_probe: done\n");
 
+	return 0;
+
 err_setup:
 	qcom_nandc_unalloc(nandc);
 err_nandc_alloc:
