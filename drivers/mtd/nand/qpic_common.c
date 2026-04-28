@@ -558,11 +558,23 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 	dma_cookie_t cookie = 0;
 	struct bam_transaction *bam_txn = nandc->bam_txn;
 	int ret = 0;
+	static unsigned int submit_nr;
 
 	if (nandc->props->supports_bam) {
 		int has_rx = bam_txn->rx_sgl_pos > bam_txn->rx_sgl_start;
 		int has_tx = bam_txn->tx_sgl_pos > bam_txn->tx_sgl_start;
 		int has_cmd_extra = bam_txn->cmd_sgl_pos > bam_txn->cmd_sgl_start;
+
+		submit_nr++;
+		/*
+		 * Print first 5 submits (ONFI/init) for context.
+		 * UBI vtbl diagnostic prints handle the post-scan case.
+		 */
+		if (submit_nr <= 5)
+			dev_info(nandc->dev,
+				 "submit[%u]: rx=%d tx=%d cmd=%d cmd_sgl=%d\n",
+				 submit_nr, has_rx, has_tx, has_cmd_extra,
+				 bam_txn->cmd_sgl_pos);
 
 		dev_dbg(nandc->dev, "submit: rx=%d tx=%d cmd=%d\n",
 			 has_rx, has_tx, has_cmd_extra);
@@ -639,6 +651,9 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 	}
 
 err_unmap_free_desc:
+	if (nandc->props->supports_bam && ret)
+		dev_info(nandc->dev, "submit[%u]: FAILED ret=%d\n",
+			 submit_nr, ret);
 	/*
 	 * Unmap the dma sg_list and free the desc allocated by both
 	 * qcom_prepare_bam_async_desc() and qcom_prep_adm_dma_desc() functions.

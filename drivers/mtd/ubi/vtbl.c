@@ -403,8 +403,12 @@ static struct ubi_vtbl_record *process_lvol(struct ubi_device *ubi,
 			goto out_free;
 		}
 
+		ubi_msg(ubi, "reading vtbl copy LEB %d from PEB %d",
+			aeb->lnum, aeb->pnum);
 		err = ubi_io_read_data(ubi, leb[aeb->lnum], aeb->pnum, 0,
 				       ubi->vtbl_size);
+		ubi_msg(ubi, "vtbl copy LEB %d read done, err=%d",
+			aeb->lnum, err);
 		if (err == UBI_IO_BITFLIPS || mtd_is_eccerr(err))
 			/*
 			 * Scrub the PEB later. Note, -EBADMSG indicates an
@@ -803,6 +807,8 @@ int ubi_read_volume_table(struct ubi_device *ubi, struct ubi_attach_info *ai)
 
 	ubi->vtbl_size = ubi->vtbl_slots * UBI_VTBL_RECORD_SIZE;
 	ubi->vtbl_size = ALIGN(ubi->vtbl_size, ubi->min_io_size);
+
+	ubi_msg(ubi, "reading volume table (vtbl_size %d)", ubi->vtbl_size);
 
 	av = ubi_find_av(ai, UBI_LAYOUT_VOLUME_ID);
 	if (!av) {
