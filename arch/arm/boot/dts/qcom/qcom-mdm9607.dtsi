@@ -1129,7 +1129,7 @@
 			nand: nand@0 {
 				reg = <0>;
 
-				nand-ecc-strength = <4>;
+				nand-ecc-strength = <8>;
 				nand-ecc-step-size = <512>;
 				nand-bus-width = <8>;
 			};
