@@ -111,7 +111,12 @@
 		ranges;
 
 		mpss_mem: memory@82a00000 {
-			reg = <0x82a00000 0x5000000>;
+			reg = <0x82a00000 0x4f00000>;
+			no-map;
+		};
+
+		mba_mem: memory@87900000 {
+			reg = <0x87900000 0x100000>;
 			no-map;
 		};
 
@@ -143,11 +148,6 @@
 
 		qseecom_mem: memory@8f800000 {
 			reg = <0x8f800000 0x100000>;
-			no-map;
-		};
-
-		mba_mem: memory@8f900000 {
-			reg = <0x8f900000 0x100000>;
 			no-map;
 		};
 

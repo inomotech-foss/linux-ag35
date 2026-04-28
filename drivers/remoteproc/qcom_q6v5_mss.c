@@ -596,6 +596,13 @@ static int q6v5_rmb_pbl_wait(struct q6v5 *qproc, int ms)
 	unsigned long timeout;
 	s32 val;
 
+	dev_info(qproc->dev, "pbl_wait: reading RMB_PBL_STATUS at %p\n",
+		 qproc->rmb_base + RMB_PBL_STATUS_REG);
+	val = readl(qproc->rmb_base + RMB_PBL_STATUS_REG);
+	dev_info(qproc->dev, "pbl_wait: first read returned 0x%x\n", val);
+	if (val)
+		return val;
+
 	timeout = jiffies + msecs_to_jiffies(ms);
 	for (;;) {
 		val = readl(qproc->rmb_base + RMB_PBL_STATUS_REG);
@@ -1244,6 +1251,8 @@ static int q6v5_mba_load(struct q6v5 *qproc)
 		qcom_pil_info_store("mba", qproc->mba_phys, MBA_LOG_SIZE);
 
 	writel(qproc->mba_phys, qproc->rmb_base + RMB_MBA_IMAGE_REG);
+	dev_info(qproc->dev, "MBA image phys=0x%pa, mpss phys=0x%pa\n",
+		 &qproc->mba_phys, &qproc->mpss_phys);
 	if (qproc->dp_size) {
 		writel(qproc->mba_phys + SZ_1M, qproc->rmb_base + RMB_PMI_CODE_START_REG);
 		writel(qproc->dp_size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
