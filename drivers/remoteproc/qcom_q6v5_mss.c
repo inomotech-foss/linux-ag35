@@ -918,15 +918,20 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 	val &= ~Q6SS_CLAMP_IO;
 	writel(val, qproc->reg_base + QDSP6SS_PWR_CTL_REG);
 
-	/* Bring core out of reset and clear stop */
+	/* Bring core out of reset (keep stopped) */
 	val = readl(qproc->reg_base + QDSP6SS_RESET_REG);
-	val &= ~(Q6SS_CORE_ARES | Q6SS_STOP_CORE);
+	val &= ~Q6SS_CORE_ARES;
 	writel(val, qproc->reg_base + QDSP6SS_RESET_REG);
 
 	/* Turn on core clock */
 	val = readl(qproc->reg_base + QDSP6SS_GFMUX_CTL_REG);
 	val |= Q6SS_CLK_ENABLE;
 	writel(val, qproc->reg_base + QDSP6SS_GFMUX_CTL_REG);
+
+	/* Start core execution */
+	val = readl(qproc->reg_base + QDSP6SS_RESET_REG);
+	val &= ~Q6SS_STOP_CORE;
+	writel(val, qproc->reg_base + QDSP6SS_RESET_REG);
 
 	dev_info(qproc->dev,
 		 "Q6 released: RESET=%08x PWR_CTL=%08x GFMUX=%08x XO_CBCR=%08x MEM_PWR=%08x\n",
