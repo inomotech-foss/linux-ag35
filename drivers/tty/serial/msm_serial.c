@@ -786,8 +786,15 @@ static void msm_handle_rx_dm(struct uart_port *port, unsigned int misr)
 
 	tty_flip_buffer_push(tport);
 
-	if (misr & (MSM_UART_IMR_RXSTALE))
-		msm_write(port, MSM_UART_CR_CMD_RESET_STALE_INT, MSM_UART_CR);
+	/*
+	 * Re-arm the RX byte-count state machine.  Always clear any pending
+	 * stale condition before re-enabling — if an RXLEV interrupt races
+	 * with a hardware stale timeout, the stale logic latches and
+	 * STALE_EVENT_ENABLE is ignored until RESET_STALE_INT is issued.
+	 * Without this, interactive RX permanently dies (only RXLEV at 48
+	 * bytes would fire, which never happens for single-character input).
+	 */
+	msm_write(port, MSM_UART_CR_CMD_RESET_STALE_INT, MSM_UART_CR);
 	msm_write(port, 0xFFFFFF, UARTDM_DMRX);
 	msm_write(port, MSM_UART_CR_CMD_STALE_EVENT_ENABLE, MSM_UART_CR);
 
