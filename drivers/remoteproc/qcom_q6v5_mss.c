@@ -942,36 +942,11 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 		 readl(qproc->reg_base + QDSP6SS_MEM_PWR_CTL));
 
 pbl_wait:
-	/* Wait for PBL status */
-	ret = q6v5_rmb_pbl_wait(qproc, 1000);
-	if (ret == -ETIMEDOUT) {
-		dev_err(qproc->dev, "PBL boot timed out\n");
-		dev_err(qproc->dev,
-			"RMB dump: MBA_IMAGE=%08x PBL_STATUS=%08x MBA_CMD=%08x MBA_STATUS=%08x\n",
-			readl(qproc->rmb_base + RMB_MBA_IMAGE_REG),
-			readl(qproc->rmb_base + RMB_PBL_STATUS_REG),
-			readl(qproc->rmb_base + RMB_MBA_COMMAND_REG),
-			readl(qproc->rmb_base + RMB_MBA_STATUS_REG));
-		dev_err(qproc->dev,
-			"RMB dump: PMI_META=%08x PMI_START=%08x PMI_LEN=%08x MSS_STATUS=%08x\n",
-			readl(qproc->rmb_base + RMB_PMI_META_DATA_REG),
-			readl(qproc->rmb_base + RMB_PMI_CODE_START_REG),
-			readl(qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG),
-			readl(qproc->rmb_base + RMB_MBA_MSS_STATUS));
-		dev_err(qproc->dev,
-			"Q6 post-timeout: RESET=%08x PWR_CTL=%08x GFMUX=%08x STRAP_ACC=%08x\n",
-			readl(qproc->reg_base + QDSP6SS_RESET_REG),
-			readl(qproc->reg_base + QDSP6SS_PWR_CTL_REG),
-			readl(qproc->reg_base + QDSP6SS_GFMUX_CTL_REG),
-			readl(qproc->reg_base + QDSP6SS_STRAP_ACC));
-	} else if (ret != RMB_PBL_SUCCESS) {
-		dev_err(qproc->dev, "PBL returned unexpected status %d\n", ret);
-		ret = -EINVAL;
-	} else {
-		ret = 0;
-	}
-
-	return ret;
+	/*
+	 * DEBUG: Skip PBL wait here — caller does the bus-alive test
+	 * with MBA_IMAGE=0, then writes the real address and polls.
+	 */
+	return 0;
 }
 
 static int q6v5proc_enable_qchannel(struct q6v5 *qproc, struct regmap *map, u32 offset)
@@ -1278,22 +1253,55 @@ static int q6v5_mba_load(struct q6v5 *qproc)
 	if (qproc->has_mba_logs)
 		qcom_pil_info_store("mba", qproc->mba_phys, MBA_LOG_SIZE);
 
-	writel(qproc->mba_phys, qproc->rmb_base + RMB_MBA_IMAGE_REG);
-	dev_info(qproc->dev, "MBA image phys=0x%pa, mpss phys=0x%pa\n",
-		 &qproc->mba_phys, &qproc->mpss_phys);
-	if (qproc->dp_size) {
-		writel(qproc->mba_phys + SZ_1M, qproc->rmb_base + RMB_PMI_CODE_START_REG);
-		writel(qproc->dp_size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
-	} else {
-		writel(0, qproc->rmb_base + RMB_PMI_CODE_START_REG);
-		writel(0, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
-	}
+	/*
+	 * DEBUG: Write 0 to RMB_MBA_IMAGE first.  Release the Q6 and
+	 * verify the bus stays alive while PBL spins waiting for a
+	 * non-zero address.  Then write the real address and poll
+	 * normally.  If the bus hangs only after the real address is
+	 * written, the Q6 cannot access DDR.
+	 */
+	writel(0, qproc->rmb_base + RMB_MBA_IMAGE_REG);
+	writel(0, qproc->rmb_base + RMB_PMI_CODE_START_REG);
+	writel(0, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
 	/* Ensure all RMB writes are visible before Q6 core release */
 	mb();
 
 	ret = q6v5proc_reset(qproc);
 	if (ret)
 		goto reclaim_mba;
+
+	/*
+	 * DEBUG: Q6 PBL should now be spinning on RMB_MBA_IMAGE == 0.
+	 * Wait 50ms for PBL to start, then verify we can still read
+	 * RMB registers (bus is alive).
+	 */
+	msleep(50);
+	dev_info(qproc->dev,
+		 "DEBUG: PBL spinning, bus test: PBL_STATUS=%08x MBA_IMAGE=%08x\n",
+		 readl(qproc->rmb_base + RMB_PBL_STATUS_REG),
+		 readl(qproc->rmb_base + RMB_MBA_IMAGE_REG));
+
+	/* Now write the real MBA address so PBL will attempt DDR access */
+	writel(qproc->mba_phys, qproc->rmb_base + RMB_MBA_IMAGE_REG);
+	if (qproc->dp_size) {
+		writel(qproc->mba_phys + SZ_1M, qproc->rmb_base + RMB_PMI_CODE_START_REG);
+		writel(qproc->dp_size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
+	}
+	mb();
+	dev_info(qproc->dev,
+		 "DEBUG: MBA addr written (%pa), polling PBL (may hang if Q6 can't read DDR)\n",
+		 &qproc->mba_phys);
+
+	/* PBL wait — this is where the bus previously hung */
+	ret = q6v5_rmb_pbl_wait(qproc, 1000);
+	if (ret == -ETIMEDOUT) {
+		dev_err(qproc->dev, "PBL boot timed out\n");
+		goto halt_axi_ports;
+	} else if (ret != RMB_PBL_SUCCESS) {
+		dev_err(qproc->dev, "PBL returned unexpected status %d\n", ret);
+		ret = -EINVAL;
+		goto halt_axi_ports;
+	}
 
 	ret = q6v5_rmb_mba_wait(qproc, 0, 5000);
 	if (ret == -ETIMEDOUT) {
