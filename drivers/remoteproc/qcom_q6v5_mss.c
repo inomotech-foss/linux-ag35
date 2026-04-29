@@ -528,6 +528,8 @@ static int q6v5_load(struct rproc *rproc, const struct firmware *fw)
 	else
 		memcpy(mba_region, fw->data, fw->size);
 	q6v5_debug_policy_load(qproc, mba_region);
+	dev_info(qproc->dev, "MBA header at %pa: %*ph\n",
+		 &qproc->mba_phys, 16, mba_region);
 	memunmap(mba_region);
 
 	return 0;
@@ -944,6 +946,24 @@ pbl_wait:
 	ret = q6v5_rmb_pbl_wait(qproc, 1000);
 	if (ret == -ETIMEDOUT) {
 		dev_err(qproc->dev, "PBL boot timed out\n");
+		dev_err(qproc->dev,
+			"RMB dump: MBA_IMAGE=%08x PBL_STATUS=%08x MBA_CMD=%08x MBA_STATUS=%08x\n",
+			readl(qproc->rmb_base + RMB_MBA_IMAGE_REG),
+			readl(qproc->rmb_base + RMB_PBL_STATUS_REG),
+			readl(qproc->rmb_base + RMB_MBA_COMMAND_REG),
+			readl(qproc->rmb_base + RMB_MBA_STATUS_REG));
+		dev_err(qproc->dev,
+			"RMB dump: PMI_META=%08x PMI_START=%08x PMI_LEN=%08x MSS_STATUS=%08x\n",
+			readl(qproc->rmb_base + RMB_PMI_META_DATA_REG),
+			readl(qproc->rmb_base + RMB_PMI_CODE_START_REG),
+			readl(qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG),
+			readl(qproc->rmb_base + RMB_MBA_MSS_STATUS));
+		dev_err(qproc->dev,
+			"Q6 post-timeout: RESET=%08x PWR_CTL=%08x GFMUX=%08x STRAP_ACC=%08x\n",
+			readl(qproc->reg_base + QDSP6SS_RESET_REG),
+			readl(qproc->reg_base + QDSP6SS_PWR_CTL_REG),
+			readl(qproc->reg_base + QDSP6SS_GFMUX_CTL_REG),
+			readl(qproc->reg_base + QDSP6SS_STRAP_ACC));
 	} else if (ret != RMB_PBL_SUCCESS) {
 		dev_err(qproc->dev, "PBL returned unexpected status %d\n", ret);
 		ret = -EINVAL;
