@@ -1023,6 +1023,9 @@ static void msm_reset(struct uart_port *port)
 	/* Disable DM modes */
 	if (msm_port->is_uartdm)
 		msm_write(port, 0, UARTDM_DMEN);
+
+	/* RESET_RX clears the hardware byte counter; sync software state */
+	msm_port->old_snap_state = 0;
 }
 
 static void msm_set_mctrl(struct uart_port *port, unsigned int mctrl)
