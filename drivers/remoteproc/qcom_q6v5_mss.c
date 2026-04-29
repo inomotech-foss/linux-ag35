@@ -931,6 +931,14 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 	val &= ~Q6SS_STOP_CORE;
 	writel(val, qproc->reg_base + QDSP6SS_RESET_REG);
 
+	dev_info(qproc->dev,
+		 "Q6 released: RESET=%08x PWR_CTL=%08x GFMUX=%08x XO_CBCR=%08x MEM_PWR=%08x\n",
+		 readl(qproc->reg_base + QDSP6SS_RESET_REG),
+		 readl(qproc->reg_base + QDSP6SS_PWR_CTL_REG),
+		 readl(qproc->reg_base + QDSP6SS_GFMUX_CTL_REG),
+		 readl(qproc->reg_base + QDSP6SS_XO_CBCR),
+		 readl(qproc->reg_base + QDSP6SS_MEM_PWR_CTL));
+
 pbl_wait:
 	/* Wait for PBL status */
 	ret = q6v5_rmb_pbl_wait(qproc, 1000);
@@ -1256,7 +1264,12 @@ static int q6v5_mba_load(struct q6v5 *qproc)
 	if (qproc->dp_size) {
 		writel(qproc->mba_phys + SZ_1M, qproc->rmb_base + RMB_PMI_CODE_START_REG);
 		writel(qproc->dp_size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
+	} else {
+		writel(0, qproc->rmb_base + RMB_PMI_CODE_START_REG);
+		writel(0, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
 	}
+	/* Ensure all RMB writes are visible before Q6 core release */
+	mb();
 
 	ret = q6v5proc_reset(qproc);
 	if (ret)
