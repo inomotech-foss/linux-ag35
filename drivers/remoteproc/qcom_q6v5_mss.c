@@ -614,7 +614,7 @@ static int q6v5_rmb_pbl_wait(struct q6v5 *qproc, int ms)
 		if (time_after(jiffies, timeout))
 			return -ETIMEDOUT;
 
-		msleep(1);
+		mdelay(1);
 	}
 
 	return val;
@@ -640,7 +640,7 @@ static int q6v5_rmb_mba_wait(struct q6v5 *qproc, u32 status, int ms)
 		if (time_after(jiffies, timeout))
 			return -ETIMEDOUT;
 
-		msleep(1);
+		mdelay(1);
 	}
 
 	return val;
@@ -1271,17 +1271,27 @@ static int q6v5_mba_load(struct q6v5 *qproc)
 		goto reclaim_mba;
 
 	/*
-	 * DEBUG: Q6 PBL should now be spinning on RMB_MBA_IMAGE == 0.
-	 * Wait 50ms for PBL to start, then verify we can still read
-	 * RMB registers (bus is alive).
+	 * DEBUG: Use mdelay (busy-wait) instead of msleep to avoid
+	 * dependency on scheduler/timer wakeups which are broken by
+	 * the fsnotify SRCU deadlock on this single-core system.
 	 */
-	msleep(50);
-	dev_info(qproc->dev,
-		 "DEBUG: PBL spinning, bus test: PBL_STATUS=%08x MBA_IMAGE=%08x\n",
-		 readl(qproc->rmb_base + RMB_PBL_STATUS_REG),
-		 readl(qproc->rmb_base + RMB_MBA_IMAGE_REG));
+	dev_info(qproc->dev, "DEBUG: Q6 released, waiting 50ms (mdelay)...\n");
+	mdelay(50);
+	dev_info(qproc->dev, "DEBUG: mdelay done, reading RMB regs...\n");
+
+	/* Bus-alive test: read RMB registers (will hang here if bus dead) */
+	{
+		u32 pbl_status, mba_image;
+
+		pbl_status = readl(qproc->rmb_base + RMB_PBL_STATUS_REG);
+		dev_info(qproc->dev, "DEBUG: PBL_STATUS=%08x (read OK)\n", pbl_status);
+		mba_image = readl(qproc->rmb_base + RMB_MBA_IMAGE_REG);
+		dev_info(qproc->dev, "DEBUG: MBA_IMAGE=%08x (read OK)\n", mba_image);
+	}
 
 	/* Now write the real MBA address so PBL will attempt DDR access */
+	dev_info(qproc->dev, "DEBUG: Writing MBA addr %pa to RMB_MBA_IMAGE...\n",
+		 &qproc->mba_phys);
 	writel(qproc->mba_phys, qproc->rmb_base + RMB_MBA_IMAGE_REG);
 	if (qproc->dp_size) {
 		writel(qproc->mba_phys + SZ_1M, qproc->rmb_base + RMB_PMI_CODE_START_REG);
@@ -1289,8 +1299,7 @@ static int q6v5_mba_load(struct q6v5 *qproc)
 	}
 	mb();
 	dev_info(qproc->dev,
-		 "DEBUG: MBA addr written (%pa), polling PBL (may hang if Q6 can't read DDR)\n",
-		 &qproc->mba_phys);
+		 "DEBUG: MBA addr written, polling PBL (may hang if Q6 can't read DDR)\n");
 
 	/* PBL wait — this is where the bus previously hung */
 	ret = q6v5_rmb_pbl_wait(qproc, 1000);
