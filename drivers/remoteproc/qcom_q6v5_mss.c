@@ -1253,55 +1253,28 @@ static int q6v5_mba_load(struct q6v5 *qproc)
 	if (qproc->has_mba_logs)
 		qcom_pil_info_store("mba", qproc->mba_phys, MBA_LOG_SIZE);
 
-	/*
-	 * DEBUG: Write 0 to RMB_MBA_IMAGE first.  Release the Q6 and
-	 * verify the bus stays alive while PBL spins waiting for a
-	 * non-zero address.  Then write the real address and poll
-	 * normally.  If the bus hangs only after the real address is
-	 * written, the Q6 cannot access DDR.
+	/* Write MBA address and DP info BEFORE releasing Q6.
+	 * PBL reads RMB_MBA_IMAGE immediately on boot — it does NOT
+	 * spin waiting for a non-zero value.
 	 */
-	writel(0, qproc->rmb_base + RMB_MBA_IMAGE_REG);
-	writel(0, qproc->rmb_base + RMB_PMI_CODE_START_REG);
-	writel(0, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
-	/* Ensure all RMB writes are visible before Q6 core release */
+	writel(qproc->mba_phys, qproc->rmb_base + RMB_MBA_IMAGE_REG);
+	if (qproc->dp_size) {
+		writel(qproc->mba_phys + SZ_1M, qproc->rmb_base + RMB_PMI_CODE_START_REG);
+		writel(qproc->dp_size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
+	} else {
+		writel(0, qproc->rmb_base + RMB_PMI_CODE_START_REG);
+		writel(0, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
+	}
+	/* Ensure RMB writes are visible before Q6 core release */
 	mb();
+
+	dev_info(qproc->dev, "MBA addr %pa written, releasing Q6...\n", &qproc->mba_phys);
 
 	ret = q6v5proc_reset(qproc);
 	if (ret)
 		goto reclaim_mba;
 
-	/*
-	 * DEBUG: Use mdelay (busy-wait) instead of msleep to avoid
-	 * dependency on scheduler/timer wakeups which are broken by
-	 * the fsnotify SRCU deadlock on this single-core system.
-	 */
-	dev_info(qproc->dev, "DEBUG: Q6 released, waiting 50ms (mdelay)...\n");
-	mdelay(50);
-	dev_info(qproc->dev, "DEBUG: mdelay done, reading RMB regs...\n");
-
-	/* Bus-alive test: read RMB registers (will hang here if bus dead) */
-	{
-		u32 pbl_status, mba_image;
-
-		pbl_status = readl(qproc->rmb_base + RMB_PBL_STATUS_REG);
-		dev_info(qproc->dev, "DEBUG: PBL_STATUS=%08x (read OK)\n", pbl_status);
-		mba_image = readl(qproc->rmb_base + RMB_MBA_IMAGE_REG);
-		dev_info(qproc->dev, "DEBUG: MBA_IMAGE=%08x (read OK)\n", mba_image);
-	}
-
-	/* Now write the real MBA address so PBL will attempt DDR access */
-	dev_info(qproc->dev, "DEBUG: Writing MBA addr %pa to RMB_MBA_IMAGE...\n",
-		 &qproc->mba_phys);
-	writel(qproc->mba_phys, qproc->rmb_base + RMB_MBA_IMAGE_REG);
-	if (qproc->dp_size) {
-		writel(qproc->mba_phys + SZ_1M, qproc->rmb_base + RMB_PMI_CODE_START_REG);
-		writel(qproc->dp_size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
-	}
-	mb();
-	dev_info(qproc->dev,
-		 "DEBUG: MBA addr written, polling PBL (may hang if Q6 can't read DDR)\n");
-
-	/* PBL wait — this is where the bus previously hung */
+	/* Poll for PBL completion */
 	ret = q6v5_rmb_pbl_wait(qproc, 1000);
 	if (ret == -ETIMEDOUT) {
 		dev_err(qproc->dev, "PBL boot timed out\n");
