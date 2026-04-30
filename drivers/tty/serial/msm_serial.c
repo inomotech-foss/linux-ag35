@@ -1538,15 +1538,13 @@ static void msm_poll_put_char(struct uart_port *port, unsigned char c)
 		msm_reset_dm_count(port, 1);
 
 	/* Wait until FIFO is empty */
-	while (!(msm_read(port, MSM_UART_SR) & MSM_UART_SR_TX_READY))
-		cpu_relax();
+	msm_wait_for_xmitr(port);
 
 	/* Write a character */
 	msm_write(port, c, msm_port->is_uartdm ? UARTDM_TF : MSM_UART_TF);
 
 	/* Wait until FIFO is empty */
-	while (!(msm_read(port, MSM_UART_SR) & MSM_UART_SR_TX_READY))
-		cpu_relax();
+	msm_wait_for_xmitr(port);
 
 	/* Enable interrupts */
 	msm_write(port, imr, MSM_UART_IMR);
@@ -1648,6 +1646,7 @@ static void __msm_console_write(struct uart_port *port, const char *s,
 	while (i < count) {
 		int j;
 		unsigned int num_chars;
+		unsigned int tx_timeout;
 		char buf[4] = { 0 };
 
 		if (is_uartdm)
@@ -1670,8 +1669,12 @@ static void __msm_console_write(struct uart_port *port, const char *s,
 			}
 		}
 
-		while (!(msm_read(port, MSM_UART_SR) & MSM_UART_SR_TX_READY))
-			cpu_relax();
+		tx_timeout = 500000;
+		while (!(msm_read(port, MSM_UART_SR) & MSM_UART_SR_TX_READY)) {
+			if (!tx_timeout--)
+				break;
+			udelay(1);
+		}
 
 		iowrite32_rep(tf, buf, 1);
 		i += num_chars;
