@@ -1314,7 +1314,6 @@ static void destroy_ai(struct ubi_attach_info *ai)
 	struct ubi_ainf_volume *av;
 	struct rb_node *rb;
 
-	pr_debug("UBI DBG: destroy_ai: freeing lists\n");
 	list_for_each_entry_safe(aeb, aeb_tmp, &ai->alien, u.list) {
 		list_del(&aeb->u.list);
 		ubi_free_aeb(ai, aeb);
@@ -1336,7 +1335,6 @@ static void destroy_ai(struct ubi_attach_info *ai)
 		ubi_free_aeb(ai, aeb);
 	}
 
-	pr_debug("UBI DBG: destroy_ai: freeing volumes rb-tree\n");
 	/* Destroy the volume RB-tree */
 	rb = ai->volumes.rb_node;
 	while (rb) {
@@ -1359,13 +1357,7 @@ static void destroy_ai(struct ubi_attach_info *ai)
 		}
 	}
 
-	/*
-	 * FIXME: kmem_cache_destroy() hangs on this platform due to
-	 * __kvfree_rcu_barrier() blocking indefinitely during early
-	 * boot. All slab objects have already been freed above, so we
-	 * only leak the empty cache descriptor (~200 bytes).
-	 */
-	pr_debug("UBI: skipping kmem_cache_destroy (workaround for boot hang)\n");
+	kmem_cache_destroy(ai->aeb_slab_cache);
 	kfree(ai);
 }
 
@@ -1609,19 +1601,15 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 	err = ubi_read_volume_table(ubi, ai);
 	if (err)
 		goto out_fm;
-	ubi_msg(ubi, "vtbl done, wl_init start");
 
 	err = ubi_wl_init(ubi, ai);
 	if (err)
 		goto out_vtbl;
-	ubi_msg(ubi, "wl_init done, eba_init start");
 
 	err = ubi_eba_init(ubi, ai);
 	if (err)
 		goto out_wl;
-	ubi_msg(ubi, "eba_init done");
 
-	ubi_msg(ubi, "destroy_ai start");
 #ifdef CONFIG_MTD_UBI_FASTMAP
 	if (ubi->fm && ubi_dbg_chk_fastmap(ubi)) {
 		struct ubi_attach_info *scan_ai;
@@ -1647,7 +1635,7 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 #endif
 
 	destroy_ai(ai);
-	ubi_msg(ubi, "destroy_ai done");
+	return 0;
 	return 0;
 
 out_wl:

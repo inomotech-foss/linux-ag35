@@ -4284,24 +4284,8 @@ static int unregister_console_locked(struct console *console)
 	 * Ensure that all SRCU list walks have completed. All contexts
 	 * must not be able to see this console in the list so that any
 	 * exit/cleanup routines can be performed safely.
-	 *
-	 * On single-CPU systems, synchronize_srcu() hangs during early
-	 * boot console unregistration.  The SRCU grace period state
-	 * machine (srcutree) requires irq_work -> workqueue -> process_srcu
-	 * to advance.  Even though arch_irq_work_has_interrupt() is true
-	 * (MPIDR says SMP-capable), the self-IPI via smp_cross_call()
-	 * appears to not be delivered, possibly because GIC IPI routing
-	 * isn't fully configured for a single-CPU SMP system.
-	 *
-	 * This is safe to skip on single-CPU: the console has already
-	 * been removed from the list (hlist_del_init_rcu), so no new
-	 * SRCU reader can acquire a reference.  With only one CPU, any
-	 * pre-existing reader has already completed.
 	 */
-	if (num_online_cpus() > 1)
-		synchronize_srcu(&console_srcu);
-	else
-		pr_info("printk: skipping synchronize_srcu (single cpu)\n");
+	synchronize_srcu(&console_srcu);
 
 	/*
 	 * With this console gone, the global flags tracking registered
