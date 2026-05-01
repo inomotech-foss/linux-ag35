@@ -566,15 +566,6 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		int has_cmd_extra = bam_txn->cmd_sgl_pos > bam_txn->cmd_sgl_start;
 
 		submit_nr++;
-		/*
-		 * Print first 5 submits (ONFI/init) for context.
-		 * UBI vtbl diagnostic prints handle the post-scan case.
-		 */
-		if (submit_nr <= 5)
-			dev_info(nandc->dev,
-				 "submit[%u]: rx=%d tx=%d cmd=%d cmd_sgl=%d\n",
-				 submit_nr, has_rx, has_tx, has_cmd_extra,
-				 bam_txn->cmd_sgl_pos);
 
 		dev_dbg(nandc->dev, "submit: rx=%d tx=%d cmd=%d\n",
 			 has_rx, has_tx, has_cmd_extra);

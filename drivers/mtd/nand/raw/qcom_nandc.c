@@ -2111,8 +2111,6 @@ static int qcom_nandc_setup(struct qcom_nand_controller *nandc)
 	/* enable ADM or BAM DMA */
 	if (nandc->props->supports_bam) {
 		nand_ctrl = nandc_read(nandc, NAND_CTRL);
-		dev_info(nandc->dev, "nandc_setup: NAND_CTRL=0x%x BAM_MODE_EN=%d\n",
-			 nand_ctrl, !!(nand_ctrl & BAM_MODE_EN));
 
 		if (!(nand_ctrl & BAM_MODE_EN)) {
 			if (nandc->props->tz_protected_regs) {
@@ -2388,8 +2386,6 @@ static int qcom_nandc_probe(struct platform_device *pdev)
 	ret = qcom_probe_nand_devices(nandc);
 	if (ret)
 		goto err_setup;
-
-	dev_info(dev, "nandc_probe: done\n");
 
 	return 0;
 

@@ -1720,10 +1720,6 @@ static int bam_dma_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_disable_clk;
 
-	dev_info(bdev->dev, "BAM probe: clk=%pC ee=%u num_ch=%u num_ees=%u controlled_remotely=%d\n",
-		 bdev->bamclk, bdev->ee, bdev->num_channels, bdev->num_ees,
-		 bdev->controlled_remotely);
-
 	if (bdev->controlled_remotely || bdev->powered_remotely) {
 		dev_dbg(bdev->dev, "BAM TZ state: CTRL=0x%x IRQ_SRCS_MSK=0x%x\n",
 			readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),

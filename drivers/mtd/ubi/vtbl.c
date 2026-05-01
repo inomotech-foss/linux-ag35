@@ -403,12 +403,8 @@ static struct ubi_vtbl_record *process_lvol(struct ubi_device *ubi,
 			goto out_free;
 		}
 
-		ubi_msg(ubi, "reading vtbl copy LEB %d from PEB %d",
-			aeb->lnum, aeb->pnum);
 		err = ubi_io_read_data(ubi, leb[aeb->lnum], aeb->pnum, 0,
 				       ubi->vtbl_size);
-		ubi_msg(ubi, "vtbl copy LEB %d read done, err=%d",
-			aeb->lnum, err);
 		if (err == UBI_IO_BITFLIPS || mtd_is_eccerr(err))
 			/*
 			 * Scrub the PEB later. Note, -EBADMSG indicates an
@@ -428,7 +424,6 @@ static struct ubi_vtbl_record *process_lvol(struct ubi_device *ubi,
 	err = -EINVAL;
 	if (leb[0]) {
 		leb_corrupted[0] = vtbl_check(ubi, leb[0]);
-		ubi_msg(ubi, "vtbl_check leb[0]=%d", leb_corrupted[0]);
 		if (leb_corrupted[0] < 0)
 			goto out_free;
 	}
@@ -809,8 +804,6 @@ int ubi_read_volume_table(struct ubi_device *ubi, struct ubi_attach_info *ai)
 	ubi->vtbl_size = ubi->vtbl_slots * UBI_VTBL_RECORD_SIZE;
 	ubi->vtbl_size = ALIGN(ubi->vtbl_size, ubi->min_io_size);
 
-	ubi_msg(ubi, "reading volume table (vtbl_size %d)", ubi->vtbl_size);
-
 	av = ubi_find_av(ai, UBI_LAYOUT_VOLUME_ID);
 	if (!av) {
 		/*
@@ -848,21 +841,17 @@ int ubi_read_volume_table(struct ubi_device *ubi, struct ubi_attach_info *ai)
 	 * The layout volume is OK, initialize the corresponding in-RAM data
 	 * structures.
 	 */
-	ubi_msg(ubi, "init_volumes start");
 	err = init_volumes(ubi, ai, ubi->vtbl);
 	if (err)
 		goto out_free;
-	ubi_msg(ubi, "init_volumes done");
 
 	/*
 	 * Make sure that the attaching information is consistent to the
 	 * information stored in the volume table.
 	 */
-	ubi_msg(ubi, "check_attaching_info start");
 	err = check_attaching_info(ubi, ai);
 	if (err)
 		goto out_free;
-	ubi_msg(ubi, "check_attaching_info done");
 
 	return 0;
 
