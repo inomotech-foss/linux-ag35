@@ -4297,8 +4297,8 @@ static int unregister_console_locked(struct console *console)
 	 * single CPU has already completed (we are not preempted here and
 	 * this is the only CPU).
 	 */
-	if (!IS_ENABLED(CONFIG_SMP))
-		pr_debug("printk: skipping synchronize_srcu (uniprocessor)\n");
+	if (!arch_irq_work_has_interrupt())
+		pr_debug("printk: skipping synchronize_srcu (no irq_work support)\n");
 	else
 		synchronize_srcu(&console_srcu);
 
