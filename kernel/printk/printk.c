@@ -2812,7 +2812,8 @@ void console_suspend_all(void)
 	 * is guaranteed that all printing has stopped when this function
 	 * completes.
 	 */
-	synchronize_srcu(&console_srcu);
+	if (num_online_cpus() > 1)
+		synchronize_srcu(&console_srcu);
 }
 
 void console_resume_all(void)
@@ -2838,7 +2839,8 @@ void console_resume_all(void)
 		 * contexts must be able to see they are no longer suspended so
 		 * that they are guaranteed to wake up and resume printing.
 		 */
-		synchronize_srcu(&console_srcu);
+		if (num_online_cpus() > 1)
+			synchronize_srcu(&console_srcu);
 	}
 
 	printk_get_console_flush_type(&ft);
@@ -3607,7 +3609,8 @@ void console_suspend(struct console *console)
 	 * the caller can suspend the port without risk of another context
 	 * using the port.
 	 */
-	synchronize_srcu(&console_srcu);
+	if (num_online_cpus() > 1)
+		synchronize_srcu(&console_srcu);
 }
 EXPORT_SYMBOL(console_suspend);
 
@@ -3626,7 +3629,8 @@ void console_resume(struct console *console)
 	 * printing context must be able to see it is enabled so that
 	 * it is guaranteed to wake up and resume printing.
 	 */
-	synchronize_srcu(&console_srcu);
+	if (num_online_cpus() > 1)
+		synchronize_srcu(&console_srcu);
 
 	printk_get_console_flush_type(&ft);
 	if (is_nbcon && ft.nbcon_offload)
@@ -4285,7 +4289,8 @@ static int unregister_console_locked(struct console *console)
 	 * must not be able to see this console in the list so that any
 	 * exit/cleanup routines can be performed safely.
 	 */
-	synchronize_srcu(&console_srcu);
+	if (num_online_cpus() > 1)
+		synchronize_srcu(&console_srcu);
 
 	/*
 	 * With this console gone, the global flags tracking registered
@@ -4364,7 +4369,8 @@ void console_force_preferred_locked(struct console *con)
 	 * can be added to the beginning of the console list and its forward
 	 * list pointer can be re-initialized.
 	 */
-	synchronize_srcu(&console_srcu);
+	if (num_online_cpus() > 1)
+		synchronize_srcu(&console_srcu);
 
 	con->flags |= CON_CONSDEV;
 	WARN_ON(!con->device);
