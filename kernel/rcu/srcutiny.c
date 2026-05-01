@@ -255,6 +255,18 @@ void synchronize_srcu(struct srcu_struct *ssp)
 	init_rcu_head_on_stack(&rs.head);
 	init_completion(&rs.completion);
 	call_srcu(ssp, &rs.head, wakeme_after_rcu);
+	/*
+	 * On architectures where arch_irq_work_has_interrupt() is false
+	 * (e.g. UP ARM), irq_work delivery depends on the timer tick via
+	 * irq_work_tick().  If cpuidle enters a deep state that suppresses
+	 * tick delivery, the irq_work→schedule_work pipeline stalls and
+	 * wait_for_completion() blocks forever.  Bypass the irq_work
+	 * indirection by scheduling the GP work directly; this is safe
+	 * because synchronize_srcu() is always called from sleepable
+	 * process context.
+	 */
+	if (!arch_irq_work_has_interrupt() && srcu_init_done)
+		schedule_work(&ssp->srcu_work);
 	wait_for_completion(&rs.completion);
 	destroy_rcu_head_on_stack(&rs.head);
 }
