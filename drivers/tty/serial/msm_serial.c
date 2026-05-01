@@ -1147,7 +1147,13 @@ static int msm_set_baud_rate(struct uart_port *port, unsigned int baud,
 	uart_port_unlock_irqrestore(port, flags);
 
 	entry = msm_find_best_baud(port, baud, &rate);
-	dev_pm_opp_set_rate(port->dev, rate);
+	{
+		int opp_ret = dev_pm_opp_set_rate(port->dev, rate);
+		unsigned long actual = clk_get_rate(to_msm_port(port)->clk);
+
+		pr_info("msm_serial: set_baud: requested rate=%lu opp_ret=%d actual_clk=%lu divisor=%u CSR=0x%02x\n",
+			rate, opp_ret, actual, entry->divisor, entry->code);
+	}
 	baud = rate / 16 / entry->divisor;
 
 	uart_port_lock_irqsave(port, &flags);
@@ -1892,7 +1898,17 @@ static int msm_serial_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, port);
 
-	return uart_add_one_port(&msm_uart_driver, port);
+	ret = uart_add_one_port(&msm_uart_driver, port);
+	if (!ret) {
+		pr_emerg("msm_serial: port registered, console should be live\n");
+#ifdef CONFIG_DEBUG_LL
+		{
+			extern void printascii(const char *);
+			printascii("DEBUG_LL: post-register test\r\n");
+		}
+#endif
+	}
+	return ret;
 }
 
 static void msm_serial_remove(struct platform_device *pdev)
