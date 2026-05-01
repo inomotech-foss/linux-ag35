@@ -2559,6 +2559,9 @@ uart_configure_port(struct uart_driver *drv, struct uart_state *state,
 		if (port->cons && !console_is_registered(port->cons))
 			register_console(port->cons);
 
+#ifdef CONFIG_DEBUG_LL
+		{ extern void printascii(const char *); printascii("[B1]\r\n"); }
+#endif
 		/*
 		 * Power down all ports by default, except the
 		 * console if we have one.
@@ -3083,7 +3086,14 @@ static int serial_core_add_one_port(struct uart_driver *drv, struct uart_port *u
 	 * immediately after.
 	 */
 	tty_port_link_device(port, drv->tty_driver, uport->line);
+
+#ifdef CONFIG_DEBUG_LL
+	{ extern void printascii(const char *); printascii("[A]\r\n"); }
+#endif
 	uart_configure_port(drv, state, uport);
+#ifdef CONFIG_DEBUG_LL
+	{ extern void printascii(const char *); printascii("[B]\r\n"); }
+#endif
 
 	port->console = uart_console(uport);
 
@@ -3102,6 +3112,9 @@ static int serial_core_add_one_port(struct uart_driver *drv, struct uart_port *u
 	/* Ensure serdev drivers can call serdev_device_open() right away */
 	uport->flags &= ~UPF_DEAD;
 
+#ifdef CONFIG_DEBUG_LL
+	{ extern void printascii(const char *); printascii("[C]\r\n"); }
+#endif
 	/*
 	 * Register the port whether it's detected or not.  This allows
 	 * setserial to be used to alter this port's parameters.
@@ -3109,6 +3122,9 @@ static int serial_core_add_one_port(struct uart_driver *drv, struct uart_port *u
 	tty_dev = tty_port_register_device_attr_serdev(port, drv->tty_driver,
 			uport->line, uport->dev, &uport->port_dev->dev, port,
 			uport->tty_groups);
+#ifdef CONFIG_DEBUG_LL
+	{ extern void printascii(const char *); printascii("[D]\r\n"); }
+#endif
 	if (!IS_ERR(tty_dev)) {
 		device_set_wakeup_capable(tty_dev, 1);
 	} else {

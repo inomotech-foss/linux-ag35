@@ -4217,8 +4217,14 @@ void register_console(struct console *newcon)
 		}
 	}
 
+#ifdef CONFIG_DEBUG_LL
+	{ extern void printascii(const char *); printascii("[R1]\r\n"); }
+#endif
 	/* Changed console list, may require printer threads to start/stop. */
 	printk_kthreads_check_locked();
+#ifdef CONFIG_DEBUG_LL
+	{ extern void printascii(const char *); printascii("[R2]\r\n"); }
+#endif
 unlock:
 	console_list_unlock();
 }
@@ -4285,7 +4291,13 @@ static int unregister_console_locked(struct console *console)
 	 * must not be able to see this console in the list so that any
 	 * exit/cleanup routines can be performed safely.
 	 */
+#ifdef CONFIG_DEBUG_LL
+	{ extern void printascii(const char *); printascii("[S1]\r\n"); }
+#endif
 	synchronize_srcu(&console_srcu);
+#ifdef CONFIG_DEBUG_LL
+	{ extern void printascii(const char *); printascii("[S2]\r\n"); }
+#endif
 
 	/*
 	 * With this console gone, the global flags tracking registered
