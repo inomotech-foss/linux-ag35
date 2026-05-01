@@ -4292,9 +4292,13 @@ static int unregister_console_locked(struct console *console)
 	 * exit/cleanup routines can be performed safely.
 	 */
 #ifdef CONFIG_DEBUG_LL
-	{ extern void printascii(const char *); printascii("[S1]\r\n"); }
+	{
+		extern void printascii(const char *);
+		printascii("[S1] skipping synchronize_srcu\r\n");
+	}
 #endif
-	synchronize_srcu(&console_srcu);
+	/* HACK: skip synchronize_srcu to test boot continuation */
+	/* synchronize_srcu(&console_srcu); */
 #ifdef CONFIG_DEBUG_LL
 	{ extern void printascii(const char *); printascii("[S2]\r\n"); }
 #endif
