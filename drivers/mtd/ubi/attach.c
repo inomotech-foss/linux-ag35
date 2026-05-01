@@ -1357,15 +1357,7 @@ static void destroy_ai(struct ubi_attach_info *ai)
 		}
 	}
 
-	/*
-	 * kmem_cache_destroy() calls synchronize_rcu() / rcu_barrier()
-	 * which hangs on single-CPU SMP systems for the same reason as
-	 * synchronize_srcu() (irq_work self-IPI doesn't work).  Skip it;
-	 * all slab objects have been freed above, so we only leak the
-	 * empty cache descriptor.
-	 */
-	if (num_online_cpus() > 1)
-		kmem_cache_destroy(ai->aeb_slab_cache);
+	kmem_cache_destroy(ai->aeb_slab_cache);
 	kfree(ai);
 }
 
