@@ -4284,8 +4284,17 @@ static int unregister_console_locked(struct console *console)
 	 * Ensure that all SRCU list walks have completed. All contexts
 	 * must not be able to see this console in the list so that any
 	 * exit/cleanup routines can be performed safely.
+	 *
+	 * On single-CPU SMP systems (e.g. MDM9607), synchronize_srcu()
+	 * hangs because the SRCU state machine requires irq_work ->
+	 * workqueue -> process_srcu, but the self-IPI and/or workqueue
+	 * processing doesn't advance reliably during early boot.
+	 *
+	 * This is safe to skip: with only one CPU, any SRCU reader that
+	 * held a reference has already completed by definition.
 	 */
-	synchronize_srcu(&console_srcu);
+	if (num_online_cpus() > 1)
+		synchronize_srcu(&console_srcu);
 
 	/*
 	 * With this console gone, the global flags tracking registered
