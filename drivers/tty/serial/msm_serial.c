@@ -1613,6 +1613,14 @@ static inline struct uart_port *msm_get_port_from_line(unsigned int line)
 }
 
 #ifdef CONFIG_SERIAL_MSM_CONSOLE
+/*
+ * Once the real console port is set up, earlycon must use it instead of its
+ * own port struct.  Both map to the same physical UART but carry independent
+ * spinlocks; using different locks lets them corrupt the UARTDM TX count
+ * state machine during the overlap window when both consoles are active.
+ */
+static struct uart_port *msm_console_port;
+
 static void __msm_console_write(struct uart_port *port, const char *s,
 				unsigned int count, bool is_uartdm)
 {
@@ -1714,6 +1722,9 @@ static int msm_console_setup(struct console *co, char *options)
 	if (unlikely(!port->membase))
 		return -ENXIO;
 
+	/* Publish the real port so earlycon shares our spinlock from now on */
+	WRITE_ONCE(msm_console_port, port);
+
 	msm_init_clock(port);
 
 	if (options)
@@ -1728,8 +1739,12 @@ static void
 msm_serial_early_write(struct console *con, const char *s, unsigned n)
 {
 	struct earlycon_device *dev = con->data;
+	struct uart_port *port = READ_ONCE(msm_console_port);
 
-	__msm_console_write(&dev->port, s, n, false);
+	if (!port)
+		port = &dev->port;
+
+	__msm_console_write(port, s, n, false);
 }
 
 static int __init
@@ -1748,8 +1763,12 @@ static void
 msm_serial_early_write_dm(struct console *con, const char *s, unsigned n)
 {
 	struct earlycon_device *dev = con->data;
+	struct uart_port *port = READ_ONCE(msm_console_port);
 
-	__msm_console_write(&dev->port, s, n, true);
+	if (!port)
+		port = &dev->port;
+
+	__msm_console_write(port, s, n, true);
 }
 
 static int __init
