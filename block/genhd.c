@@ -493,7 +493,9 @@ static int __add_disk(struct device *parent, struct gendisk *disk,
 		device_set_node(ddev, fwnode);
 	if (!(disk->flags & GENHD_FL_HIDDEN))
 		ddev->devt = MKDEV(disk->major, disk->first_minor);
+	pr_info("__add_disk(%s): calling device_add\n", disk->disk_name);
 	ret = device_add(ddev);
+	pr_info("__add_disk(%s): device_add returned %d\n", disk->disk_name, ret);
 	if (ret)
 		goto out_free_ext_minor;
 
@@ -525,11 +527,14 @@ static int __add_disk(struct device *parent, struct gendisk *disk,
 		goto out_put_holder_dir;
 	}
 
+	pr_info("__add_disk(%s): calling blk_register_queue\n", disk->disk_name);
 	ret = blk_register_queue(disk);
+	pr_info("__add_disk(%s): blk_register_queue returned %d\n", disk->disk_name, ret);
 	if (ret)
 		goto out_put_slave_dir;
 
 	if (!(disk->flags & GENHD_FL_HIDDEN)) {
+		pr_info("__add_disk(%s): calling bdi_register\n", disk->disk_name);
 		ret = bdi_register(disk->bdi, "%u:%u",
 				   disk->major, disk->first_minor);
 		if (ret)
