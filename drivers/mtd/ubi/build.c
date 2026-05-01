@@ -1270,10 +1270,15 @@ static int __init ubi_init_attach(void)
 {
 	int err, i, k;
 
+	pr_info("UBI: ubi_init_attach: mtd_devs=%d\n", mtd_devs);
+
 	/* Attach MTD devices */
 	for (i = 0; i < mtd_devs; i++) {
 		struct mtd_dev_param *p = &mtd_dev_param[i];
 		struct mtd_info *mtd;
+
+		pr_info("UBI: attaching mtd_dev_param[%d] name=%s ubi_num=%d\n",
+			i, p->name, p->ubi_num);
 
 		cond_resched();
 
@@ -1288,12 +1293,17 @@ static int __init ubi_init_attach(void)
 			continue;
 		}
 
+		pr_info("UBI: opened mtd %s (index %d), attaching...\n",
+			p->name, mtd->index);
+
 		mutex_lock(&ubi_devices_mutex);
 		err = ubi_attach_mtd_dev(mtd, p->ubi_num,
 					 p->vid_hdr_offs, p->max_beb_per1024,
 					 p->enable_fm == 0,
 					 p->need_resv_pool != 0);
 		mutex_unlock(&ubi_devices_mutex);
+
+		pr_info("UBI: ubi_attach_mtd_dev returned %d\n", err);
 		if (err < 0) {
 			pr_err("UBI error: cannot attach mtd%d\n",
 			       mtd->index);
