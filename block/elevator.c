@@ -659,16 +659,13 @@ static int elevator_change(struct request_queue *q, struct elv_change_ctx *ctx)
 	lockdep_assert_held(&set->update_nr_hwq_lock);
 
 	if (strncmp(ctx->name, "none", 4)) {
-		pr_info("elevator_change: blk_mq_alloc_sched_res\n");
 		ret = blk_mq_alloc_sched_res(q, ctx->type, &ctx->res,
 				set->nr_hw_queues);
 		if (ret)
 			return ret;
 	}
 
-	pr_info("elevator_change: blk_mq_freeze_queue\n");
 	memflags = blk_mq_freeze_queue(q);
-	pr_info("elevator_change: blk_mq_freeze_queue done\n");
 	/*
 	 * May be called before adding disk, when there isn't any FS I/O,
 	 * so freezing queue plus canceling dispatch work is enough to
@@ -684,7 +681,6 @@ static int elevator_change(struct request_queue *q, struct elv_change_ctx *ctx)
 		ret = elevator_switch(q, ctx);
 	mutex_unlock(&q->elevator_lock);
 	blk_mq_unfreeze_queue(q, memflags);
-	pr_info("elevator_change: elevator_switch done, ret=%d\n", ret);
 	if (!ret)
 		ret = elevator_change_done(q, ctx);
 

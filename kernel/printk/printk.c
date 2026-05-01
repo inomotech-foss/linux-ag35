@@ -4217,14 +4217,8 @@ void register_console(struct console *newcon)
 		}
 	}
 
-#ifdef CONFIG_DEBUG_LL
-	{ extern void printascii(const char *); printascii("[R1]\r\n"); }
-#endif
 	/* Changed console list, may require printer threads to start/stop. */
 	printk_kthreads_check_locked();
-#ifdef CONFIG_DEBUG_LL
-	{ extern void printascii(const char *); printascii("[R2]\r\n"); }
-#endif
 unlock:
 	console_list_unlock();
 }
@@ -4290,18 +4284,23 @@ static int unregister_console_locked(struct console *console)
 	 * Ensure that all SRCU list walks have completed. All contexts
 	 * must not be able to see this console in the list so that any
 	 * exit/cleanup routines can be performed safely.
+	 *
+	 * On uniprocessor ARM, arch_irq_work_has_interrupt() returns false
+	 * (is_smp()), so irq_work cannot self-IPI.  The SRCU grace period
+	 * state machine relies on irq_work -> workqueue to advance, but
+	 * wait_for_completion() in synchronize_srcu() sleeps and the
+	 * irq_work never gets processed in time, causing a permanent hang.
+	 *
+	 * This is safe to skip here: the console has already been removed
+	 * from the list above (hlist_del_init_rcu), so no new SRCU reader
+	 * can acquire a reference to it.  Any pre-existing reader on this
+	 * single CPU has already completed (we are not preempted here and
+	 * this is the only CPU).
 	 */
-#ifdef CONFIG_DEBUG_LL
-	{
-		extern void printascii(const char *);
-		printascii("[S1] skipping synchronize_srcu\r\n");
-	}
-#endif
-	/* HACK: skip synchronize_srcu to test boot continuation */
-	/* synchronize_srcu(&console_srcu); */
-#ifdef CONFIG_DEBUG_LL
-	{ extern void printascii(const char *); printascii("[S2]\r\n"); }
-#endif
+	if (!IS_ENABLED(CONFIG_SMP))
+		pr_debug("printk: skipping synchronize_srcu (uniprocessor)\n");
+	else
+		synchronize_srcu(&console_srcu);
 
 	/*
 	 * With this console gone, the global flags tracking registered

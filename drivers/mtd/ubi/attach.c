@@ -1365,7 +1365,7 @@ static void destroy_ai(struct ubi_attach_info *ai)
 	 * boot. All slab objects have already been freed above, so we
 	 * only leak the empty cache descriptor (~200 bytes).
 	 */
-	pr_info("UBI: skipping kmem_cache_destroy (workaround for boot hang)\n");
+	pr_debug("UBI: skipping kmem_cache_destroy (workaround for boot hang)\n");
 	kfree(ai);
 }
 

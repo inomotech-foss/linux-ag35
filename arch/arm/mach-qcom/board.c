@@ -194,26 +194,18 @@ postcore_initcall(qcom_panic_notifier_init);
  * Remove once boot is stable.
  */
 static struct timer_list heartbeat_timer;
-static unsigned int heartbeat_count;
 static void __iomem *hb_wdt_base;
 
 static void heartbeat_fn(struct timer_list *t)
 {
-	u32 sts = 0, en = 0;
-
-	if (hb_wdt_base) {
-		sts = readl(hb_wdt_base + 0x0C);	/* WDT_STS */
-		en = readl(hb_wdt_base + 0x08);		/* WDT_EN */
+	if (hb_wdt_base)
 		writel(1, hb_wdt_base + WDT_RST);	/* pet the WDT */
-	}
-	pr_info("hb #%u WDT_STS=%#x EN=%#x\n", ++heartbeat_count, sts, en);
 	mod_timer(t, jiffies + msecs_to_jiffies(500));
 }
 
 static int __init heartbeat_init(void)
 {
 	hb_wdt_base = ioremap(KPSS_WDT_PHYS, KPSS_WDT_SIZE);
-	pr_info("heartbeat: starting 500ms debug heartbeat (with WDT pet)\n");
 	timer_setup(&heartbeat_timer, heartbeat_fn, 0);
 	mod_timer(&heartbeat_timer, jiffies + msecs_to_jiffies(500));
 	return 0;
