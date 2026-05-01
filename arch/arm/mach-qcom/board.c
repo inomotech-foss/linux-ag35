@@ -218,4 +218,4 @@ static int __init heartbeat_init(void)
 	mod_timer(&heartbeat_timer, jiffies + msecs_to_jiffies(500));
 	return 0;
 }
-late_initcall(heartbeat_init);
+device_initcall(heartbeat_init);

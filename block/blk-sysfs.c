@@ -917,15 +917,18 @@ int blk_register_queue(struct gendisk *disk)
 	unsigned int memflags;
 	int ret;
 
+	pr_info("blk_register_queue(%s): kobject_add\n", disk->disk_name);
 	ret = kobject_add(&disk->queue_kobj, &disk_to_dev(disk)->kobj, "queue");
 	if (ret < 0)
 		return ret;
 
 	if (queue_is_mq(q)) {
+		pr_info("blk_register_queue(%s): blk_mq_sysfs_register\n", disk->disk_name);
 		ret = blk_mq_sysfs_register(disk);
 		if (ret)
 			goto out_del_queue_kobj;
 	}
+	pr_info("blk_register_queue(%s): sysfs_lock\n", disk->disk_name);
 	mutex_lock(&q->sysfs_lock);
 
 	memflags = blk_debugfs_lock(q);
@@ -942,13 +945,18 @@ int blk_register_queue(struct gendisk *disk)
 	if (ret)
 		goto out_unregister_ia_ranges;
 
-	if (queue_is_mq(q))
+	if (queue_is_mq(q)) {
+		pr_info("blk_register_queue(%s): elevator_set_default\n", disk->disk_name);
 		elevator_set_default(q);
+		pr_info("blk_register_queue(%s): elevator_set_default done\n", disk->disk_name);
+	}
 
 	blk_queue_flag_set(QUEUE_FLAG_REGISTERED, q);
+	pr_info("blk_register_queue(%s): wbt_init_enable_default\n", disk->disk_name);
 	wbt_init_enable_default(disk);
 
 	/* Now everything is ready and send out KOBJ_ADD uevent */
+	pr_info("blk_register_queue(%s): kobject_uevent\n", disk->disk_name);
 	kobject_uevent(&disk->queue_kobj, KOBJ_ADD);
 	if (q->elevator)
 		kobject_uevent(&q->elevator->kobj, KOBJ_ADD);
@@ -964,6 +972,7 @@ int blk_register_queue(struct gendisk *disk)
 	 * request_queues for non-existent devices never get registered.
 	 */
 	blk_queue_flag_set(QUEUE_FLAG_INIT_DONE, q);
+	pr_info("blk_register_queue(%s): percpu_ref_switch_to_percpu\n", disk->disk_name);
 	percpu_ref_switch_to_percpu(&q->q_usage_counter);
 
 	return ret;
