@@ -1601,8 +1601,30 @@ static int q6v5_mpss_load(struct q6v5 *qproc)
 		}
 
 		if (phdr->p_memsz > phdr->p_filesz) {
-			memset(ptr + phdr->p_filesz, 0,
-			       phdr->p_memsz - phdr->p_filesz);
+			phys_addr_t seg_start = qproc->mpss_phys + offset + phdr->p_filesz;
+			size_t bss_size = phdr->p_memsz - phdr->p_filesz;
+			phys_addr_t seg_end = seg_start + bss_size;
+			phys_addr_t mba_start = qproc->mba_phys;
+			phys_addr_t mba_end = mba_start + qproc->mba_size;
+
+			/*
+			 * Skip zeroing the MBA region - MBA is still running
+			 * on the Q6 authenticating segments at this point.
+			 */
+			if (seg_start < mba_end && seg_end > mba_start) {
+				/* BSS overlaps MBA - zero before and after */
+				if (seg_start < mba_start)
+					memset(ptr + phdr->p_filesz, 0,
+					       mba_start - seg_start);
+				if (seg_end > mba_end)
+					memset(ptr + phdr->p_filesz + (mba_end - seg_start), 0,
+					       seg_end - mba_end);
+				dev_info(qproc->dev,
+					 "mpss_load: seg[%d] BSS skipped MBA region %pa-%pa\n",
+					 i, &mba_start, &mba_end);
+			} else {
+				memset(ptr + phdr->p_filesz, 0, bss_size);
+			}
 		}
 		memunmap(ptr);
 		size += phdr->p_memsz;
