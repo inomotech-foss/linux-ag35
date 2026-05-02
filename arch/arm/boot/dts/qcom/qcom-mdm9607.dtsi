@@ -89,11 +89,15 @@
 	};
 
 	/*
-	 * CP15-based ARM arch timer.  Disabled on MDM9607: the virtual
-	 * timer PPI (GIC_PPI 4) is not routed to the GIC by TrustZone,
-	 * so its interrupt never fires.  The downstream Quectel kernel
-	 * does not have this node at all — it uses only the MMIO frame
-	 * timer (arm,armv7-timer-mem) which has working SPI interrupts.
+	 * CP15-based ARM arch timer.  On MDM9607 the virtual timer PPI
+	 * (GIC_PPI 4) is not routed to the GIC by TrustZone, so the
+	 * clockevent it registers never fires.  We keep the node enabled
+	 * because timer_probe() needs it for the early sched_clock and
+	 * arch_counter clocksource (reading CNTVCT via CP15 works fine).
+	 *
+	 * The MMIO frame timer (arm,armv7-timer-mem) is a platform driver
+	 * that probes later and overrides the broken clockevent with a
+	 * working SPI-based one (rating 460 > cp15's 450).
 	 */
 	timer {
 		compatible = "arm,armv7-timer";
@@ -103,7 +107,6 @@
 			     <GIC_PPI 1 (GIC_CPU_MASK_SIMPLE(1) | IRQ_TYPE_LEVEL_LOW)>;
 		clock-frequency = <19200000>;
 		always-on;
-		status = "disabled";
 	};
 
 	reserved-memory {
