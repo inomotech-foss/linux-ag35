@@ -1705,6 +1705,9 @@ static void qcom_q6v5_dump_segment(struct rproc *rproc,
 static void q6v5_dump_modem_state(struct q6v5 *qproc, const char *context)
 {
 	u32 rmb_status, rmb_pbl, rmb_mba_mss, rmb_code_start, rmb_code_len;
+	u32 halt_q6_req, halt_q6_ack, halt_q6_idle;
+	u32 halt_modem_req, halt_modem_ack, halt_modem_idle;
+	u32 halt_nc_req, halt_nc_ack, halt_nc_idle;
 	size_t len;
 	char *msg;
 
@@ -1729,6 +1732,23 @@ static void q6v5_dump_modem_state(struct q6v5 *qproc, const char *context)
 		 readl(qproc->reg_base + QDSP6SS_RESET_REG),
 		 readl(qproc->reg_base + QDSP6SS_PWR_CTL_REG),
 		 readl(qproc->reg_base + QDSP6SS_GFMUX_CTL_REG));
+
+	/* Read AXI halt status — if modem is hung on a bus transaction,
+	 * the halt registers will show it can't go idle.
+	 */
+	regmap_read(qproc->halt_map, qproc->halt_q6 + AXI_HALTREQ_REG, &halt_q6_req);
+	regmap_read(qproc->halt_map, qproc->halt_q6 + AXI_HALTACK_REG, &halt_q6_ack);
+	regmap_read(qproc->halt_map, qproc->halt_q6 + AXI_IDLE_REG, &halt_q6_idle);
+	regmap_read(qproc->halt_map, qproc->halt_modem + AXI_HALTREQ_REG, &halt_modem_req);
+	regmap_read(qproc->halt_map, qproc->halt_modem + AXI_HALTACK_REG, &halt_modem_ack);
+	regmap_read(qproc->halt_map, qproc->halt_modem + AXI_IDLE_REG, &halt_modem_idle);
+	regmap_read(qproc->halt_map, qproc->halt_nc + AXI_HALTREQ_REG, &halt_nc_req);
+	regmap_read(qproc->halt_map, qproc->halt_nc + AXI_HALTACK_REG, &halt_nc_ack);
+	regmap_read(qproc->halt_map, qproc->halt_nc + AXI_IDLE_REG, &halt_nc_idle);
+	dev_info(qproc->dev, "[%s] AXI HALT: q6[req=%x ack=%x idle=%x] modem[req=%x ack=%x idle=%x] nc[req=%x ack=%x idle=%x]\n",
+		 context, halt_q6_req, halt_q6_ack, halt_q6_idle,
+		 halt_modem_req, halt_modem_ack, halt_modem_idle,
+		 halt_nc_req, halt_nc_ack, halt_nc_idle);
 }
 
 static int q6v5_start(struct rproc *rproc)
@@ -1737,6 +1757,20 @@ static int q6v5_start(struct rproc *rproc)
 	int xfermemop_ret;
 	int ret;
 	int i;
+
+	/* Verify SMSM/SMEM state before modem boot */
+	{
+		u32 *smsm_state;
+		size_t smsm_size;
+
+		smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 403, &smsm_size);
+		if (IS_ERR(smsm_state))
+			dev_warn(qproc->dev, "pre-start: SMSM state SMEM item 403 not found (err=%ld)\n",
+				 PTR_ERR(smsm_state));
+		else
+			dev_info(qproc->dev, "pre-start: SMSM state[0] (APPS)=0x%x size=%zu\n",
+				 smsm_state[0], smsm_size);
+	}
 
 	ret = q6v5_mba_load(qproc);
 	if (ret)
