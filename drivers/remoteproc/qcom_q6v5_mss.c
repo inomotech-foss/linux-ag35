@@ -1758,11 +1758,10 @@ static int q6v5_start(struct rproc *rproc)
 	int ret;
 	int i;
 
-	/* Verify SMSM/SMEM state before modem boot — the modem firmware
-	 * polls APPS SMSM for INIT|SMDINIT|RPCINIT|PROC_AWAKE and will
-	 * trigger its watchdog if these bits are not set within ~2 seconds.
-	 * If the SMSM driver failed to probe (e.g. IRQ resolution failure),
-	 * force-set these bits directly in SMEM as a fallback.
+	/* Verify SMSM/SMEM state before modem boot — the SMSM driver should
+	 * have set PROC_AWAKE at probe time.  INIT and SMDINIT will be set
+	 * reactively via the SMSM IRQ handler handshake once the modem boots
+	 * and signals its own INIT.
 	 *
 	 * SMEM item 85 = SMEM_SMSM_SHARED_STATE — array of u32, index 0 = APPS.
 	 * SMEM item 333 = SMEM_SMSM_CPU_INTR_MASK — interrupt subscription masks.
@@ -1771,7 +1770,6 @@ static int q6v5_start(struct rproc *rproc)
 	{
 		u32 *smsm_state;
 		size_t smsm_size;
-#define SMSM_APPS_REQUIRED (BIT(0) | BIT(3) | BIT(5) | BIT(12))
 
 		/* Ensure interrupt mask item exists (modem reads this) */
 		ret = qcom_smem_alloc(QCOM_SMEM_HOST_ANY, 333, 8 * 3 * sizeof(u32));
@@ -1781,7 +1779,7 @@ static int q6v5_start(struct rproc *rproc)
 		smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85, &smsm_size);
 		if (IS_ERR(smsm_state)) {
 			/* Try to allocate it — bootloader usually does this */
-			ret = qcom_smem_alloc(QCOM_SMEM_HOST_ANY, 85, 8);
+			ret = qcom_smem_alloc(QCOM_SMEM_HOST_ANY, 85, 8 * sizeof(u32));
 			if (ret && ret != -EEXIST)
 				dev_warn(qproc->dev, "pre-start: failed to alloc SMSM item 85 (err=%d)\n", ret);
 			smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85, &smsm_size);
@@ -1793,15 +1791,15 @@ static int q6v5_start(struct rproc *rproc)
 			u32 val = readl(smsm_state);
 			dev_info(qproc->dev, "pre-start: SMSM state[0] (APPS)=0x%x size=%zu\n",
 				 val, smsm_size);
-			if ((val & SMSM_APPS_REQUIRED) != SMSM_APPS_REQUIRED) {
-				val |= SMSM_APPS_REQUIRED;
+			if (!(val & BIT(12))) {
+				/* PROC_AWAKE not set — SMSM driver didn't probe? Force it. */
+				val |= BIT(12);
 				writel(val, smsm_state);
-				wmb(); /* ensure SMEM write is visible to Q6 */
-				dev_warn(qproc->dev, "pre-start: SMSM APPS bits were missing, forced to 0x%x (readback=0x%x)\n",
-					 val, readl(smsm_state));
+				wmb();
+				dev_warn(qproc->dev, "pre-start: SMSM PROC_AWAKE was missing, forced (readback=0x%x)\n",
+					 readl(smsm_state));
 			}
 		}
-#undef SMSM_APPS_REQUIRED
 	}
 
 	ret = q6v5_mba_load(qproc);

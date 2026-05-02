@@ -51,6 +51,15 @@
 #define SMEM_SMSM_SIZE_INFO		419
 
 /*
+ * SMSM state bits used in the handshake protocol.
+ */
+#define SMSM_INIT		BIT(0)
+#define SMSM_SMDINIT		BIT(3)
+#define SMSM_RPCINIT		BIT(5)
+#define SMSM_RESET		BIT(6)
+#define SMSM_PROC_AWAKE		BIT(12)
+
+/*
  * Default sizes, in case SMEM_SMSM_SIZE_INFO is not found.
  */
 #define SMSM_DEFAULT_NUM_ENTRIES	8
@@ -207,10 +216,18 @@ static const struct qcom_smem_state_ops smsm_state_ops = {
  *
  * This function cascades an incoming interrupt from a remote system, based on
  * the state bits and configuration.
+ *
+ * Additionally, it implements the SMSM handshake protocol required by Qualcomm
+ * modem firmware: when a remote processor sets SMSM_INIT or SMSM_SMDINIT in
+ * its state, the local host mirrors those bits back into its own state.  This
+ * mirror-and-kick sequence is how the downstream kernel's smsm_irq_handler()
+ * works — the modem sets INIT, APPS mirrors INIT (triggering an IPC kick back
+ * to the modem), and the modem proceeds with its initialization.
  */
 static irqreturn_t smsm_intr(int irq, void *data)
 {
 	struct smsm_entry *entry = data;
+	struct qcom_smsm *smsm = entry->smsm;
 	unsigned i;
 	int irq_pin;
 	u32 changed;
@@ -218,6 +235,19 @@ static irqreturn_t smsm_intr(int irq, void *data)
 
 	val = readl(entry->remote_state);
 	changed = val ^ xchg(&entry->last_value, val);
+
+	/*
+	 * Mirror INIT/SMDINIT from remote into local APPS state.
+	 * This matches the downstream smsm_irq_handler() handshake:
+	 *   if (remote & SMSM_INIT) apps |= SMSM_INIT;
+	 *   if (remote & SMSM_SMDINIT) apps |= SMSM_SMDINIT;
+	 * smsm_update_bits() will send the IPC kick to the remote
+	 * processor if its subscription mask has matching bits set.
+	 */
+	if (val & SMSM_INIT)
+		smsm_update_bits(smsm, SMSM_INIT, SMSM_INIT);
+	if (val & SMSM_SMDINIT)
+		smsm_update_bits(smsm, SMSM_SMDINIT, SMSM_SMDINIT);
 
 	for_each_set_bit(i, entry->irq_enabled, 32) {
 		if (!(changed & BIT(i)))
@@ -634,6 +664,18 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 		entry->subscription = intr_mask + id * smsm->num_hosts;
 		writel(0, entry->subscription + smsm->local_host);
 
+		/*
+		 * Subscribe to RESET|INIT|SMDINIT from remote processors.
+		 * The downstream kernel explicitly sets this legacy mask so
+		 * that remote processors (modem) know to kick APPS when they
+		 * change those bits.  Without this subscription, the modem
+		 * won't send an IPC to APPS after setting its INIT bit, and
+		 * the handshake in smsm_intr() will never trigger.
+		 */
+		if (id != smsm->local_host)
+			writel(SMSM_RESET | SMSM_INIT | SMSM_SMDINIT,
+			       entry->subscription + smsm->local_host);
+
 		ret = smsm_inbound_entry(smsm, entry, node);
 		if (ret < 0)
 			goto unwind_interfaces;
@@ -643,23 +685,23 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 	of_node_put(local_node);
 
 	/*
-	 * Signal to all remote processors that APPS is alive and SMD is
-	 * ready.  The modem firmware (loaded by SBL1, not by Linux
-	 * remoteproc) polls these bits and will trigger its watchdog if
-	 * APPS doesn't assert them within a few seconds of POR.
+	 * Signal to all remote processors that APPS is alive.
 	 *
-	 * Downstream kernels set these bits from the SMSM IRQ handler
-	 * when mirroring the modem's state.  The upstream driver has no
-	 * such mirroring, so set them explicitly here.
+	 * Downstream kernels only set SMSM_PROC_AWAKE here; SMSM_INIT and
+	 * SMSM_SMDINIT are set reactively by the SMSM IRQ handler when the
+	 * modem mirrors them (see smsm_intr()).  SMSM_RPCINIT is never set
+	 * in downstream — there is no RPC layer.
+	 *
+	 * The modem expects the following handshake:
+	 *   1. APPS sets PROC_AWAKE
+	 *   2. Modem boots, sets INIT in MODEM_STATE, kicks APPS
+	 *   3. APPS mirrors INIT into APPS_STATE, kicks modem back
+	 *   4. Modem sees APPS has INIT, sets SMDINIT, kicks APPS
+	 *   5. APPS mirrors SMDINIT into APPS_STATE, kicks modem back
+	 *   6. Modem proceeds with full initialization
 	 */
-#define SMSM_INIT	BIT(0)
-#define SMSM_SMDINIT	BIT(3)
-#define SMSM_RPCINIT	BIT(5)
-#define SMSM_PROC_AWAKE	BIT(12)
-	smsm_update_bits(smsm,
-			 SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT | SMSM_PROC_AWAKE,
-			 SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT | SMSM_PROC_AWAKE);
-	dev_info(&pdev->dev, "APPS SMSM state set: INIT|SMDINIT|RPCINIT|PROC_AWAKE\n");
+	smsm_update_bits(smsm, SMSM_PROC_AWAKE, SMSM_PROC_AWAKE);
+	dev_info(&pdev->dev, "APPS SMSM state set: PROC_AWAKE (handshake mirroring enabled)\n");
 
 	return 0;
 
