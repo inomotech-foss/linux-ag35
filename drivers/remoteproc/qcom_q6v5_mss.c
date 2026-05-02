@@ -1758,18 +1758,41 @@ static int q6v5_start(struct rproc *rproc)
 	int ret;
 	int i;
 
-	/* Verify SMSM/SMEM state before modem boot */
+	/* Verify SMSM/SMEM state before modem boot — the modem firmware
+	 * polls APPS SMSM for INIT|SMDINIT|RPCINIT|PROC_AWAKE and will
+	 * trigger its watchdog if these bits are not set within ~2 seconds.
+	 * If the SMSM driver failed to probe (e.g. IRQ resolution failure),
+	 * force-set these bits directly in SMEM as a fallback.
+	 *
+	 * SMEM item 85 = SMEM_SMSM_SHARED_STATE — array of u32, index 0 = APPS.
+	 */
 	{
 		u32 *smsm_state;
 		size_t smsm_size;
+#define SMSM_APPS_REQUIRED (BIT(0) | BIT(3) | BIT(5) | BIT(12))
 
-		smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 403, &smsm_size);
-		if (IS_ERR(smsm_state))
-			dev_warn(qproc->dev, "pre-start: SMSM state SMEM item 403 not found (err=%ld)\n",
-				 PTR_ERR(smsm_state));
-		else
+		smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85, &smsm_size);
+		if (IS_ERR(smsm_state)) {
+			/* Try to allocate it — bootloader usually does this */
+			ret = qcom_smem_alloc(QCOM_SMEM_HOST_ANY, 85, 8);
+			if (ret && ret != -EEXIST)
+				dev_warn(qproc->dev, "pre-start: failed to alloc SMSM item 85 (err=%d)\n", ret);
+			smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85, &smsm_size);
+		}
+		if (IS_ERR(smsm_state)) {
+			dev_err(qproc->dev, "pre-start: SMSM state unavailable (err=%ld), modem will likely watchdog!\n",
+				PTR_ERR(smsm_state));
+		} else {
 			dev_info(qproc->dev, "pre-start: SMSM state[0] (APPS)=0x%x size=%zu\n",
 				 smsm_state[0], smsm_size);
+			if ((smsm_state[0] & SMSM_APPS_REQUIRED) != SMSM_APPS_REQUIRED) {
+				smsm_state[0] |= SMSM_APPS_REQUIRED;
+				wmb(); /* ensure SMEM write is visible to Q6 */
+				dev_warn(qproc->dev, "pre-start: SMSM APPS bits were missing, forced to 0x%x\n",
+					 smsm_state[0]);
+			}
+		}
+#undef SMSM_APPS_REQUIRED
 	}
 
 	ret = q6v5_mba_load(qproc);
