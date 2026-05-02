@@ -1532,6 +1532,8 @@ static int q6v5_mpss_load(struct q6v5 *qproc)
 
 	mpss_reloc = relocate ? min_addr : qproc->mpss_phys;
 	qproc->mpss_reloc = mpss_reloc;
+	dev_info(qproc->dev, "mpss_load: reloc=%d mpss_reloc=0x%pa mpss_phys=0x%pa segments=%d\n",
+		 relocate, &mpss_reloc, &qproc->mpss_phys, ehdr->e_phnum);
 	/* Load firmware segments */
 	for (i = 0; i < ehdr->e_phnum; i++) {
 		phdr = &phdrs[i];
@@ -1608,18 +1610,24 @@ static int q6v5_mpss_load(struct q6v5 *qproc)
 		code_length = readl(qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
 		if (!code_length) {
 			boot_addr = relocate ? qproc->mpss_phys : min_addr;
+			dev_info(qproc->dev, "mpss_load: seg[%d] FIRST - boot_addr=0x%pa CMD_LOAD_READY\n",
+				 i, &boot_addr);
 			writel(boot_addr, qproc->rmb_base + RMB_PMI_CODE_START_REG);
 			writel(RMB_CMD_LOAD_READY, qproc->rmb_base + RMB_MBA_COMMAND_REG);
 		}
 		writel(size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
 
 		ret = readl(qproc->rmb_base + RMB_MBA_STATUS_REG);
+		dev_info(qproc->dev, "mpss_load: seg[%d] paddr=0x%08x filesz=0x%x memsz=0x%x total=0x%zx mba_sts=0x%x\n",
+			 i, phdr->p_paddr, phdr->p_filesz, phdr->p_memsz, size, ret);
 		if (ret < 0) {
 			dev_err(qproc->dev, "MPSS authentication failed: %d\n",
 				ret);
 			goto release_firmware;
 		}
 	}
+
+	dev_info(qproc->dev, "mpss_load: all segments loaded, total_size=0x%zx, transferring ownership\n", size);
 
 	/* Transfer ownership of modem ddr region to q6 */
 	ret = q6v5_xfer_mem_ownership(qproc, &qproc->mpss_perm, false, true,
@@ -1631,11 +1639,14 @@ static int q6v5_mpss_load(struct q6v5 *qproc)
 		goto release_firmware;
 	}
 
+	dev_info(qproc->dev, "mpss_load: waiting for AUTH_COMPLETE (mba_sts=0x%x)...\n",
+		 readl(qproc->rmb_base + RMB_MBA_STATUS_REG));
 	ret = q6v5_rmb_mba_wait(qproc, RMB_MBA_AUTH_COMPLETE, 10000);
 	if (ret == -ETIMEDOUT)
 		dev_err(qproc->dev, "MPSS authentication timed out\n");
 	else if (ret < 0)
 		dev_err(qproc->dev, "MPSS authentication failed: %d\n", ret);
+	dev_info(qproc->dev, "mpss_load: auth wait returned %d\n", ret);
 
 	qcom_pil_info_store("modem", qproc->mpss_phys, qproc->mpss_size);
 
