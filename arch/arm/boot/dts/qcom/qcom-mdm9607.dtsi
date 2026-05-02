@@ -110,13 +110,13 @@
 		#size-cells = <1>;
 		ranges;
 
-		mpss_mem: memory@82c00000 {
-			reg = <0x82c00000 0x5000000>;
+		mba_mem: memory@82b00000 {
+			reg = <0x82b00000 0x100000>;
 			no-map;
 		};
 
-		mba_mem: memory@87900000 {
-			reg = <0x87900000 0x100000>;
+		mpss_mem: memory@82c00000 {
+			reg = <0x82c00000 0x5000000>;
 			no-map;
 		};
 
