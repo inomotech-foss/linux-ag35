@@ -111,7 +111,7 @@
 		ranges;
 
 		mpss_mem: memory@82a00000 {
-			reg = <0x82a00000 0x5800000>;
+			reg = <0x82a00000 0x5200000>;
 			no-map;
 		};
 
@@ -224,18 +224,10 @@
 		};
 
 		/*
-		 * Modem SMD edge — the modem firmware is loaded by SBL1
-		 * (not Linux remoteproc) and is running from POR.  This
-		 * edge must be registered so the modem can communicate
-		 * with APPS.
+		 * Modem SMD edge is defined inside the remoteproc node
+		 * (remoteproc_mss) since the modem is managed by Linux
+		 * remoteproc, not running from POR.
 		 */
-		modem {
-			interrupts = <GIC_SPI 25 IRQ_TYPE_EDGE_RISING>;
-			mboxes = <&apcs 12>;
-			qcom,ipc = <&apcs 8 12>;
-			qcom,smd-edge = <0>;
-			label = "modem";
-		};
 	};
 
 	smem {
