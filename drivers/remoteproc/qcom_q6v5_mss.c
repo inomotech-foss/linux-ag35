@@ -1765,11 +1765,18 @@ static int q6v5_start(struct rproc *rproc)
 	 * force-set these bits directly in SMEM as a fallback.
 	 *
 	 * SMEM item 85 = SMEM_SMSM_SHARED_STATE — array of u32, index 0 = APPS.
+	 * SMEM item 333 = SMEM_SMSM_CPU_INTR_MASK — interrupt subscription masks.
+	 * Both must exist for modem SMSM to function.
 	 */
 	{
 		u32 *smsm_state;
 		size_t smsm_size;
 #define SMSM_APPS_REQUIRED (BIT(0) | BIT(3) | BIT(5) | BIT(12))
+
+		/* Ensure interrupt mask item exists (modem reads this) */
+		ret = qcom_smem_alloc(QCOM_SMEM_HOST_ANY, 333, 8 * 3 * sizeof(u32));
+		if (ret && ret != -EEXIST)
+			dev_dbg(qproc->dev, "pre-start: SMSM intr mask alloc: %d\n", ret);
 
 		smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85, &smsm_size);
 		if (IS_ERR(smsm_state)) {
@@ -1783,13 +1790,15 @@ static int q6v5_start(struct rproc *rproc)
 			dev_err(qproc->dev, "pre-start: SMSM state unavailable (err=%ld), modem will likely watchdog!\n",
 				PTR_ERR(smsm_state));
 		} else {
+			u32 val = readl(smsm_state);
 			dev_info(qproc->dev, "pre-start: SMSM state[0] (APPS)=0x%x size=%zu\n",
-				 smsm_state[0], smsm_size);
-			if ((smsm_state[0] & SMSM_APPS_REQUIRED) != SMSM_APPS_REQUIRED) {
-				smsm_state[0] |= SMSM_APPS_REQUIRED;
+				 val, smsm_size);
+			if ((val & SMSM_APPS_REQUIRED) != SMSM_APPS_REQUIRED) {
+				val |= SMSM_APPS_REQUIRED;
+				writel(val, smsm_state);
 				wmb(); /* ensure SMEM write is visible to Q6 */
-				dev_warn(qproc->dev, "pre-start: SMSM APPS bits were missing, forced to 0x%x\n",
-					 smsm_state[0]);
+				dev_warn(qproc->dev, "pre-start: SMSM APPS bits were missing, forced to 0x%x (readback=0x%x)\n",
+					 val, readl(smsm_state));
 			}
 		}
 #undef SMSM_APPS_REQUIRED
