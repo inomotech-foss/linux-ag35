@@ -1741,6 +1741,7 @@ static int q6v5_start(struct rproc *rproc)
 		goto reclaim_mpss;
 
 	q6v5_dump_modem_state(qproc, "mpss_loaded");
+	msleep(200); /* let console drain before modem can crash */
 
 	/* Poll modem state every 500ms while waiting for start (debug) */
 	for (i = 0; i < 10; i++) {
@@ -1748,6 +1749,7 @@ static int q6v5_start(struct rproc *rproc)
 		if (ret != -ETIMEDOUT)
 			break;
 		q6v5_dump_modem_state(qproc, "waiting");
+		msleep(100); /* let console drain */
 	}
 	if (ret == -ETIMEDOUT) {
 		dev_err(qproc->dev, "start timed out after 5s\n");
