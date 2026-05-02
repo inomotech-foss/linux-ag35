@@ -699,9 +699,19 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 	 *   4. Modem sees APPS has INIT, sets SMDINIT, kicks APPS
 	 *   5. APPS mirrors SMDINIT into APPS_STATE, kicks modem back
 	 *   6. Modem proceeds with full initialization
+	 *
+	 * CRITICAL: SMEM survives warm reboots, so stale bits from a
+	 * previous kernel may still be set.  The downstream smsm_init()
+	 * explicitly clears APPS state to 0 before setting PROC_AWAKE.
+	 * Without this, smsm_update_bits() would read-modify-write and
+	 * preserve stale INIT|SMDINIT|RPCINIT, breaking the handshake
+	 * because the modem sees the stale bits and skips the kick.
 	 */
+	writel(0, smsm->local_state);
+	wmb();
 	smsm_update_bits(smsm, SMSM_PROC_AWAKE, SMSM_PROC_AWAKE);
-	dev_info(&pdev->dev, "APPS SMSM state set: PROC_AWAKE (handshake mirroring enabled)\n");
+	dev_info(&pdev->dev, "APPS SMSM state cleared and set to PROC_AWAKE (0x%x)\n",
+		 readl(smsm->local_state));
 
 	return 0;
 
