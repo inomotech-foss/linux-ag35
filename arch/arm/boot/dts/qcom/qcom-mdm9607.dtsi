@@ -111,7 +111,7 @@
 		ranges;
 
 		mpss_mem: memory@82a00000 {
-			reg = <0x82a00000 0x4f00000>;
+			reg = <0x82a00000 0x5800000>;
 			no-map;
 		};
 
