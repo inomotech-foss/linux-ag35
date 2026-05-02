@@ -1600,8 +1600,27 @@ static int q6v5_mpss_load(struct q6v5 *qproc)
 		}
 
 		if (phdr->p_memsz > phdr->p_filesz) {
-			memset(ptr + phdr->p_filesz, 0,
-			       phdr->p_memsz - phdr->p_filesz);
+			phys_addr_t bss_start = qproc->mpss_phys + offset + phdr->p_filesz;
+			size_t bss_size = phdr->p_memsz - phdr->p_filesz;
+			phys_addr_t bss_end = bss_start + bss_size;
+			phys_addr_t mba_start = qproc->mba_phys;
+			phys_addr_t mba_end = mba_start + qproc->mba_size;
+
+			/*
+			 * MBA runs from DDR and must not be overwritten.
+			 * BSS segments have zero hashes and are not
+			 * authenticated, so leaving MBA intact is safe.
+			 */
+			if (bss_start < mba_end && bss_end > mba_start) {
+				if (bss_start < mba_start)
+					memset(ptr + phdr->p_filesz, 0,
+					       mba_start - bss_start);
+				if (bss_end > mba_end)
+					memset(ptr + phdr->p_filesz + (mba_end - bss_start), 0,
+					       bss_end - mba_end);
+			} else {
+				memset(ptr + phdr->p_filesz, 0, bss_size);
+			}
 		}
 		memunmap(ptr);
 		size += phdr->p_memsz;
