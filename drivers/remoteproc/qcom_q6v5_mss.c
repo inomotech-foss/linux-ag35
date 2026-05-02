@@ -26,6 +26,7 @@
 #include <linux/remoteproc.h>
 #include <linux/reset.h>
 #include <linux/soc/qcom/mdt_loader.h>
+#include <linux/soc/qcom/smem.h>
 #include <linux/iopoll.h>
 #include <linux/slab.h>
 
@@ -1692,11 +1693,41 @@ static void qcom_q6v5_dump_segment(struct rproc *rproc,
 	}
 }
 
+static void q6v5_dump_modem_state(struct q6v5 *qproc, const char *context)
+{
+	u32 rmb_status, rmb_pbl, rmb_mba_mss, rmb_code_start, rmb_code_len;
+	size_t len;
+	char *msg;
+
+	rmb_pbl = readl(qproc->rmb_base + RMB_PBL_STATUS_REG);
+	rmb_status = readl(qproc->rmb_base + RMB_MBA_STATUS_REG);
+	rmb_mba_mss = readl(qproc->rmb_base + RMB_MBA_MSS_STATUS);
+	rmb_code_start = readl(qproc->rmb_base + RMB_PMI_CODE_START_REG);
+	rmb_code_len = readl(qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
+
+	dev_info(qproc->dev, "[%s] RMB: PBL=0x%x MBA_STATUS=0x%x MSS_STATUS=0x%x CODE_START=0x%x CODE_LEN=0x%x\n",
+		 context, rmb_pbl, rmb_status, rmb_mba_mss,
+		 rmb_code_start, rmb_code_len);
+
+	/* Read SMEM crash reason (item 421) */
+	msg = qcom_smem_get(QCOM_SMEM_HOST_ANY, MPSS_CRASH_REASON_SMEM, &len);
+	if (!IS_ERR(msg) && len > 0 && msg[0])
+		dev_err(qproc->dev, "[%s] SMEM crash reason: %s\n", context, msg);
+
+	/* Read Q6 register state */
+	dev_info(qproc->dev, "[%s] QDSP6: RESET=0x%x PWR_CTL=0x%x GFMUX=0x%x\n",
+		 context,
+		 readl(qproc->reg_base + QDSP6SS_RESET_REG),
+		 readl(qproc->reg_base + QDSP6SS_PWR_CTL_REG),
+		 readl(qproc->reg_base + QDSP6SS_GFMUX_CTL_REG));
+}
+
 static int q6v5_start(struct rproc *rproc)
 {
 	struct q6v5 *qproc = rproc->priv;
 	int xfermemop_ret;
 	int ret;
+	int i;
 
 	ret = q6v5_mba_load(qproc);
 	if (ret)
@@ -1709,9 +1740,18 @@ static int q6v5_start(struct rproc *rproc)
 	if (ret)
 		goto reclaim_mpss;
 
-	ret = qcom_q6v5_wait_for_start(&qproc->q6v5, msecs_to_jiffies(5000));
+	q6v5_dump_modem_state(qproc, "mpss_loaded");
+
+	/* Poll modem state every 500ms while waiting for start (debug) */
+	for (i = 0; i < 10; i++) {
+		ret = qcom_q6v5_wait_for_start(&qproc->q6v5, msecs_to_jiffies(500));
+		if (ret != -ETIMEDOUT)
+			break;
+		q6v5_dump_modem_state(qproc, "waiting");
+	}
 	if (ret == -ETIMEDOUT) {
-		dev_err(qproc->dev, "start timed out\n");
+		dev_err(qproc->dev, "start timed out after 5s\n");
+		q6v5_dump_modem_state(qproc, "timeout");
 		goto reclaim_mpss;
 	}
 
