@@ -115,11 +115,6 @@
 			no-map;
 		};
 
-		mba_mem: memory@87900000 {
-			reg = <0x87900000 0x100000>;
-			no-map;
-		};
-
 		cnss_debug_mem: memory@87a00000 {
 			reg = <0x87a00000 0x200000>;
 			no-map;
@@ -148,6 +143,11 @@
 
 		qseecom_mem: memory@8f800000 {
 			reg = <0x8f800000 0x100000>;
+			no-map;
+		};
+
+		mba_mem: memory@8f900000 {
+			reg = <0x8f900000 0x100000>;
 			no-map;
 		};
 
