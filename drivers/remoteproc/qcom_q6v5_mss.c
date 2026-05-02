@@ -1454,7 +1454,6 @@ static int q6v5_mpss_load(struct q6v5 *qproc)
 	phys_addr_t boot_addr;
 	phys_addr_t min_addr = PHYS_ADDR_MAX;
 	phys_addr_t max_addr = 0;
-	u32 code_length;
 	bool relocate = false;
 	char *fw_name;
 	size_t fw_name_len;
@@ -1601,43 +1600,11 @@ static int q6v5_mpss_load(struct q6v5 *qproc)
 		}
 
 		if (phdr->p_memsz > phdr->p_filesz) {
-			phys_addr_t seg_start = qproc->mpss_phys + offset + phdr->p_filesz;
-			size_t bss_size = phdr->p_memsz - phdr->p_filesz;
-			phys_addr_t seg_end = seg_start + bss_size;
-			phys_addr_t mba_start = qproc->mba_phys;
-			phys_addr_t mba_end = mba_start + qproc->mba_size;
-
-			/*
-			 * Skip zeroing the MBA region - MBA is still running
-			 * on the Q6 authenticating segments at this point.
-			 */
-			if (seg_start < mba_end && seg_end > mba_start) {
-				/* BSS overlaps MBA - zero before and after */
-				if (seg_start < mba_start)
-					memset(ptr + phdr->p_filesz, 0,
-					       mba_start - seg_start);
-				if (seg_end > mba_end)
-					memset(ptr + phdr->p_filesz + (mba_end - seg_start), 0,
-					       seg_end - mba_end);
-				dev_info(qproc->dev,
-					 "mpss_load: seg[%d] BSS skipped MBA region %pa-%pa\n",
-					 i, &mba_start, &mba_end);
-			} else {
-				memset(ptr + phdr->p_filesz, 0, bss_size);
-			}
+			memset(ptr + phdr->p_filesz, 0,
+			       phdr->p_memsz - phdr->p_filesz);
 		}
 		memunmap(ptr);
 		size += phdr->p_memsz;
-
-		code_length = readl(qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
-		if (!code_length) {
-			boot_addr = relocate ? qproc->mpss_phys : min_addr;
-			dev_info(qproc->dev, "mpss_load: seg[%d] FIRST - boot_addr=0x%pa CMD_LOAD_READY\n",
-				 i, &boot_addr);
-			writel(boot_addr, qproc->rmb_base + RMB_PMI_CODE_START_REG);
-			writel(RMB_CMD_LOAD_READY, qproc->rmb_base + RMB_MBA_COMMAND_REG);
-		}
-		writel(size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
 
 		ret = readl(qproc->rmb_base + RMB_MBA_STATUS_REG);
 		dev_info(qproc->dev, "mpss_load: seg[%d] paddr=0x%08x filesz=0x%x memsz=0x%x total=0x%zx mba_sts=0x%x\n",
@@ -1660,6 +1627,22 @@ static int q6v5_mpss_load(struct q6v5 *qproc)
 		ret = -EAGAIN;
 		goto release_firmware;
 	}
+
+	/*
+	 * On MDM9607, mba_mem sits inside mpss_mem (legacy layout). The
+	 * newer incremental authentication (CMD_LOAD_READY after first
+	 * segment) crashes MBA because the BSS zero-fill of later segments
+	 * overwrites MBA's working memory in DDR. Instead, use the legacy
+	 * approach: load all segments, transfer ownership, THEN send
+	 * LOAD_READY with the total size. MBA authenticates the complete
+	 * image in one pass.
+	 */
+	boot_addr = relocate ? qproc->mpss_phys : min_addr;
+	dev_info(qproc->dev, "mpss_load: sending LOAD_READY boot_addr=%pa size=0x%zx\n",
+		 &boot_addr, size);
+	writel(boot_addr, qproc->rmb_base + RMB_PMI_CODE_START_REG);
+	writel(RMB_CMD_LOAD_READY, qproc->rmb_base + RMB_MBA_COMMAND_REG);
+	writel(size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
 
 	dev_info(qproc->dev, "mpss_load: waiting for AUTH_COMPLETE (mba_sts=0x%x)...\n",
 		 readl(qproc->rmb_base + RMB_MBA_STATUS_REG));
