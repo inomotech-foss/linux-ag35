@@ -251,7 +251,13 @@ static void arch_timer_mmio_setup(struct arch_timer *at, int irq)
 		.features		   = (CLOCK_EVT_FEAT_ONESHOT |
 					      CLOCK_EVT_FEAT_DYNIRQ),
 		.name			   = "arch_mem_timer",
-		.rating			   = 400,
+		/*
+		 * Rate above the cp15 arch_timer clockevent (450) so that
+		 * on SoCs where the cp15 virtual timer PPI is not routed
+		 * (e.g. MDM9607), this MMIO timer with working SPI interrupts
+		 * will be preferred as the active clockevent device.
+		 */
+		.rating			   = 460,
 		.cpumask		   = cpu_possible_mask,
 		.irq 			   = irq,
 		.set_next_event		   = arch_timer_mmio_set_next_event,

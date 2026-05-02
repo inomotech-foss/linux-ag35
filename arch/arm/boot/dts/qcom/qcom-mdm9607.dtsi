@@ -89,11 +89,21 @@
 	};
 
 	/*
-	 * CP15-based ARM arch timer.  The memory-mapped timer inside
-	 * soc (arm,armv7-timer-mem) provides additional timer frames,
-	 * but the kernel needs this node for the primary clocksource
-	 * and clockevent.  PPI numbers match MSM8226/IPQ4019 which
-	 * share the same Cortex-A7 GIC routing.
+	 * CP15-based ARM arch timer.  On MDM9607, the virtual timer PPI
+	 * (GIC_PPI 4) is not routed to the GIC by firmware/TrustZone, so
+	 * the interrupt never fires.  The downstream kernel does not have
+	 * this node — it relies solely on the MMIO frame timer.
+	 *
+	 * We keep this node enabled because:
+	 *  - It registers the arch_sys_counter clocksource (rating 400)
+	 *  - It registers sched_clock at 19.2MHz / 52ns resolution
+	 *  - timer_probe() needs at least one node to succeed
+	 *
+	 * The broken clockevent (rating 450) will be superseded by the
+	 * MMIO frame timer's clockevent once that probes later in boot.
+	 * During the brief window between time_init() and MMIO probe,
+	 * no timer ticks fire — but this is acceptable because early
+	 * boot is synchronous and doesn't need them.
 	 */
 	timer {
 		compatible = "arm,armv7-timer";
