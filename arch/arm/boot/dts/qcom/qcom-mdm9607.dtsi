@@ -224,10 +224,20 @@
 		};
 
 		/*
-		 * Modem SMD edge is defined inside the remoteproc node
-		 * (remoteproc_mss) since the modem is managed by Linux
-		 * remoteproc, not running from POR.
+		 * Modem SMD edge — must be in the top-level smd node
+		 * (not inside remoteproc) so the IRQ handler is
+		 * registered at boot, before the modem starts.
+		 * The modem expects APPS to handle GIC_SPI 25 during
+		 * its early init; if no handler is present, modem
+		 * init stalls and its watchdog resets the SoC.
 		 */
+		modem {
+			interrupts = <GIC_SPI 25 IRQ_TYPE_EDGE_RISING>;
+			mboxes = <&apcs 12>;
+			qcom,ipc = <&apcs 8 12>;
+			qcom,smd-edge = <0>;
+			label = "modem";
+		};
 	};
 
 	smem {
@@ -893,15 +903,7 @@
 				memory-region = <&mpss_mem>;
 			};
 
-			smd-edge {
-				interrupts = <GIC_SPI 25 IRQ_TYPE_EDGE_RISING>;
-
-				mboxes = <&apcs 12>;
-				qcom,ipc = <&apcs 8 12>;
-				qcom,smd-edge = <0>;
-
-				label = "modem";
-			};
+			/* SMD edge is in the top-level smd node for early registration */
 		};
 
 		sdhc_1: sdhci@7824000 {
