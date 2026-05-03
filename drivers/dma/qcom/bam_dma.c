@@ -659,18 +659,15 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	bchan->initialized = 1;
 
-	dev_info(bdev->dev,
-		"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x P_FIFO_SIZES=0x%x "
-		"P_DESC_FIFO_ADDR=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
-		"IRQ_SRCS_MSK=0x%x P_IRQ_STTS=0x%x\n",
-		bchan->id, dir, is_cmd_pipe,
-		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
-		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES)),
-		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR)),
-		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_EVNT_REG)),
-		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS)),
-		readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
-		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_STTS)));
+	if (bdev->powered_remotely)
+		dev_info(bdev->dev,
+			"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x "
+			"P_DESC_FIFO_ADDR=0x%x IRQ_SRCS_MSK=0x%x\n",
+			bchan->id, dir, is_cmd_pipe,
+			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_DESC_FIFO_ADDR)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
@@ -1226,8 +1223,9 @@ static irqreturn_t bam_dma_irq(int irq, void *data)
 	u32 clr_mask = 0, srcs = 0;
 	int ret;
 
-	dev_info(bdev->dev, "IRQ! srcs_ee=0x%x\n",
-		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_EE)));
+	if (bdev->powered_remotely)
+		dev_info(bdev->dev, "IRQ! srcs_ee=0x%x\n",
+			 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_EE)));
 
 	srcs |= process_channel_irqs(bdev);
 
@@ -1523,11 +1521,6 @@ static void bam_start_dma(struct bam_chan *bchan)
 	{
 		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
 
-		dev_info(bdev->dev,
-			 "pipe %u: doorbell=0x%x (tail=%u) P_SW_OFSTS=0x%x\n",
-			 bchan->id, db_val, bchan->tail,
-			 readl_relaxed(bam_addr(bdev, bchan->id,
-						BAM_P_SW_OFSTS)));
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 	}
 
