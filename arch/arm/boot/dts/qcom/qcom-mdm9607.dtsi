@@ -242,6 +242,7 @@
 			mboxes = <&apcs 12>;
 			qcom,ipc = <&apcs 8 12>;
 			qcom,smd-edge = <0>;
+			qcom,remote-pid = <1>;
 			label = "modem";
 		};
 	};
