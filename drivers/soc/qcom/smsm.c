@@ -759,11 +759,20 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 	 * Without this, smsm_update_bits() would read-modify-write and
 	 * preserve stale INIT|SMDINIT|RPCINIT, breaking the handshake
 	 * because the modem sees the stale bits and skips the kick.
+	 *
+	 * RPCINIT must also be set here.  The modem firmware waits for
+	 * APPS to signal IPC Router readiness (RPCINIT) before activating
+	 * its data subsystem (A2/BAM-DMUX).  In the downstream kernel,
+	 * ipc_router_smd_xprt sets this bit when it opens the IPCRTR
+	 * channel.  Since we build monolithically, the QRTR/IPCRTR driver
+	 * will be available shortly after probe, so setting RPCINIT here
+	 * is safe and avoids the modem waiting indefinitely.
 	 */
 	writel(0, smsm->local_state);
 	wmb();
-	smsm_update_bits(smsm, SMSM_PROC_AWAKE, SMSM_PROC_AWAKE);
-	dev_info(&pdev->dev, "APPS SMSM state cleared and set to PROC_AWAKE (0x%x)\n",
+	smsm_update_bits(smsm, SMSM_PROC_AWAKE | SMSM_RPCINIT,
+			 SMSM_PROC_AWAKE | SMSM_RPCINIT);
+	dev_info(&pdev->dev, "APPS SMSM state cleared and set to PROC_AWAKE|RPCINIT (0x%x)\n",
 		 readl(smsm->local_state));
 
 	return 0;
