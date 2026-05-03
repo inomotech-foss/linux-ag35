@@ -83,6 +83,8 @@ struct bam_dmux {
 	atomic_long_t tx_deferred_skb;
 	struct work_struct tx_wakeup_work;
 
+	struct delayed_work boot_work;
+
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
 	struct work_struct register_netdev_work;
 	struct net_device *netdevs[BAM_DMUX_NUM_CH];
@@ -676,13 +678,16 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	struct bam_dmux *dmux = data;
 	bool new_state = !dmux->pc_state;
 
-	dev_dbg(dmux->dev, "pc: %u\n", new_state);
+	dev_info(dmux->dev, "pc_irq: new_state=%d\n", new_state);
+	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state) {
 		if (bam_dmux_power_on(dmux))
 			bam_dmux_pc_ack(dmux);
-		else
+		else {
+			dev_err(dmux->dev, "power_on failed\n");
 			bam_dmux_power_off(dmux);
+		}
 	} else {
 		bam_dmux_power_off(dmux);
 		bam_dmux_pc_ack(dmux);
@@ -763,6 +768,35 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 	return 0;
 }
 
+/**
+ * bam_dmux_boot_work() - kick-start BAM-DMUX on firmwares that need APPS to
+ *                        initiate the power handshake.
+ *
+ * Some modem firmwares (e.g. Quectel OCPU variants) do not assert
+ * A2_POWER_CONTROL until APPS requests first.  This work fires a short
+ * while after probe to give the modem time to boot, then triggers the
+ * runtime resume path which sets APPS A2_POWER_CONTROL and waits for
+ * the modem's response.
+ */
+static void bam_dmux_boot_work_fn(struct work_struct *work)
+{
+	struct bam_dmux *dmux = container_of(work, struct bam_dmux, boot_work.work);
+	int ret;
+
+	/* If the modem already initiated, nothing to do */
+	if (dmux->pc_state)
+		return;
+
+	dev_info(dmux->dev, "modem did not initiate, requesting power on\n");
+	ret = pm_runtime_resume_and_get(dmux->dev);
+	if (ret < 0) {
+		dev_err(dmux->dev, "boot power-on failed: %d\n", ret);
+		return;
+	}
+	pm_runtime_mark_last_busy(dmux->dev);
+	pm_runtime_put_autosuspend(dmux->dev);
+}
+
 static int bam_dmux_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -804,6 +838,7 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	spin_lock_init(&dmux->tx_lock);
 	INIT_WORK(&dmux->tx_wakeup_work, bam_dmux_tx_wakeup_work);
 	INIT_WORK(&dmux->register_netdev_work, bam_dmux_register_netdev_work);
+	INIT_DELAYED_WORK(&dmux->boot_work, bam_dmux_boot_work_fn);
 
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		dmux->rx_skbs[i].dmux = dmux;
@@ -843,6 +878,12 @@ static int bam_dmux_probe(struct platform_device *pdev)
 			bam_dmux_pc_ack(dmux);
 		else
 			bam_dmux_power_off(dmux);
+	} else {
+		/* Remote hasn't initiated yet.  Schedule a kick-start attempt
+		 * for firmwares that require APPS to request power first.
+		 * 30s delay gives the modem plenty of time to boot.
+		 */
+		schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(30000));
 	}
 
 	return 0;
@@ -859,6 +900,8 @@ static void bam_dmux_remove(struct platform_device *pdev)
 	struct device *dev = dmux->dev;
 	LIST_HEAD(list);
 	int i;
+
+	cancel_delayed_work_sync(&dmux->boot_work);
 
 	/* Unregister network interfaces */
 	cancel_work_sync(&dmux->register_netdev_work);
