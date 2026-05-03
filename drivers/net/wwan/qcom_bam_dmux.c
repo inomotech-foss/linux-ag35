@@ -833,8 +833,12 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_disable_pm;
 
+	dev_info(dev, "probe complete: pc_state=%d pc_irq=%d\n",
+		 dmux->pc_state, dmux->pc_irq);
+
 	/* Check if remote finished initialization before us */
 	if (dmux->pc_state) {
+		dev_info(dev, "remote already powered on, initializing\n");
 		if (bam_dmux_power_on(dmux))
 			bam_dmux_pc_ack(dmux);
 		else

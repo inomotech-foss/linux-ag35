@@ -721,6 +721,22 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, smsm);
 	of_node_put(local_node);
 
+	dev_info(&pdev->dev, "num_entries=%u num_hosts=%u local_host=%u\n",
+		 smsm->num_entries, smsm->num_hosts, smsm->local_host);
+	/* Dump subscription matrix for modem entry */
+	{
+		u32 i;
+		for (i = 0; i < smsm->num_entries; i++) {
+			struct smsm_entry *e = &smsm->entries[i];
+			if (e->subscription) {
+				u32 h;
+				for (h = 0; h < smsm->num_hosts; h++)
+					dev_info(&pdev->dev, "  intr_mask[entry=%u][host=%u] = 0x%08x\n",
+						 i, h, readl(e->subscription + h));
+			}
+		}
+	}
+
 	/*
 	 * Signal to all remote processors that APPS is alive.
 	 *
