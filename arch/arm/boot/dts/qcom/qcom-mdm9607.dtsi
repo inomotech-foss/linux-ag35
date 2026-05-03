@@ -119,10 +119,12 @@
 			no-map;
 		};
 
-		cnss_debug_mem: memory@87a00000 {
-			reg = <0x87a00000 0x200000>;
-			no-map;
-		};
+		/*
+		 * cnss_debug_mem was at 0x87a00000 in the downstream DTS
+		 * where the modem region ended at 0x87a00000.  Our modem
+		 * firmware extends to 0x87c00000 so the old reservation
+		 * overlaps — removed to avoid the conflict.
+		 */
 
 		external_image_mem: memory@87c00000 {
 			reg = <0x87c00000 0x100000>;
