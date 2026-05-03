@@ -1810,10 +1810,10 @@ static int q6v5_start(struct rproc *rproc)
 				dev_info(qproc->dev, "pre-start: cleared modem SMSM state\n");
 			}
 
-			/* Set APPS state: PROC_AWAKE | INIT | SMDINIT */
-			writel(BIT(12) | BIT(0) | BIT(3), &smsm_state[0]);
+			/* Set APPS state: PROC_AWAKE | INIT | SMDINIT | RPCINIT */
+			writel(BIT(12) | BIT(0) | BIT(3) | BIT(5), &smsm_state[0]);
 			wmb();
-			dev_info(qproc->dev, "pre-start: APPS SMSM set to %#x (PROC_AWAKE|INIT|SMDINIT)\n",
+			dev_info(qproc->dev, "pre-start: APPS SMSM set to %#x (PROC_AWAKE|INIT|SMDINIT|RPCINIT)\n",
 				 readl(&smsm_state[0]));
 		}
 	}
