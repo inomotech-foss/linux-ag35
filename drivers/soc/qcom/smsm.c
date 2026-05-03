@@ -54,9 +54,11 @@
  * SMSM state bits used in the handshake protocol.
  */
 #define SMSM_INIT		BIT(0)
+#define SMSM_A2_POWER_CONTROL	BIT(1)
 #define SMSM_SMDINIT		BIT(3)
 #define SMSM_RPCINIT		BIT(5)
 #define SMSM_RESET		BIT(6)
+#define SMSM_A2_POWER_CONTROL_ACK BIT(11)
 #define SMSM_PROC_AWAKE		BIT(12)
 
 /*
@@ -298,12 +300,22 @@ static void smsm_mask_irq(struct irq_data *irqd)
  *
  * This subscribes the local CPU to interrupts upon changes to the defined
  * status bit. The bit is also marked for cascading.
+ *
+ * After updating the subscription matrix, an IPC kick is sent to the remote
+ * host that owns this entry.  This is necessary because the remote processor
+ * may check the subscription mask during its initialization to decide whether
+ * to activate certain features (e.g. the modem checks if APPS is subscribed
+ * to A2_POWER_CONTROL before activating BAM-DMUX).  If the subscription is
+ * added after the remote has already checked, the kick causes it to re-read
+ * the mask.
  */
 static void smsm_unmask_irq(struct irq_data *irqd)
 {
 	struct smsm_entry *entry = irq_data_get_irq_chip_data(irqd);
 	irq_hw_number_t irq = irqd_to_hwirq(irqd);
 	struct qcom_smsm *smsm = entry->smsm;
+	struct smsm_host *hostp;
+	u32 host;
 	u32 val;
 
 	/* Make sure our last cached state is up-to-date */
@@ -318,6 +330,23 @@ static void smsm_unmask_irq(struct irq_data *irqd)
 		val = readl(entry->subscription + smsm->local_host);
 		val |= BIT(irq);
 		writel(val, entry->subscription + smsm->local_host);
+
+		/* Ensure the subscription write is visible before the kick */
+		wmb();
+
+		/* Kick the remote host so it re-reads the subscription mask */
+		host = entry - smsm->entries;
+		if (host < smsm->num_hosts) {
+			hostp = &smsm->hosts[host];
+			if (hostp->mbox_chan) {
+				mbox_send_message(hostp->mbox_chan, NULL);
+				mbox_client_txdone(hostp->mbox_chan, 0);
+			} else if (hostp->ipc_regmap) {
+				regmap_write(hostp->ipc_regmap,
+					     hostp->ipc_offset,
+					     BIT(hostp->ipc_bit));
+			}
+		}
 	}
 }
 
@@ -665,15 +694,23 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 		writel(0, entry->subscription + smsm->local_host);
 
 		/*
-		 * Subscribe to RESET|INIT|SMDINIT from remote processors.
-		 * The downstream kernel explicitly sets this legacy mask so
-		 * that remote processors (modem) know to kick APPS when they
-		 * change those bits.  Without this subscription, the modem
-		 * won't send an IPC to APPS after setting its INIT bit, and
-		 * the handshake in smsm_intr() will never trigger.
+		 * Subscribe to RESET|INIT|SMDINIT|A2 power bits from remote
+		 * processors.  The downstream kernel explicitly sets a legacy
+		 * mask so that remote processors (modem) know to kick APPS
+		 * when they change those bits.  Without this subscription, the
+		 * modem won't send an IPC to APPS after setting its INIT bit,
+		 * and the handshake in smsm_intr() will never trigger.
+		 *
+		 * A2_POWER_CONTROL and A2_POWER_CONTROL_ACK must also be
+		 * pre-subscribed because the modem firmware checks whether
+		 * APPS has subscribed before activating the BAM-DMUX data
+		 * path.  If BAM-DMUX loads as a module after the modem has
+		 * already booted, the modem will have already checked and
+		 * found no subscription — skipping A2 activation permanently.
 		 */
 		if (id != smsm->local_host)
-			writel(SMSM_RESET | SMSM_INIT | SMSM_SMDINIT,
+			writel(SMSM_RESET | SMSM_INIT | SMSM_SMDINIT |
+			       SMSM_A2_POWER_CONTROL | SMSM_A2_POWER_CONTROL_ACK,
 			       entry->subscription + smsm->local_host);
 
 		ret = smsm_inbound_entry(smsm, entry, node);
