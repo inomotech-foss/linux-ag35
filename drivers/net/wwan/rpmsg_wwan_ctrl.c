@@ -150,6 +150,7 @@ static const struct rpmsg_device_id rpmsg_wwan_ctrl_id_table[] = {
 	{ .name = "DATA5_CNTL", .driver_data = WWAN_PORT_QMI },
 	{ .name = "DATA4", .driver_data = WWAN_PORT_AT },
 	{ .name = "DATA1", .driver_data = WWAN_PORT_AT },
+	{ .name = "DS", .driver_data = WWAN_PORT_QMI },
 	{},
 };
 MODULE_DEVICE_TABLE(rpmsg, rpmsg_wwan_ctrl_id_table);

@@ -1238,11 +1238,9 @@ static void qcom_channel_scan_worker(struct work_struct *work)
 			if (!entry->name[0])
 				continue;
 
-			if (!(eflags & SMD_CHANNEL_FLAGS_PACKET)) {
-				dev_info(&edge->dev, "tbl %d entry %d: '%s' flags=0x%x (not packet)\n",
-					 tbl, i, entry->name, eflags);
-				continue;
-			}
+			if (!(eflags & SMD_CHANNEL_FLAGS_PACKET))
+				dev_dbg(&edge->dev, "tbl %d entry %d: '%s' flags=0x%x (stream)\n",
+					tbl, i, entry->name, eflags);
 
 			if ((eflags & SMD_CHANNEL_FLAGS_EDGE_MASK) != edge->edge_id) {
 				dev_info(&edge->dev, "tbl %d entry %d: '%s' edge=%d (want %d)\n",
