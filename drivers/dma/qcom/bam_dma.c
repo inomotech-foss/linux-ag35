@@ -482,6 +482,36 @@ static void bam_reset(struct bam_device *bdev)
 }
 
 /**
+ * bam_enable_irqs - Enable APPS-side interrupt routing without resetting BAM
+ * @bdev: bam device
+ *
+ * For powered-remotely BAMs (e.g. BAM-DMUX), the remote processor (modem)
+ * owns the BAM hardware and has already configured BAM_CTRL, BAM_EN, and
+ * device-side endpoints before signaling readiness.  A full SW_RST would
+ * destroy the remote's configuration.
+ *
+ * This function just enables the APPS EE interrupt routing so that pipe
+ * completion IRQs reach the GIC.  Per-pipe IRQ setup (P_IRQ_EN and the
+ * per-pipe bit in BAM_IRQ_SRCS_MSK_EE) is handled by bam_chan_init_hw().
+ */
+static void bam_enable_irqs(struct bam_device *bdev)
+{
+	dev_info(bdev->dev, "enabling IRQs (no SW_RST): BAM_CTRL=0x%08x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)));
+
+	/* enable irqs for errors */
+	writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
+			bam_addr(bdev, 0, BAM_IRQ_EN));
+
+	/* unmask global bam interrupt (BAM-level errors) */
+	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+
+	dev_info(bdev->dev, "IRQs enabled: IRQ_EN=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+}
+
+/**
  * bam_reset_channel - Reset individual BAM DMA channel
  * @bchan: bam channel
  *
@@ -629,7 +659,7 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	bchan->initialized = 1;
 
-	dev_dbg(bdev->dev,
+	dev_info(bdev->dev,
 		"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x P_FIFO_SIZES=0x%x "
 		"P_DESC_FIFO_ADDR=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
 		"IRQ_SRCS_MSK=0x%x P_IRQ_STTS=0x%x\n",
@@ -718,7 +748,7 @@ static int bam_alloc_chan(struct dma_chan *chan)
 	}
 
 	if (bdev->active_channels++ == 0 && bdev->powered_remotely)
-		bam_reset(bdev);
+		bam_enable_irqs(bdev);
 
 	return 0;
 }
@@ -1196,6 +1226,9 @@ static irqreturn_t bam_dma_irq(int irq, void *data)
 	u32 clr_mask = 0, srcs = 0;
 	int ret;
 
+	dev_info(bdev->dev, "IRQ! srcs_ee=0x%x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_EE)));
+
 	srcs |= process_channel_irqs(bdev);
 
 	/* kick off tasklet to start next dma transfer */
@@ -1490,6 +1523,11 @@ static void bam_start_dma(struct bam_chan *bchan)
 	{
 		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
 
+		dev_info(bdev->dev,
+			 "pipe %u: doorbell=0x%x (tail=%u) P_SW_OFSTS=0x%x\n",
+			 bchan->id, db_val, bchan->tail,
+			 readl_relaxed(bam_addr(bdev, bchan->id,
+						BAM_P_SW_OFSTS)));
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 	}
 
