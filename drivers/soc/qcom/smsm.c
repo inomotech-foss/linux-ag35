@@ -238,6 +238,9 @@ static irqreturn_t smsm_intr(int irq, void *data)
 	val = readl(entry->remote_state);
 	changed = val ^ xchg(&entry->last_value, val);
 
+	dev_info(smsm->dev, "smsm_intr: remote val=0x%08x changed=0x%08x apps=0x%08x\n",
+		 val, changed, readl(smsm->local_state));
+
 	/*
 	 * Mirror INIT/SMDINIT from remote into local APPS state.
 	 * This matches the downstream smsm_irq_handler() handshake:
@@ -774,6 +777,17 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 			 SMSM_PROC_AWAKE | SMSM_RPCINIT);
 	dev_info(&pdev->dev, "APPS SMSM state cleared and set to PROC_AWAKE|RPCINIT (0x%x)\n",
 		 readl(smsm->local_state));
+
+	/* Print current state values for debugging */
+	{
+		u32 i;
+		for (i = 0; i < smsm->num_entries; i++) {
+			struct smsm_entry *e = &smsm->entries[i];
+			if (e->remote_state)
+				dev_info(&pdev->dev, "  state[%u] val=0x%08x\n",
+					 i, readl(e->remote_state));
+		}
+	}
 
 	return 0;
 
