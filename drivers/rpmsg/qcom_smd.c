@@ -1218,8 +1218,13 @@ static void qcom_channel_scan_worker(struct work_struct *work)
 	for (tbl = 0; tbl < SMD_ALLOC_TBL_COUNT; tbl++) {
 		alloc_tbl = qcom_smem_get(edge->remote_pid,
 				    smem_items[tbl].alloc_tbl_id, NULL);
-		if (IS_ERR(alloc_tbl))
+		if (IS_ERR(alloc_tbl)) {
+			dev_info(&edge->dev, "tbl %d: smem_get(%d, %u) failed: %ld\n",
+				 tbl, edge->remote_pid,
+				 smem_items[tbl].alloc_tbl_id,
+				 PTR_ERR(alloc_tbl));
 			continue;
+		}
 
 		for (i = 0; i < SMD_ALLOC_TBL_SIZE; i++) {
 			entry = &alloc_tbl[i];
@@ -1233,11 +1238,19 @@ static void qcom_channel_scan_worker(struct work_struct *work)
 			if (!entry->name[0])
 				continue;
 
-			if (!(eflags & SMD_CHANNEL_FLAGS_PACKET))
+			if (!(eflags & SMD_CHANNEL_FLAGS_PACKET)) {
+				dev_info(&edge->dev, "tbl %d entry %d: '%s' flags=0x%x (not packet)\n",
+					 tbl, i, entry->name, eflags);
 				continue;
+			}
 
-			if ((eflags & SMD_CHANNEL_FLAGS_EDGE_MASK) != edge->edge_id)
+			if ((eflags & SMD_CHANNEL_FLAGS_EDGE_MASK) != edge->edge_id) {
+				dev_info(&edge->dev, "tbl %d entry %d: '%s' edge=%d (want %d)\n",
+					 tbl, i, entry->name,
+					 eflags & SMD_CHANNEL_FLAGS_EDGE_MASK,
+					 edge->edge_id);
 				continue;
+			}
 
 			cid = le32_to_cpu(entry->cid);
 			info_id = smem_items[tbl].info_base_id + cid;
