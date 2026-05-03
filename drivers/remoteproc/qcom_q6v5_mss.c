@@ -1758,14 +1758,22 @@ static int q6v5_start(struct rproc *rproc)
 	int ret;
 	int i;
 
-	/* Verify SMSM/SMEM state before modem boot — the SMSM driver should
-	 * have set PROC_AWAKE at probe time.  INIT and SMDINIT will be set
-	 * reactively via the SMSM IRQ handler handshake once the modem boots
-	 * and signals its own INIT.
+	/* Verify SMSM/SMEM state before modem boot.
 	 *
-	 * SMEM item 85 = SMEM_SMSM_SHARED_STATE — array of u32, index 0 = APPS.
-	 * SMEM item 333 = SMEM_SMSM_CPU_INTR_MASK — interrupt subscription masks.
-	 * Both must exist for modem SMSM to function.
+	 * The SMSM driver sets PROC_AWAKE at probe.  Downstream relies on a
+	 * reactive handshake (modem sets INIT → APPS mirrors INIT → modem
+	 * proceeds).  However, some modem firmware builds poll APPS state for
+	 * INIT|SMDINIT without kicking APPS first.  In that case the modem
+	 * hangs waiting and hits its watchdog ~1.8s later.
+	 *
+	 * To cover both handshake styles, set INIT|SMDINIT|PROC_AWAKE
+	 * proactively right before modem start.  Also clear the modem's own
+	 * stale SMSM state (entry[1]) — SMEM persists across warm reboots
+	 * and leftover bits from a previous boot can confuse the modem
+	 * firmware during its early SMSM init.
+	 *
+	 * SMEM item 85 = SMEM_SMSM_SHARED_STATE (4 entries × u32).
+	 * SMEM item 333 = SMEM_SMSM_CPU_INTR_MASK (interrupt subscriptions).
 	 */
 	{
 		u32 *smsm_state;
@@ -1778,27 +1786,35 @@ static int q6v5_start(struct rproc *rproc)
 
 		smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85, &smsm_size);
 		if (IS_ERR(smsm_state)) {
-			/* Try to allocate it — bootloader usually does this */
 			ret = qcom_smem_alloc(QCOM_SMEM_HOST_ANY, 85, 8 * sizeof(u32));
 			if (ret && ret != -EEXIST)
 				dev_warn(qproc->dev, "pre-start: failed to alloc SMSM item 85 (err=%d)\n", ret);
 			smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85, &smsm_size);
 		}
 		if (IS_ERR(smsm_state)) {
-			dev_err(qproc->dev, "pre-start: SMSM state unavailable (err=%ld), modem will likely watchdog!\n",
+			dev_err(qproc->dev, "pre-start: SMSM state unavailable (err=%ld)\n",
 				PTR_ERR(smsm_state));
 		} else {
-			u32 val = readl(smsm_state);
-			dev_info(qproc->dev, "pre-start: SMSM state[0] (APPS)=0x%x size=%zu\n",
-				 val, smsm_size);
-			if (!(val & BIT(12))) {
-				/* PROC_AWAKE not set — SMSM driver didn't probe? Force it. */
-				val |= BIT(12);
-				writel(val, smsm_state);
-				wmb();
-				dev_warn(qproc->dev, "pre-start: SMSM PROC_AWAKE was missing, forced (readback=0x%x)\n",
-					 readl(smsm_state));
+			int num_entries = smsm_size / sizeof(u32);
+			int j;
+
+			/* Dump all SMSM entries before modifying */
+			for (j = 0; j < num_entries && j < 4; j++)
+				dev_info(qproc->dev, "pre-start: SMSM[%d]=%#010x%s\n",
+					 j, readl(&smsm_state[j]),
+					 j == 0 ? " (APPS)" : j == 1 ? " (MODEM)" : "");
+
+			/* Clear modem's stale state (entry[1]) */
+			if (num_entries > 1) {
+				writel(0, &smsm_state[1]);
+				dev_info(qproc->dev, "pre-start: cleared modem SMSM state\n");
 			}
+
+			/* Set APPS state: PROC_AWAKE | INIT | SMDINIT */
+			writel(BIT(12) | BIT(0) | BIT(3), &smsm_state[0]);
+			wmb();
+			dev_info(qproc->dev, "pre-start: APPS SMSM set to %#x (PROC_AWAKE|INIT|SMDINIT)\n",
+				 readl(&smsm_state[0]));
 		}
 	}
 
@@ -1825,8 +1841,14 @@ static int q6v5_start(struct rproc *rproc)
 		msleep(100); /* let console drain */
 	}
 	if (ret == -ETIMEDOUT) {
+		u32 *smsm_post;
 		dev_err(qproc->dev, "start timed out after 5s\n");
 		q6v5_dump_modem_state(qproc, "timeout");
+		/* Dump SMSM state after crash to see what modem managed to do */
+		smsm_post = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85, NULL);
+		if (!IS_ERR(smsm_post))
+			dev_info(qproc->dev, "post-crash SMSM: APPS=%#010x MODEM=%#010x\n",
+				 readl(&smsm_post[0]), readl(&smsm_post[1]));
 		goto reclaim_mpss;
 	}
 
