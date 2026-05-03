@@ -726,18 +726,16 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "num_entries=%u num_hosts=%u local_host=%u\n",
 		 smsm->num_entries, smsm->num_hosts, smsm->local_host);
-	/* Dump subscription matrix for modem entry */
+	/* Dump full subscription matrix from raw SMEM */
 	{
-		u32 i;
-		for (i = 0; i < smsm->num_entries; i++) {
-			struct smsm_entry *e = &smsm->entries[i];
-			if (e->subscription) {
-				u32 h;
-				for (h = 0; h < smsm->num_hosts; h++)
+		u32 e, h;
+		for (e = 0; e < smsm->num_entries; e++)
+			for (h = 0; h < smsm->num_hosts; h++) {
+				u32 v = readl(intr_mask + e * smsm->num_hosts + h);
+				if (v)
 					dev_info(&pdev->dev, "  intr_mask[entry=%u][host=%u] = 0x%08x\n",
-						 i, h, readl(e->subscription + h));
+						 e, h, v);
 			}
-		}
 	}
 
 	/*
