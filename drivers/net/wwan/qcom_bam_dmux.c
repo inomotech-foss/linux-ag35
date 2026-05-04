@@ -773,8 +773,8 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
  *                        initiate the power handshake.
  *
  * Some modem firmwares (e.g. Quectel OCPU variants) do not assert
- * A2_POWER_CONTROL until APPS requests first.  This work fires a short
- * while after probe to give the modem time to boot, then triggers the
+ * A2_POWER_CONTROL until APPS requests first.  This work fires when the
+ * modem signals readiness (SMDINIT via remote-ready IRQ), then triggers the
  * runtime resume path which sets APPS A2_POWER_CONTROL and waits for
  * the modem's response.
  */
@@ -795,6 +795,25 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	}
 	pm_runtime_mark_last_busy(dmux->dev);
 	pm_runtime_put_autosuspend(dmux->dev);
+}
+
+/**
+ * bam_dmux_remote_ready_irq - Modem has set SMDINIT, indicating it is ready
+ *
+ * This replaces the fixed 30-second delay with a deterministic trigger.
+ * The downstream kernel used smsm_state_cb_register() to watch for this
+ * same transition.
+ */
+static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
+{
+	struct bam_dmux *dmux = data;
+
+	dev_info(dmux->dev, "remote ready (SMDINIT), scheduling power request\n");
+
+	/* Use a short delay to let SMD channels finish opening */
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(500));
+
+	return IRQ_HANDLED;
 }
 
 static int bam_dmux_probe(struct platform_device *pdev)
@@ -868,6 +887,19 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_disable_pm;
 
+	/* Register remote-ready IRQ (modem SMDINIT) for APPS-initiates mode */
+	{
+		int remote_ready_irq = platform_get_irq_byname(pdev, "remote-ready");
+
+		if (remote_ready_irq > 0) {
+			ret = devm_request_threaded_irq(dev, remote_ready_irq, NULL,
+							bam_dmux_remote_ready_irq,
+							IRQF_ONESHOT, NULL, dmux);
+			if (ret)
+				dev_warn(dev, "failed to request remote-ready IRQ: %d\n", ret);
+		}
+	}
+
 	dev_info(dev, "probe complete: pc_state=%d pc_irq=%d\n",
 		 dmux->pc_state, dmux->pc_irq);
 
@@ -878,12 +910,6 @@ static int bam_dmux_probe(struct platform_device *pdev)
 			bam_dmux_pc_ack(dmux);
 		else
 			bam_dmux_power_off(dmux);
-	} else {
-		/* Remote hasn't initiated yet.  Schedule a kick-start attempt
-		 * for firmwares that require APPS to request power first.
-		 * 30s delay gives the modem plenty of time to boot.
-		 */
-		schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(30000));
 	}
 
 	return 0;
