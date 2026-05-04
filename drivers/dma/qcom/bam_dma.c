@@ -496,8 +496,21 @@ static void bam_reset(struct bam_device *bdev)
  */
 static void bam_enable_irqs(struct bam_device *bdev)
 {
-	dev_info(bdev->dev, "enabling IRQs (no SW_RST): BAM_CTRL=0x%08x\n",
-		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)));
+	u32 val;
+
+	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
+	dev_info(bdev->dev, "enabling BAM (no SW_RST): BAM_CTRL=0x%08x\n", val);
+
+	/* Enable the BAM without resetting it */
+	val |= BAM_EN;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+
+	/* set descriptor threshold, start with 4 bytes */
+	writel_relaxed(DEFAULT_CNT_THRSHLD,
+			bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
+
+	/* Enable default set of h/w workarounds, ie all except BAM_FULL_PIPE */
+	writel_relaxed(BAM_CNFG_BITS_DEFAULT, bam_addr(bdev, 0, BAM_CNFG_BITS));
 
 	/* enable irqs for errors */
 	writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
@@ -506,8 +519,8 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	/* unmask global bam interrupt (BAM-level errors) */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-	dev_info(bdev->dev, "IRQs enabled: IRQ_EN=0x%08x IRQ_SRCS_MSK=0x%08x\n",
-		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN)),
+	dev_info(bdev->dev, "BAM enabled: CTRL=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
 }
 
