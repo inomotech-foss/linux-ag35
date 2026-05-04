@@ -730,6 +730,13 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
 		bam_dmux_power_off(dmux);
 		bam_dmux_pc_ack(dmux);
+		/*
+		 * Drop the pm_runtime reference that boot_work acquired.
+		 * This will trigger runtime_suspend → clear APPS bit 1,
+		 * completing the power-down handshake.
+		 */
+		pm_runtime_mark_last_busy(dmux->dev);
+		pm_runtime_put_autosuspend(dmux->dev);
 	}
 
 	dmux->pc_state = new_state;
@@ -840,8 +847,22 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		dev_err(dmux->dev, "boot power-on failed: %d\n", ret);
 		return;
 	}
-	pm_runtime_mark_last_busy(dmux->dev);
-	pm_runtime_put_autosuspend(dmux->dev);
+
+	/*
+	 * Do NOT call pm_runtime_put here.  We must keep APPS bit 1
+	 * (A2_POWER_CONTROL) asserted for the entire duration of the
+	 * connection.  The downstream kernel holds the vote indefinitely
+	 * after the first connection; it only clears bit 1 during an
+	 * explicit power-down request (ul_timeout_work after all TX is done).
+	 *
+	 * If we put the runtime reference here, the autosuspend timer
+	 * (1000ms) fires bam_dmux_runtime_suspend() which clears bit 1.
+	 * The modem interprets this as "APPS no longer needs A2 power" and
+	 * deactivates — tearing down the connection before any data flows.
+	 *
+	 * The reference will be released in power_off (pc_irq new_state=0)
+	 * when the modem initiates a controlled shutdown.
+	 */
 }
 
 /**
