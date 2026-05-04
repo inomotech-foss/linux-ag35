@@ -497,30 +497,17 @@ static void bam_reset(struct bam_device *bdev)
 static void bam_enable_irqs(struct bam_device *bdev)
 {
 	u32 val;
-	int i;
 
-	/*
-	 * For powered-remotely BAMs, wait for the remote processor to set
-	 * BAM_EN.  The remote enables the BAM as part of its power-on
-	 * sequence after the SMSM handshake.  Timeout after 1 second.
-	 */
-	for (i = 0; i < 1000; i++) {
-		val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-		if (val & BAM_EN)
-			break;
-		usleep_range(1000, 1500);
-	}
+	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
+	dev_info(bdev->dev, "enabling BAM (no SW_RST): BAM_CTRL=0x%08x\n", val);
 
-	if (!(val & BAM_EN)) {
-		dev_err(bdev->dev, "BAM_EN not set by remote after 1s (CTRL=0x%08x)\n", val);
-		/* Set it ourselves as fallback */
-		val |= BAM_EN;
-		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-	}
+	/* Enable the BAM */
+	val |= BAM_EN;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 
-	dev_info(bdev->dev, "BAM ready (waited %dms): CTRL=0x%08x CNFG_BITS=0x%08x\n",
-		 i, readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
-		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)));
+	/* set descriptor threshold, start with 4 bytes */
+	writel_relaxed(DEFAULT_CNT_THRSHLD,
+			bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
 
 	/* enable irqs for errors */
 	writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
@@ -529,7 +516,8 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	/* unmask global bam interrupt (BAM-level errors) */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-	dev_info(bdev->dev, "BAM IRQs enabled: IRQ_SRCS_MSK=0x%08x\n",
+	dev_info(bdev->dev, "BAM enabled: CTRL=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
 }
 

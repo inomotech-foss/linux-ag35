@@ -622,6 +622,10 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 	};
 	int i;
 
+	/* Already powered on (called from boot_work before pc_irq) */
+	if (dmux->rx)
+		return true;
+
 	dmux->rx = dma_request_chan(dev, "rx");
 	if (IS_ERR(dmux->rx)) {
 		dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
@@ -796,6 +800,17 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	/* If the modem already initiated, nothing to do */
 	if (dmux->pc_state)
 		return;
+
+	/*
+	 * Initialize the data path before the power vote.  The modem's A2
+	 * DMA engine expects BAM_EN, pipe P_EN, and RX descriptors to be
+	 * ready when it starts after the SMSM handshake.
+	 */
+	if (!bam_dmux_power_on(dmux)) {
+		dev_err(dmux->dev, "boot pre-init failed\n");
+		bam_dmux_power_off(dmux);
+		return;
+	}
 
 	dev_info(dmux->dev, "modem did not initiate, requesting power on\n");
 	ret = pm_runtime_resume_and_get(dmux->dev);
