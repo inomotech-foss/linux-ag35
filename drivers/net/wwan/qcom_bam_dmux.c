@@ -630,6 +630,21 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 	}
 	dmaengine_slave_config(dmux->rx, &dma_rx_conf);
 
+	/*
+	 * Allocate TX channel before submitting RX descriptors so that both
+	 * BAM pipes are initialized together (bam_init_peer_pipes).  Some
+	 * modem firmware refuses to DMA until both pipes have P_EN set.
+	 */
+	if (!dmux->tx) {
+		dmux->tx = dma_request_chan(dev, "tx");
+		if (IS_ERR(dmux->tx)) {
+			dev_err(dev, "Failed to request TX DMA channel: %pe\n",
+				dmux->tx);
+			dmux->tx = NULL;
+			return false;
+		}
+	}
+
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (!bam_dmux_skb_dma_queue_rx(&dmux->rx_skbs[i], GFP_KERNEL))
 			return false;
