@@ -483,6 +483,19 @@ static bool bam_dmux_skb_dma_submit_rx(struct bam_dmux_skb_dma *skb_dma)
 	desc->callback = bam_dmux_rx_callback;
 	desc->callback_param = skb_dma;
 	desc->cookie = dmaengine_submit(desc);
+
+	/* Log first few RX descriptor submissions for debugging */
+	{
+		static int rx_submit_count;
+
+		if (rx_submit_count < 4) {
+			dev_info(dmux->dev,
+				"rx_submit[%d]: dma_addr=0x%pad len=%u cookie=%d\n",
+				rx_submit_count, &skb_dma->addr,
+				skb_dma->skb->len, desc->cookie);
+			rx_submit_count++;
+		}
+	}
 	return true;
 }
 
@@ -579,6 +592,10 @@ static void bam_dmux_rx_callback(void *data)
 	struct bam_dmux *dmux = skb_dma->dmux;
 	struct sk_buff *skb = skb_dma->skb;
 	struct bam_dmux_hdr *hdr = (struct bam_dmux_hdr *)skb->data;
+
+	dev_info(dmux->dev, "rx_callback! dma_addr=0x%pad len=%u first_bytes=%*ph\n",
+		 &skb_dma->addr, skb->len,
+		 min_t(int, 16, skb->len), skb->data);
 
 	bam_dmux_skb_dma_unmap(skb_dma, DMA_FROM_DEVICE);
 
@@ -696,13 +713,21 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state) {
 		if (bam_dmux_power_on(dmux)) {
+			dev_info(dmux->dev,
+				"power_on complete, sending ACK (ack_state=%d->%d)\n",
+				dmux->pc_ack_state, !dmux->pc_ack_state);
 			bam_dmux_pc_ack(dmux);
+			dev_info(dmux->dev,
+				"ACK sent, issuing RX doorbell\n");
 			dma_async_issue_pending(dmux->rx);
+			dev_info(dmux->dev,
+				"doorbell written, BAM_DMUX ready\n");
 		} else {
 			dev_err(dmux->dev, "power_on failed\n");
 			bam_dmux_power_off(dmux);
 		}
 	} else {
+		dev_info(dmux->dev, "pc_irq: modem powering down\n");
 		bam_dmux_power_off(dmux);
 		bam_dmux_pc_ack(dmux);
 	}
