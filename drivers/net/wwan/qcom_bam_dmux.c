@@ -622,6 +622,10 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 	};
 	int i;
 
+	/* Already powered on (e.g. pre-initialized from boot_work) */
+	if (dmux->rx_skbs[0].addr)
+		return true;
+
 	if (!dmux->rx) {
 		dmux->rx = dma_request_chan(dev, "rx");
 		if (IS_ERR(dmux->rx)) {
@@ -801,33 +805,16 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Pre-allocate DMA channels before the power vote.  This triggers
-	 * bam_enable_irqs() (sets BAM_EN) so the modem's A2 sees BAM enabled
-	 * by the time it checks after the SMSM handshake.
+	 * Fully initialize the data path before the power vote:
+	 * - Allocate DMA channels (triggers bam_enable_irqs → BAM_EN)
+	 * - Submit RX descriptors (triggers bam_chan_init_hw → pipe P_EN)
+	 * The modem's A2 checks BAM_EN and pipe P_EN immediately upon
+	 * receiving the SMSM power request.  If either is 0, A2 gives up.
 	 */
-	if (!dmux->rx) {
-		struct dma_slave_config dma_rx_conf = {
-			.direction = DMA_DEV_TO_MEM,
-			.src_maxburst = BAM_DMUX_BUFFER_SIZE,
-		};
-
-		dmux->rx = dma_request_chan(dev, "rx");
-		if (IS_ERR(dmux->rx)) {
-			dev_err(dev, "Failed to request RX DMA channel: %pe\n",
-				dmux->rx);
-			dmux->rx = NULL;
-			return;
-		}
-		dmaengine_slave_config(dmux->rx, &dma_rx_conf);
-	}
-	if (!dmux->tx) {
-		dmux->tx = dma_request_chan(dev, "tx");
-		if (IS_ERR(dmux->tx)) {
-			dev_err(dev, "Failed to request TX DMA channel: %pe\n",
-				dmux->tx);
-			dmux->tx = NULL;
-			return;
-		}
+	if (!bam_dmux_power_on(dmux)) {
+		dev_err(dev, "boot pre-init failed\n");
+		bam_dmux_power_off(dmux);
+		return;
 	}
 
 	dev_info(dmux->dev, "modem did not initiate, requesting power on\n");
