@@ -352,10 +352,10 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
  *
  * IMPORTANT: The size MUST be a power of 2 because the driver uses
  * CIRC_CNT/CIRC_SPACE macros from circ_buf.h which use bitwise AND
- * with (size-1).  512 bytes = 64 descriptors (63 usable + 1 empty
- * slot for circular buffer management).
+ * with (size-1).  2048 bytes = 256 descriptors (255 usable + 1 empty
+ * slot for circular buffer management).  Matches downstream SPS desc_size.
  */
-#define BAM_DESC_FIFO_SIZE	SZ_512
+#define BAM_DESC_FIFO_SIZE	SZ_2K
 #define MAX_DESCRIPTORS (BAM_DESC_FIFO_SIZE / sizeof(struct bam_desc_hw) - 1)
 #define BAM_MAX_DATA_SIZE	(SZ_32K - 8)
 #define IS_BUSY(chan)	(CIRC_SPACE(bchan->tail, bchan->head,\
@@ -510,9 +510,14 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	val |= BAM_EN;
 	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 
-	/* set descriptor threshold, start with 4 bytes */
-	writel_relaxed(DEFAULT_CNT_THRSHLD,
-			bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
+	/*
+	 * Set descriptor count threshold to match downstream A2_SUMMING_THRESHOLD.
+	 * The modem's A2 DMA engine uses this to determine aggregation behavior.
+	 */
+	writel_relaxed(4096, bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
+
+	/* Enable h/w workarounds - must match downstream bam_init() */
+	writel_relaxed(BAM_CNFG_BITS_DEFAULT, bam_addr(bdev, 0, BAM_CNFG_BITS));
 
 	/* enable irqs for errors */
 	writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
@@ -521,8 +526,9 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	/* unmask global bam interrupt (BAM-level errors) */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-	dev_info(bdev->dev, "BAM enabled: CTRL=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+	dev_info(bdev->dev, "BAM enabled: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
 }
 
@@ -638,8 +644,8 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	writel(BAM_DESC_FIFO_SIZE,
 			bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES));
 
-	/* Explicitly set event threshold to 0 (generate event per descriptor) */
-	writel(0, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
+	/* Set event threshold to 0x10 to match downstream SPS configuration */
+	writel(0x10, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
 
 	if (bdev->polling) {
 		/*
