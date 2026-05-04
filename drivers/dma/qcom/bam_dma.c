@@ -505,12 +505,11 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	val |= BAM_EN;
 	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 
-	/* set descriptor threshold, start with 4 bytes */
-	writel_relaxed(DEFAULT_CNT_THRSHLD,
-			bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
-
-	/* Enable default set of h/w workarounds, ie all except BAM_FULL_PIPE */
-	writel_relaxed(BAM_CNFG_BITS_DEFAULT, bam_addr(bdev, 0, BAM_CNFG_BITS));
+	/*
+	 * Do NOT touch BAM_CNFG_BITS or BAM_DESC_CNT_TRSHLD — the remote
+	 * processor (modem) has already configured these during its own
+	 * initialization.  Overwriting them can break the remote's DMA engine.
+	 */
 
 	/* enable irqs for errors */
 	writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
@@ -519,8 +518,9 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	/* unmask global bam interrupt (BAM-level errors) */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-	dev_info(bdev->dev, "BAM enabled: CTRL=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+	dev_info(bdev->dev, "BAM enabled: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
 }
 
@@ -1347,7 +1347,7 @@ static void bam_apply_new_config(struct bam_chan *bchan,
 	struct bam_device *bdev = bchan->bdev;
 	u32 maxburst;
 
-	if (!bdev->controlled_remotely) {
+	if (!bdev->controlled_remotely && !bdev->powered_remotely) {
 		if (dir == DMA_DEV_TO_MEM)
 			maxburst = bchan->slave.src_maxburst;
 		else
