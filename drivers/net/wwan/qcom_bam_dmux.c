@@ -802,16 +802,13 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Initialize the data path before the power vote.  The modem's A2
-	 * DMA engine expects BAM_EN, pipe P_EN, and RX descriptors to be
-	 * ready when it starts after the SMSM handshake.
+	 * Match downstream sequence: do NOT pre-initialize BAM/pipes before
+	 * the SMSM handshake.  The modem's A2 DMA engine may perform its own
+	 * BAM initialization after seeing our vote.  We'll init our pipes
+	 * later, inside pc_irq (after modem responds), just before sending
+	 * ACK — matching the downstream sps_connect → toggle_apps_ack → queue_rx
+	 * sequence.
 	 */
-	if (!bam_dmux_power_on(dmux)) {
-		dev_err(dmux->dev, "boot pre-init failed\n");
-		bam_dmux_power_off(dmux);
-		return;
-	}
-
 	dev_info(dmux->dev, "modem did not initiate, requesting power on\n");
 	ret = pm_runtime_resume_and_get(dmux->dev);
 	if (ret < 0) {
