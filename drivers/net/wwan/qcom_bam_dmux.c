@@ -622,19 +622,16 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 	};
 	int i;
 
-	dmux->rx = dma_request_chan(dev, "rx");
-	if (IS_ERR(dmux->rx)) {
-		dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
-		dmux->rx = NULL;
-		return false;
+	if (!dmux->rx) {
+		dmux->rx = dma_request_chan(dev, "rx");
+		if (IS_ERR(dmux->rx)) {
+			dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
+			dmux->rx = NULL;
+			return false;
+		}
+		dmaengine_slave_config(dmux->rx, &dma_rx_conf);
 	}
-	dmaengine_slave_config(dmux->rx, &dma_rx_conf);
 
-	/*
-	 * Allocate TX channel before submitting RX descriptors so that both
-	 * BAM pipes are initialized together (bam_init_peer_pipes).  Some
-	 * modem firmware refuses to DMA until both pipes have P_EN set.
-	 */
 	if (!dmux->tx) {
 		dmux->tx = dma_request_chan(dev, "tx");
 		if (IS_ERR(dmux->tx)) {
@@ -796,11 +793,42 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux, boot_work.work);
+	struct device *dev = dmux->dev;
 	int ret;
 
 	/* If the modem already initiated, nothing to do */
 	if (dmux->pc_state)
 		return;
+
+	/*
+	 * Pre-allocate DMA channels before the power vote.  This triggers
+	 * bam_enable_irqs() (sets BAM_EN) so the modem's A2 sees BAM enabled
+	 * by the time it checks after the SMSM handshake.
+	 */
+	if (!dmux->rx) {
+		struct dma_slave_config dma_rx_conf = {
+			.direction = DMA_DEV_TO_MEM,
+			.src_maxburst = BAM_DMUX_BUFFER_SIZE,
+		};
+
+		dmux->rx = dma_request_chan(dev, "rx");
+		if (IS_ERR(dmux->rx)) {
+			dev_err(dev, "Failed to request RX DMA channel: %pe\n",
+				dmux->rx);
+			dmux->rx = NULL;
+			return;
+		}
+		dmaengine_slave_config(dmux->rx, &dma_rx_conf);
+	}
+	if (!dmux->tx) {
+		dmux->tx = dma_request_chan(dev, "tx");
+		if (IS_ERR(dmux->tx)) {
+			dev_err(dev, "Failed to request TX DMA channel: %pe\n",
+				dmux->tx);
+			dmux->tx = NULL;
+			return;
+		}
+	}
 
 	dev_info(dmux->dev, "modem did not initiate, requesting power on\n");
 	ret = pm_runtime_resume_and_get(dmux->dev);
