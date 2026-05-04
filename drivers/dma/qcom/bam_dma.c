@@ -44,6 +44,7 @@
 #include <linux/hrtimer.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 
 #include "../dmaengine.h"
 #include "../virt-dma.h"
@@ -424,6 +425,10 @@ struct bam_device {
 	bool polling;
 	struct hrtimer poll_timer;
 	atomic_t poll_timer_active;
+
+	/* diagnostic dump (powered_remotely debug) */
+	struct delayed_work diag_work;
+	bool diag_scheduled;
 };
 
 /**
@@ -519,6 +524,51 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	dev_info(bdev->dev, "BAM enabled: CTRL=0x%08x IRQ_SRCS_MSK=0x%08x\n",
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+}
+
+/**
+ * bam_diag_dump_work - Dump all BAM and pipe registers for diagnostic purposes
+ * @work: delayed work struct
+ *
+ * Fires ~1s after the first doorbell write on a powered_remotely BAM to
+ * show whether the modem/remote touched any registers.
+ */
+static void bam_diag_dump_work(struct work_struct *work)
+{
+	struct bam_device *bdev = container_of(work, struct bam_device,
+					       diag_work.work);
+	int i;
+
+	dev_info(bdev->dev, "=== BAM DIAG DUMP (1s after doorbell) ===\n");
+	dev_info(bdev->dev, "BAM_CTRL=0x%08x BAM_REVISION=0x%08x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_REVISION)));
+	dev_info(bdev->dev, "BAM_DESC_CNT_TRSHLD=0x%08x BAM_IRQ_STTS=0x%08x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_STTS)));
+	dev_info(bdev->dev, "BAM_IRQ_SRCS_EE=0x%08x BAM_IRQ_SRCS_MSK_EE=0x%08x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_EE)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+	dev_info(bdev->dev, "BAM_IRQ_EN=0x%08x BAM_CNFG_BITS=0x%08x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)));
+
+	for (i = 0; i < bdev->num_channels && i < 6; i++) {
+		dev_info(bdev->dev,
+			"pipe %d: P_CTRL=0x%08x "
+			"P_EVNT_REG=0x%08x P_SW_OFSTS=0x%08x "
+			"P_DESC_FIFO_ADDR=0x%08x P_FIFO_SIZES=0x%08x "
+			"P_EVNT_GEN_TRSHLD=0x%08x P_IRQ_STTS=0x%08x\n",
+			i,
+			readl_relaxed(bam_addr(bdev, i, BAM_P_CTRL)),
+			readl_relaxed(bam_addr(bdev, i, BAM_P_EVNT_REG)),
+			readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)),
+			readl_relaxed(bam_addr(bdev, i, BAM_P_DESC_FIFO_ADDR)),
+			readl_relaxed(bam_addr(bdev, i, BAM_P_FIFO_SIZES)),
+			readl_relaxed(bam_addr(bdev, i, BAM_P_EVNT_GEN_TRSHLD)),
+			readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS)));
+	}
+	dev_info(bdev->dev, "=== END BAM DIAG DUMP ===\n");
 }
 
 /**
@@ -671,13 +721,22 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	if (bdev->powered_remotely)
 		dev_info(bdev->dev,
-			"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x "
-			"P_DESC_FIFO_ADDR=0x%x IRQ_SRCS_MSK=0x%x\n",
-			bchan->id, dir, is_cmd_pipe,
+			"pipe %u init: dir=%d P_CTRL=0x%x "
+			"P_DESC_FIFO_ADDR=0x%x P_FIFO_SIZES=0x%x "
+			"P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
+			"P_EVNT_GEN_TRSHLD=0x%x\n",
+			bchan->id, dir,
 			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
 			readl_relaxed(bam_addr(bdev, bchan->id,
 					    BAM_P_DESC_FIFO_ADDR)),
-			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_FIFO_SIZES)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_EVNT_REG)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_SW_OFSTS)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_EVNT_GEN_TRSHLD)));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
@@ -1531,7 +1590,19 @@ static void bam_start_dma(struct bam_chan *bchan)
 	{
 		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
 
+		if (bdev->powered_remotely)
+			dev_info(bdev->dev,
+				"pipe %u doorbell: val=0x%x (tail=%u descs=%u)\n",
+				bchan->id, db_val, bchan->tail,
+				db_val / (u32)sizeof(struct bam_desc_hw));
+
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
+	}
+
+	/* Schedule one-shot diagnostic dump 1s after first doorbell */
+	if (bdev->powered_remotely && !bdev->diag_scheduled) {
+		bdev->diag_scheduled = true;
+		schedule_delayed_work(&bdev->diag_work, msecs_to_jiffies(1000));
 	}
 
 	bam_start_poll_timer(bdev);
@@ -1719,6 +1790,9 @@ static int bam_dma_probe(struct platform_device *pdev)
 			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		atomic_set(&bdev->poll_timer_active, 0);
 	}
+
+	if (bdev->powered_remotely)
+		INIT_DELAYED_WORK(&bdev->diag_work, bam_diag_dump_work);
 
 	if (bdev->controlled_remotely || bdev->powered_remotely)
 		bdev->bamclk = devm_clk_get_optional(bdev->dev, "bam_clk");
