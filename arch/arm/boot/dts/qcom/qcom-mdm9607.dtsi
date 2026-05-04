@@ -856,10 +856,14 @@
 			compatible = "qcom,bam-dmux";
 
 			interrupt-parent = <&modem_smsm>;
-                        interrupts = <1 IRQ_TYPE_EDGE_BOTH>,
-                                     <11 IRQ_TYPE_EDGE_BOTH>,
-                                     <0 IRQ_TYPE_EDGE_RISING>;
-                        interrupt-names = "pc", "pc-ack", "remote-ready";
+			interrupts = <1 IRQ_TYPE_EDGE_BOTH>,
+				     <11 IRQ_TYPE_EDGE_BOTH>,
+				     <0 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "pc", "pc-ack", "remote-ready";
+
+			qcom,smem-states = <&apps_smsm 1>, <&apps_smsm 11>;
+			qcom,smem-state-names = "pc", "pc-ack";
+
 			dmas = <&bam_dmux_dma 4>, <&bam_dmux_dma 5>;
 			dma-names = "tx", "rx";
 
