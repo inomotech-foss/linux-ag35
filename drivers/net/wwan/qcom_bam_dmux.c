@@ -474,7 +474,7 @@ static bool bam_dmux_skb_dma_submit_rx(struct bam_dmux_skb_dma *skb_dma)
 
 	desc = dmaengine_prep_slave_single(dmux->rx, skb_dma->addr,
 					   skb_dma->skb->len, DMA_DEV_TO_MEM,
-					   DMA_PREP_INTERRUPT);
+					   0);
 	if (!desc) {
 		dev_err(dmux->dev, "Failed to prepare RX DMA buffer\n");
 		return false;

@@ -185,22 +185,35 @@ static int smsm_update_bits(void *data, u32 mask, u32 value)
 	/* Make sure the value update is ordered before any kicks */
 	wmb();
 
-	/* Iterate over all hosts to check whom wants a kick */
+	/*
+	 * Kick all remote hosts that have a valid IPC channel.
+	 *
+	 * The upstream design checks the subscription mask (intr_mask)
+	 * to avoid unnecessary kicks.  However, on MDM9607 with Quectel
+	 * OCPU firmware, the modem may not subscribe to all APPS state
+	 * bits it actually needs (e.g. A2_POWER_CONTROL_ACK / bit 11).
+	 * The modem firmware relies on receiving an IPC kick whenever
+	 * APPS state changes, then re-reads the full state to decide
+	 * what changed.  Extra kicks are harmless — the modem's SMSM
+	 * handler simply re-reads and returns if nothing relevant changed.
+	 *
+	 * This matches the downstream behavior where notify_modem_smsm()
+	 * is called if the subscription mask has ANY overlap with the
+	 * changed bits — but the modem firmware may have populated the
+	 * mask incompletely.
+	 */
 	for (host = 0; host < smsm->num_hosts; host++) {
 		hostp = &smsm->hosts[host];
 
-		val = readl(smsm->subscription + host);
-		if (!(val & changes)) {
-			if (host == 1) /* modem */
-				dev_info(smsm->dev,
-					"smsm: no kick to modem: sub[1]=0x%08x changes=0x%08x (masked=0x%08x)\n",
-					val, changes, val & changes);
+		/* Skip self */
+		if (host == smsm->local_host)
 			continue;
-		}
+
+		val = readl(smsm->subscription + host);
 
 		dev_info(smsm->dev,
-			"smsm: kicking host %u: sub=0x%08x changes=0x%08x mbox=%d ipc=%d\n",
-			host, val, changes,
+			"smsm: host %u sub=0x%08x changes=0x%08x (masked=0x%08x) mbox=%d ipc=%d\n",
+			host, val, changes, val & changes,
 			!!hostp->mbox_chan, !!hostp->ipc_regmap);
 
 		if (hostp->mbox_chan) {
@@ -210,10 +223,6 @@ static int smsm_update_bits(void *data, u32 mask, u32 value)
 			regmap_write(hostp->ipc_regmap,
 				     hostp->ipc_offset,
 				     BIT(hostp->ipc_bit));
-		} else {
-			dev_warn(smsm->dev,
-				"smsm: host %u has NO notification channel!\n",
-				host);
 		}
 	}
 
