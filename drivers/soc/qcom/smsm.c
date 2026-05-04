@@ -190,8 +190,18 @@ static int smsm_update_bits(void *data, u32 mask, u32 value)
 		hostp = &smsm->hosts[host];
 
 		val = readl(smsm->subscription + host);
-		if (!(val & changes))
+		if (!(val & changes)) {
+			if (host == 1) /* modem */
+				dev_info(smsm->dev,
+					"smsm: no kick to modem: sub[1]=0x%08x changes=0x%08x (masked=0x%08x)\n",
+					val, changes, val & changes);
 			continue;
+		}
+
+		dev_info(smsm->dev,
+			"smsm: kicking host %u: sub=0x%08x changes=0x%08x mbox=%d ipc=%d\n",
+			host, val, changes,
+			!!hostp->mbox_chan, !!hostp->ipc_regmap);
 
 		if (hostp->mbox_chan) {
 			mbox_send_message(hostp->mbox_chan, NULL);
@@ -200,6 +210,10 @@ static int smsm_update_bits(void *data, u32 mask, u32 value)
 			regmap_write(hostp->ipc_regmap,
 				     hostp->ipc_offset,
 				     BIT(hostp->ipc_bit));
+		} else {
+			dev_warn(smsm->dev,
+				"smsm: host %u has NO notification channel!\n",
+				host);
 		}
 	}
 
@@ -666,6 +680,14 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 	/* Setup the reference to the local state bits */
 	smsm->local_state = states + smsm->local_host;
 	smsm->subscription = intr_mask + smsm->local_host * smsm->num_hosts;
+
+	/* Debug: dump subscription matrix for local (APPS) entry */
+	{
+		int h;
+		for (h = 0; h < smsm->num_hosts; h++)
+			dev_info(&pdev->dev, "  subscription[entry=0][host=%d] = 0x%08x\n",
+				 h, readl(smsm->subscription + h));
+	}
 
 	/* Register the outgoing state */
 	smsm->state = qcom_smem_state_register(local_node, &smsm_state_ops, smsm);
