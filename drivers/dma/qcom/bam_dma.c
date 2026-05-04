@@ -487,24 +487,30 @@ static void bam_reset(struct bam_device *bdev)
 }
 
 /**
- * bam_enable_irqs - Enable APPS-side interrupt routing without resetting BAM
+ * bam_enable_irqs - Full BAM initialization for powered-remotely BAMs
  * @bdev: bam device
  *
- * For powered-remotely BAMs (e.g. BAM-DMUX), the remote processor (modem)
- * owns the BAM hardware and has already configured BAM_CTRL, BAM_EN, and
- * device-side endpoints before signaling readiness.  A full SW_RST would
- * destroy the remote's configuration.
- *
- * This function just enables the APPS EE interrupt routing so that pipe
- * completion IRQs reach the GIC.  Per-pipe IRQ setup (P_IRQ_EN and the
- * per-pipe bit in BAM_IRQ_SRCS_MSK_EE) is handled by bam_chan_init_hw().
+ * For BAM-DMUX on MDM9607, the modem powers the BAM hardware block but does
+ * NOT pre-configure it.  The downstream Quectel SDK (satellite_mode=false)
+ * performs a full bam_init() including SW_RST.  Match that behavior exactly:
+ * reset the BAM, then configure all global registers from scratch.
  */
 static void bam_enable_irqs(struct bam_device *bdev)
 {
 	u32 val;
 
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-	dev_info(bdev->dev, "enabling BAM (no SW_RST): BAM_CTRL=0x%08x\n", val);
+	dev_info(bdev->dev, "initializing BAM: BAM_CTRL=0x%08x (pre-reset)\n", val);
+
+	/* Full software reset - matches downstream bam_init() */
+	val |= BAM_SW_RST;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	/* No delay needed per Qualcomm documentation */
+	val &= ~BAM_SW_RST;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+
+	/* make sure reset completes before enabling */
+	wmb();
 
 	/* Enable the BAM */
 	val |= BAM_EN;
@@ -526,7 +532,7 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	/* unmask global bam interrupt (BAM-level errors) */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-	dev_info(bdev->dev, "BAM enabled: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+	dev_info(bdev->dev, "BAM initialized: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
