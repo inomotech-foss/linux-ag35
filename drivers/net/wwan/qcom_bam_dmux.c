@@ -648,7 +648,6 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 		if (!bam_dmux_skb_dma_queue_rx(&dmux->rx_skbs[i], GFP_KERNEL))
 			return false;
 	}
-	dma_async_issue_pending(dmux->rx);
 
 	return true;
 }
@@ -696,9 +695,10 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state) {
-		if (bam_dmux_power_on(dmux))
+		if (bam_dmux_power_on(dmux)) {
 			bam_dmux_pc_ack(dmux);
-		else {
+			dma_async_issue_pending(dmux->rx);
+		} else {
 			dev_err(dmux->dev, "power_on failed\n");
 			bam_dmux_power_off(dmux);
 		}
@@ -928,9 +928,10 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	/* Check if remote finished initialization before us */
 	if (dmux->pc_state) {
 		dev_info(dev, "remote already powered on, initializing\n");
-		if (bam_dmux_power_on(dmux))
+		if (bam_dmux_power_on(dmux)) {
 			bam_dmux_pc_ack(dmux);
-		else
+			dma_async_issue_pending(dmux->rx);
+		} else
 			bam_dmux_power_off(dmux);
 	}
 
