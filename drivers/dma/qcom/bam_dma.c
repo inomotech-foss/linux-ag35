@@ -490,31 +490,40 @@ static void bam_reset(struct bam_device *bdev)
  * bam_enable_irqs - Full BAM initialization for powered-remotely BAMs
  * @bdev: bam device
  *
- * For BAM-DMUX on MDM9607, the modem powers the BAM hardware block but does
- * NOT pre-configure it.  The downstream Quectel SDK (satellite_mode=false)
- * performs a full bam_init() including SW_RST.  Match that behavior exactly:
- * reset the BAM, then configure all global registers from scratch.
+ * For BAM-DMUX on MDM9607, the modem powers the BAM hardware block.
+ *
+ * IMPORTANT: Do NOT perform SW_RST here.  In our initialization sequence,
+ * the AP sets APPS A2_POWER_CONTROL (SMSM bit 1) first, and the modem
+ * responds by enabling its A2 DMA engine and possibly configuring internal
+ * BAM state.  A SW_RST after the modem has responded would wipe the modem's
+ * internal A2-to-BAM pipe connection state, causing the modem's DMA engine
+ * to be unable to push data into pipe 5 even after we send the ACK.
+ *
+ * In the downstream Quectel SDK, the modem initiates (sets its SMSM bit 1
+ * first), and the AP does SW_RST BEFORE the modem configures its A2 side.
+ * Since our sequence is different (AP initiates), we must not reset.
+ *
+ * The BAM is already enabled (BAM_EN=1) by the modem/TZ.  We only need to
+ * configure global settings (CNFG_BITS, DESC_CNT_TRSHLD, IRQ) and our pipe
+ * registers.
  */
 static void bam_enable_irqs(struct bam_device *bdev)
 {
 	u32 val;
 
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-	dev_info(bdev->dev, "initializing BAM: BAM_CTRL=0x%08x (pre-reset)\n", val);
+	dev_info(bdev->dev, "initializing BAM (no SW_RST): BAM_CTRL=0x%08x "
+		 "CNFG_BITS=0x%08x DESC_CNT_TRSHLD=0x%08x\n",
+		 val,
+		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD)));
 
-	/* Full software reset - matches downstream bam_init() */
-	val |= BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-	/* No delay needed per Qualcomm documentation */
-	val &= ~BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-
-	/* make sure reset completes before enabling */
-	wmb();
-
-	/* Enable the BAM */
-	val |= BAM_EN;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	/* Ensure BAM is enabled (should already be, but be safe) */
+	if (!(val & BAM_EN)) {
+		dev_warn(bdev->dev, "BAM_EN not set, enabling\n");
+		val |= BAM_EN;
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	}
 
 	/*
 	 * Set descriptor count threshold to match downstream A2_SUMMING_THRESHOLD.
@@ -538,7 +547,7 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	/* unmask global bam interrupt (BAM-level errors) */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-	dev_info(bdev->dev, "BAM initialized: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+	dev_info(bdev->dev, "BAM configured: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
