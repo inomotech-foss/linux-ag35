@@ -714,25 +714,34 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	if (new_state) {
 		if (bam_dmux_power_on(dmux)) {
 			/*
-			 * Clear APPS A2_POWER_CONTROL (bit 1) before sending
-			 * the ACK (bit 11 toggle).  Downstream never sets bit 1
-			 * during init — the modem's A2 state machine expects to
-			 * see bit1=0 when bit 11 transitions.  If bit 1 is still
-			 * set (from boot_work's runtime_resume), the modem may
-			 * interpret the combined state as a suspend/resume
-			 * handshake rather than an init-ready signal, and never
-			 * start DMA.
+			 * Issue the RX doorbell BEFORE signaling readiness
+			 * to the modem.  The modem's A2 DMA firmware checks
+			 * P_EVNT_REG (the pipe doorbell) immediately after
+			 * seeing APPS bit 11 toggle to determine if receive
+			 * buffers are available.  If P_EVNT_REG is still 0
+			 * at that point, the modem's A2 won't start DMA.
+			 *
+			 * Downstream writes individual doorbells (one per
+			 * sps_transfer_one) immediately after bit 11 toggle,
+			 * so the first doorbell arrives within microseconds.
+			 * We batch all 32 descriptors in one doorbell write,
+			 * so we must ensure it's done BEFORE the signal.
 			 */
-			qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, 0);
-			dev_info(dmux->dev,
-				"power_on complete, cleared APPS bit 1, sending ACK (ack_state=%d->%d)\n",
-				dmux->pc_ack_state, !dmux->pc_ack_state);
-			bam_dmux_pc_ack(dmux);
-			dev_info(dmux->dev,
-				"ACK sent, issuing RX doorbell\n");
 			dma_async_issue_pending(dmux->rx);
 			dev_info(dmux->dev,
-				"doorbell written, BAM_DMUX ready\n");
+				"power_on complete, doorbell written, now signaling modem\n");
+
+			/*
+			 * Clear APPS A2_POWER_CONTROL (bit 1) to match
+			 * downstream state (downstream never sets bit 1).
+			 */
+			qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, 0);
+
+			/* Toggle APPS bit 11 (ACK) — tells modem we're ready */
+			bam_dmux_pc_ack(dmux);
+			dev_info(dmux->dev,
+				"ACK sent (ack_state=%d), BAM_DMUX ready\n",
+				dmux->pc_ack_state);
 		} else {
 			dev_err(dmux->dev, "power_on failed\n");
 			bam_dmux_power_off(dmux);
