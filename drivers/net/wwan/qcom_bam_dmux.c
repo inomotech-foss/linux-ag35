@@ -720,22 +720,24 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			 * seeing APPS bit 11 toggle to determine if receive
 			 * buffers are available.  If P_EVNT_REG is still 0
 			 * at that point, the modem's A2 won't start DMA.
-			 *
-			 * Downstream writes individual doorbells (one per
-			 * sps_transfer_one) immediately after bit 11 toggle,
-			 * so the first doorbell arrives within microseconds.
-			 * We batch all 32 descriptors in one doorbell write,
-			 * so we must ensure it's done BEFORE the signal.
 			 */
 			dma_async_issue_pending(dmux->rx);
 			dev_info(dmux->dev,
 				"power_on complete, doorbell written, now signaling modem\n");
 
 			/*
-			 * Clear APPS A2_POWER_CONTROL (bit 1) to match
-			 * downstream state (downstream never sets bit 1).
+			 * Do NOT clear APPS bit 1 here.  The modem subscribes
+			 * to bit 1 changes and interprets a clear as "AP no
+			 * longer wants the data path."  If the modem sees
+			 * bit 1 cleared BEFORE bit 11 toggles, it may
+			 * deactivate its A2 DMA engine and never process our
+			 * descriptors.
+			 *
+			 * APPS bit 1 must remain set to indicate the AP wants
+			 * the data path active.  It will be cleared later by
+			 * runtime_suspend when the AP actually wants to
+			 * power down.
 			 */
-			qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, 0);
 
 			/* Toggle APPS bit 11 (ACK) — tells modem we're ready */
 			bam_dmux_pc_ack(dmux);

@@ -491,53 +491,38 @@ static void bam_reset(struct bam_device *bdev)
  * @bdev: bam device
  *
  * Called when the first DMA channel is allocated on a powered-remotely BAM.
- * Performs a full SW_RST + BAM configuration sequence matching downstream's
- * sps_register_bam_device() behavior.
  *
- * The downstream SPS driver ALWAYS performs SW_RST when the AP responds to
- * the modem's A2 power-on notification — even though the modem has already
- * configured some BAM state.  After seeing the AP's APPS bit 11 toggle
- * (sent later, after pipe init), the modem RE-configures its own side of
- * the BAM.  Without SW_RST, the BAM may contain stale state from the
- * modem's initial configuration that conflicts with the AP's pipe setup,
- * causing the modem's A2 DMA engine to never process descriptors.
+ * On MDM9607 with Quectel OCPU firmware (AP-initiated power flow), the
+ * BAM is NOT yet configured by the modem when this runs — BAM_CTRL will
+ * be 0x00020000 (IBC_DISABLE only, BAM_EN=0).  The modem configures its
+ * A2 DMA side of the BAM AFTER seeing the APPS bit 11 toggle.
+ *
+ * Do NOT perform SW_RST — there's nothing to reset (BAM_EN not even set),
+ * and the modem may have written internal A2 state that shouldn't be
+ * destroyed.  Just enable BAM and configure global registers for our side.
  */
 static void bam_enable_irqs(struct bam_device *bdev)
 {
 	u32 val;
 
-	/*
-	 * Full SW_RST matching downstream sps_register_bam_device().
-	 * This clears all BAM internal state (pipe FIFOs, pointers, etc.).
-	 * The modem expects this and will re-configure after seeing our
-	 * APPS bit 11 toggle.
-	 */
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-	dev_info(bdev->dev, "BAM SW_RST: BAM_CTRL before=0x%08x\n", val);
-	val |= BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-	val &= ~BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	dev_info(bdev->dev, "BAM init (no reset): BAM_CTRL=0x%08x\n", val);
 
-	/* make sure reset completes before enabling BAM */
-	wmb();
-
-	/* Enable BAM */
-	val |= BAM_EN;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	/* Enable BAM if not already enabled */
+	if (!(val & BAM_EN)) {
+		val |= BAM_EN;
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+		wmb();
+	}
 
 	/*
 	 * Set descriptor count threshold to match downstream A2_SUMMING_THRESHOLD.
-	 * The modem's A2 DMA engine uses this to determine aggregation behavior.
 	 */
 	writel_relaxed(4096, bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
 
 	/*
 	 * Configure BAM behavior bits.  Downstream sets ALL bits except
-	 * BAM_FULL_PIPE (bit 11): cfg_bits = 0xffffffff & ~(1 << 11) = 0xFFFFF7FF.
-	 * Many of the lower/upper bits are undocumented but the modem's A2 DMA
-	 * engine may read CNFG_BITS to verify the BAM is properly initialized.
-	 * Match downstream exactly.
+	 * BAM_FULL_PIPE (bit 11): 0xFFFFF7FF.
 	 */
 	writel_relaxed(0xFFFFF7FF, bam_addr(bdev, 0, BAM_CNFG_BITS));
 
@@ -548,7 +533,7 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	/* unmask global bam interrupt (BAM-level errors) */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-	dev_info(bdev->dev, "BAM configured after SW_RST: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+	dev_info(bdev->dev, "BAM configured: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
