@@ -713,8 +713,19 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state) {
 		if (bam_dmux_power_on(dmux)) {
+			/*
+			 * Clear APPS A2_POWER_CONTROL (bit 1) before sending
+			 * the ACK (bit 11 toggle).  Downstream never sets bit 1
+			 * during init — the modem's A2 state machine expects to
+			 * see bit1=0 when bit 11 transitions.  If bit 1 is still
+			 * set (from boot_work's runtime_resume), the modem may
+			 * interpret the combined state as a suspend/resume
+			 * handshake rather than an init-ready signal, and never
+			 * start DMA.
+			 */
+			qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, 0);
 			dev_info(dmux->dev,
-				"power_on complete, sending ACK (ack_state=%d->%d)\n",
+				"power_on complete, cleared APPS bit 1, sending ACK (ack_state=%d->%d)\n",
 				dmux->pc_ack_state, !dmux->pc_ack_state);
 			bam_dmux_pc_ack(dmux);
 			dev_info(dmux->dev,
