@@ -265,18 +265,47 @@ static irqreturn_t smsm_intr(int irq, void *data)
 		 val, changed, readl(smsm->local_state));
 
 	/*
-	 * Mirror INIT/SMDINIT from remote into local APPS state.
-	 * With proactive setting at probe, these are already set — the
-	 * smsm_update_bits() calls below become no-ops (no state change,
-	 * no kick sent).  This is intentional: the modem already found
-	 * INIT|SMDINIT during its boot-time state read and proceeded
-	 * without needing a kick-back.  Keep this code as a safety net
-	 * for edge cases (e.g. if APPS state was somehow cleared).
+	 * Mirror INIT/SMDINIT from remote into local APPS state AND
+	 * always kick the remote processor back.
+	 *
+	 * The modem firmware handshake requires receiving a kick-back
+	 * after it sets INIT/SMDINIT.  It waits for this confirmation
+	 * before proceeding with subsystem init (including A2/BAM-DMUX).
+	 *
+	 * With proactive INIT|SMDINIT (set at SMSM probe), the mirror
+	 * calls below are no-ops (bits already set → smsm_update_bits
+	 * detects no change → skips the kick loop).  But the modem still
+	 * needs the kick.  Send it unconditionally.
 	 */
 	if (val & SMSM_INIT)
 		smsm_update_bits(smsm, SMSM_INIT, SMSM_INIT);
 	if (val & SMSM_SMDINIT)
 		smsm_update_bits(smsm, SMSM_SMDINIT, SMSM_SMDINIT);
+
+	/*
+	 * Unconditional kick-back: if remote has INIT or SMDINIT set,
+	 * always kick it regardless of whether our state changed.
+	 * This ensures the modem gets its expected confirmation even
+	 * when APPS state was pre-populated at probe time.
+	 */
+	if (val & (SMSM_INIT | SMSM_SMDINIT)) {
+		struct smsm_host *hostp;
+		u32 host;
+
+		for (host = 0; host < smsm->num_hosts; host++) {
+			hostp = &smsm->hosts[host];
+			if (host == smsm->local_host)
+				continue;
+			if (hostp->mbox_chan) {
+				mbox_send_message(hostp->mbox_chan, NULL);
+				mbox_client_txdone(hostp->mbox_chan, 0);
+			} else if (hostp->ipc_regmap) {
+				regmap_write(hostp->ipc_regmap,
+					     hostp->ipc_offset,
+					     BIT(hostp->ipc_bit));
+			}
+		}
+	}
 
 	for_each_set_bit(i, entry->irq_enabled, 32) {
 		if (!(changed & BIT(i)))
