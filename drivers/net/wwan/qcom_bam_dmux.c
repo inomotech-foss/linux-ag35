@@ -850,18 +850,39 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	if (dmux->pc_state)
 		return;
 
+	dev_info(dmux->dev, "modem did not initiate, pre-configuring BAM\n");
+
 	/*
-	 * Match downstream sequence: do NOT pre-initialize BAM/pipes before
-	 * the SMSM handshake.  The modem's A2 DMA engine may perform its own
-	 * BAM initialization after seeing our vote.  We'll init our pipes
-	 * later, inside pc_irq (after modem responds), just before sending
-	 * ACK — matching the downstream sps_connect → toggle_apps_ack → queue_rx
-	 * sequence.
+	 * CRITICAL: Configure BAM + pipes + descriptors BEFORE signaling
+	 * the modem.  On this firmware the modem uses the "power resume"
+	 * path: it auto-ACKs and immediately tries to access the BAM.
+	 * If we signal first (set APPS bit 1) and configure after (as in
+	 * the pc_irq handler), the SW_RST in BAM init destroys whatever
+	 * state the modem set up in its auto-response, and the modem's
+	 * DMA engine never starts (P_SW_OFSTS stays at 0).
+	 *
+	 * By pre-configuring, the modem finds a fully initialized BAM
+	 * with descriptors posted and doorbell written when it responds.
 	 */
-	dev_info(dmux->dev, "modem did not initiate, requesting power on\n");
+	if (!bam_dmux_power_on(dmux)) {
+		dev_err(dmux->dev, "BAM pre-configure failed\n");
+		return;
+	}
+
+	/* Write RX doorbell so descriptors are visible to modem's DMA */
+	dma_async_issue_pending(dmux->rx);
+	dev_info(dmux->dev, "BAM pre-configured, doorbell written, now signaling modem\n");
+
+	/*
+	 * Now signal the modem by setting APPS bit 1.  The modem will
+	 * auto-respond (set modem bit 1 + bit 11) and find the BAM ready.
+	 * The pc_irq handler will then just ACK (toggle bit 11) and
+	 * re-write the doorbell (harmless since it's the same value).
+	 */
 	ret = pm_runtime_resume_and_get(dmux->dev);
 	if (ret < 0) {
 		dev_err(dmux->dev, "boot power-on failed: %d\n", ret);
+		bam_dmux_power_off(dmux);
 		return;
 	}
 
@@ -901,10 +922,12 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 	 * A2_POWER_CONTROL (bit 1) once ready — that triggers pc_irq and
 	 * the proper initial-boot flow with CMD_OPEN.
 	 *
-	 * If the modem doesn't initiate within 5 seconds, boot_work will
+	 * If the modem doesn't initiate within 2 seconds, boot_work will
 	 * force APPS bit 1 as a fallback (AP-initiated resume path).
+	 * 2s is enough for A2 init (~1.5s observed) but short enough to
+	 * avoid the modem timing out its DATA channels.
 	 */
-	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(5000));
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(2000));
 
 	return IRQ_HANDLED;
 }

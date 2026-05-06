@@ -524,8 +524,8 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	val |= BAM_EN;
 	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 
-	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD */
-	writel_relaxed(4096, bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
+	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD=4 */
+	writel_relaxed(DEFAULT_CNT_THRSHLD, bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
 
 	/*
 	 * Configure BAM behavior bits.  Downstream sets ALL bits except
