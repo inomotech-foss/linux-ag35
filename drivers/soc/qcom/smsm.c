@@ -266,11 +266,12 @@ static irqreturn_t smsm_intr(int irq, void *data)
 
 	/*
 	 * Mirror INIT/SMDINIT from remote into local APPS state.
-	 * This matches the downstream smsm_irq_handler() handshake:
-	 *   if (remote & SMSM_INIT) apps |= SMSM_INIT;
-	 *   if (remote & SMSM_SMDINIT) apps |= SMSM_SMDINIT;
-	 * smsm_update_bits() will send the IPC kick to the remote
-	 * processor if its subscription mask has matching bits set.
+	 * With proactive setting at probe, these are already set — the
+	 * smsm_update_bits() calls below become no-ops (no state change,
+	 * no kick sent).  This is intentional: the modem already found
+	 * INIT|SMDINIT during its boot-time state read and proceeded
+	 * without needing a kick-back.  Keep this code as a safety net
+	 * for edge cases (e.g. if APPS state was somehow cleared).
 	 */
 	if (val & SMSM_INIT)
 		smsm_update_bits(smsm, SMSM_INIT, SMSM_INIT);
@@ -770,41 +771,36 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 	}
 
 	/*
-	 * Signal to all remote processors that APPS is alive.
+	 * Signal to all remote processors that APPS is fully initialized.
 	 *
-	 * Downstream kernels only set SMSM_PROC_AWAKE here; SMSM_INIT and
-	 * SMSM_SMDINIT are set reactively by the SMSM IRQ handler when the
-	 * modem mirrors them (see smsm_intr()).  SMSM_RPCINIT is never set
-	 * in downstream — there is no RPC layer.
+	 * On downstream 3.18, smd_init() and smd_post_init() proactively
+	 * set SMSM_INIT and SMSM_SMDINIT in APPS state BEFORE the modem
+	 * boots.  The modem's A2/BAM-DMUX init code runs early during
+	 * modem boot and checks APPS state — if INIT|SMDINIT are missing,
+	 * the modem skips A2 DMA initialization entirely and never
+	 * spontaneously sets A2_POWER_CONTROL (bit 1) in its SMSM entry.
 	 *
-	 * The modem expects the following handshake:
-	 *   1. APPS sets PROC_AWAKE
-	 *   2. Modem boots, sets INIT in MODEM_STATE, kicks APPS
-	 *   3. APPS mirrors INIT into APPS_STATE, kicks modem back
-	 *   4. Modem sees APPS has INIT, sets SMDINIT, kicks APPS
-	 *   5. APPS mirrors SMDINIT into APPS_STATE, kicks modem back
-	 *   6. Modem proceeds with full initialization
+	 * With reactive mirroring (set INIT|SMDINIT only after modem sets
+	 * them), the bits arrive too late: the modem's A2 init has already
+	 * passed its window and won't retry.  The result is that BAM_DMUX
+	 * never activates (P_SW_OFSTS stays 0, no rmnet interfaces).
+	 *
+	 * RPCINIT must also be set.  The modem firmware waits for APPS to
+	 * signal IPC Router readiness before activating its data subsystem.
+	 * In downstream, ipc_router_smd_xprt sets this when opening the
+	 * IPCRTR channel.  Since we build monolithically, setting it at
+	 * probe is safe.
 	 *
 	 * CRITICAL: SMEM survives warm reboots, so stale bits from a
-	 * previous kernel may still be set.  The downstream smsm_init()
-	 * explicitly clears APPS state to 0 before setting PROC_AWAKE.
-	 * Without this, smsm_update_bits() would read-modify-write and
-	 * preserve stale INIT|SMDINIT|RPCINIT, breaking the handshake
-	 * because the modem sees the stale bits and skips the kick.
-	 *
-	 * RPCINIT must also be set here.  The modem firmware waits for
-	 * APPS to signal IPC Router readiness (RPCINIT) before activating
-	 * its data subsystem (A2/BAM-DMUX).  In the downstream kernel,
-	 * ipc_router_smd_xprt sets this bit when it opens the IPCRTR
-	 * channel.  Since we build monolithically, the QRTR/IPCRTR driver
-	 * will be available shortly after probe, so setting RPCINIT here
-	 * is safe and avoids the modem waiting indefinitely.
+	 * previous kernel may still be set.  Clear APPS state to 0 first,
+	 * then set all required bits atomically.
 	 */
 	writel(0, smsm->local_state);
 	wmb();
-	smsm_update_bits(smsm, SMSM_PROC_AWAKE | SMSM_RPCINIT,
-			 SMSM_PROC_AWAKE | SMSM_RPCINIT);
-	dev_info(&pdev->dev, "APPS SMSM state cleared and set to PROC_AWAKE|RPCINIT (0x%x)\n",
+	smsm_update_bits(smsm,
+			 SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT | SMSM_PROC_AWAKE,
+			 SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT | SMSM_PROC_AWAKE);
+	dev_info(&pdev->dev, "APPS SMSM state set to INIT|SMDINIT|RPCINIT|PROC_AWAKE (0x%x)\n",
 		 readl(smsm->local_state));
 
 	/* Print current state values for debugging */
