@@ -304,7 +304,7 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
 
 /* BAM_DESC_CNT_TRSHLD */
 #define CNT_TRSHLD		0xffff
-#define DEFAULT_CNT_THRSHLD	0x4
+#define DEFAULT_CNT_THRSHLD	0x1000
 
 /* BAM_IRQ_SRCS */
 #define BAM_IRQ			BIT(31)
@@ -339,7 +339,7 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
 #define P_OUT_OF_DESC_EN	BIT(3)
 #define P_ERR_EN		BIT(4)
 #define P_TRNSFR_END_EN		BIT(5)
-#define P_DEFAULT_IRQS_EN	(P_PRCSD_DESC_EN | P_ERR_EN | P_TRNSFR_END_EN)
+#define P_DEFAULT_IRQS_EN	P_TRNSFR_END_EN
 
 /* BAM_P_SW_OFSTS */
 #define P_SW_OFSTS_MASK		0xffff
@@ -478,8 +478,8 @@ static void bam_reset(struct bam_device *bdev)
 	/* Enable default set of h/w workarounds, ie all except BAM_FULL_PIPE */
 	writel_relaxed(BAM_CNFG_BITS_DEFAULT, bam_addr(bdev, 0, BAM_CNFG_BITS));
 
-	/* enable irqs for errors */
-	writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
+	/* enable irqs for errors + timer (downstream value: 0x16) */
+	writel_relaxed(BAM_TIMER_EN | BAM_ERROR_EN | BAM_HRESP_ERR_EN,
 			bam_addr(bdev, 0, BAM_IRQ_EN));
 
 	/* unmask global bam interrupt */
@@ -543,8 +543,8 @@ static void bam_enable_irqs(struct bam_device *bdev)
 	 */
 	writel_relaxed(0xFFFFF7FF, bam_addr(bdev, 0, BAM_CNFG_BITS));
 
-	/* enable irqs for errors */
-	writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
+	/* enable irqs for errors + timer (downstream value: 0x16) */
+	writel_relaxed(BAM_TIMER_EN | BAM_ERROR_EN | BAM_HRESP_ERR_EN,
 			bam_addr(bdev, 0, BAM_IRQ_EN));
 
 	/* unmask global bam interrupt (BAM-level errors) */
