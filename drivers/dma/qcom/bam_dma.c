@@ -487,37 +487,44 @@ static void bam_reset(struct bam_device *bdev)
 }
 
 /**
- * bam_enable_irqs - Full BAM initialization for powered-remotely BAMs
+ * bam_enable_irqs - Full BAM reset + initialization for powered-remotely BAMs
  * @bdev: bam device
  *
  * Called when the first DMA channel is allocated on a powered-remotely BAM.
+ * At this point the modem has already signaled readiness (SMSM bit 1 set),
+ * so the BAM hardware is powered and accessible.
  *
- * On MDM9607 with Quectel OCPU firmware (AP-initiated power flow), the
- * BAM is NOT yet configured by the modem when this runs — BAM_CTRL will
- * be 0x00020000 (IBC_DISABLE only, BAM_EN=0).  The modem configures its
- * A2 DMA side of the BAM AFTER seeing the APPS bit 11 toggle.
+ * The downstream Qualcomm SPS driver performs a FULL SW_RST even for
+ * "remotely managed" BAMs (SPS_BAM_MGR_DEVICE_REMOTE).  After reset,
+ * both AP and modem reconfigure their respective pipes.  The modem
+ * reconfigures its side after seeing the APPS bit 11 (ACK) toggle.
  *
- * Do NOT perform SW_RST — there's nothing to reset (BAM_EN not even set),
- * and the modem may have written internal A2 state that shouldn't be
- * destroyed.  Just enable BAM and configure global registers for our side.
+ * Without SW_RST, the BAM may be in a partially-configured state from
+ * the modem's initial A2 power-up, which can prevent DMA transactions
+ * from completing (P_SW_OFSTS stays at 0 despite valid descriptors
+ * and doorbell).
  */
 static void bam_enable_irqs(struct bam_device *bdev)
 {
 	u32 val;
 
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-	dev_info(bdev->dev, "BAM init (no reset): BAM_CTRL=0x%08x\n", val);
+	dev_info(bdev->dev, "BAM init: BAM_CTRL=0x%08x (before reset)\n", val);
 
-	/* Enable BAM if not already enabled */
-	if (!(val & BAM_EN)) {
-		val |= BAM_EN;
-		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-		wmb();
-	}
+	/* SW_RST: reset all pipes, FIFOs, and internal state */
+	val |= BAM_SW_RST;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	val &= ~BAM_SW_RST;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 
-	/*
-	 * Set descriptor count threshold to match downstream A2_SUMMING_THRESHOLD.
-	 */
+	/* make sure reset completes before enabling BAM */
+	wmb();
+
+	/* enable BAM */
+	val |= BAM_EN;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+
+	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD */
 	writel_relaxed(4096, bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
 
 	/*

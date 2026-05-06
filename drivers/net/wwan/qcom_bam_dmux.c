@@ -714,36 +714,31 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	if (new_state) {
 		if (bam_dmux_power_on(dmux)) {
 			/*
-			 * Issue the RX doorbell BEFORE signaling readiness
-			 * to the modem.  The modem's A2 DMA firmware checks
-			 * P_EVNT_REG (the pipe doorbell) immediately after
-			 * seeing APPS bit 11 toggle to determine if receive
-			 * buffers are available.  If P_EVNT_REG is still 0
-			 * at that point, the modem's A2 won't start DMA.
+			 * Match downstream init order: toggle ACK FIRST, then
+			 * write the RX doorbell.  On downstream, the sequence
+			 * is: sps_register_bam_device (SW_RST + init) →
+			 * sps_connect (pipe config) → toggle_apps_ack() →
+			 * queue_rx() (descriptors + doorbells).
+			 *
+			 * The modem's A2 firmware starts its DMA polling loop
+			 * only AFTER receiving the APPS bit 11 (ACK) toggle.
+			 * Posting descriptors before ACK means the modem isn't
+			 * yet listening when the doorbell is written.
+			 */
+
+			/* Toggle APPS bit 11 (ACK) — tells modem BAM is ready */
+			bam_dmux_pc_ack(dmux);
+			dev_info(dmux->dev,
+				"ACK sent (ack_state=%d), now writing doorbell\n",
+				dmux->pc_ack_state);
+
+			/*
+			 * Now write the RX doorbell.  The modem is listening
+			 * after receiving ACK and will see P_EVNT_REG advance.
 			 */
 			dma_async_issue_pending(dmux->rx);
 			dev_info(dmux->dev,
-				"power_on complete, doorbell written, now signaling modem\n");
-
-			/*
-			 * Do NOT clear APPS bit 1 here.  The modem subscribes
-			 * to bit 1 changes and interprets a clear as "AP no
-			 * longer wants the data path."  If the modem sees
-			 * bit 1 cleared BEFORE bit 11 toggles, it may
-			 * deactivate its A2 DMA engine and never process our
-			 * descriptors.
-			 *
-			 * APPS bit 1 must remain set to indicate the AP wants
-			 * the data path active.  It will be cleared later by
-			 * runtime_suspend when the AP actually wants to
-			 * power down.
-			 */
-
-			/* Toggle APPS bit 11 (ACK) — tells modem we're ready */
-			bam_dmux_pc_ack(dmux);
-			dev_info(dmux->dev,
-				"ACK sent (ack_state=%d), BAM_DMUX ready\n",
-				dmux->pc_ack_state);
+				"doorbell written, BAM_DMUX ready\n");
 		} else {
 			dev_err(dmux->dev, "power_on failed\n");
 			bam_dmux_power_off(dmux);
