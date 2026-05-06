@@ -706,52 +706,45 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 {
 	struct bam_dmux *dmux = data;
-	bool new_state = !dmux->pc_state;
+	bool new_state;
 
-	dev_info(dmux->dev, "pc_irq: new_state=%d\n", new_state);
+	/*
+	 * Read the actual modem state instead of toggling.  Boot_work may
+	 * have set pc_state=true before pc_irq fires, which would break
+	 * the toggle-based logic (it would interpret the first real modem
+	 * bit-1 assertion as "power down").
+	 */
+	irq_get_irqchip_state(dmux->pc_irq, IRQCHIP_STATE_LINE_LEVEL, &new_state);
+
+	dev_info(dmux->dev, "pc_irq: modem_bit1=%d pc_state=%d\n",
+		 new_state, dmux->pc_state);
+
 	cancel_delayed_work(&dmux->boot_work);
 
-	if (new_state) {
+	if (new_state && !dmux->pc_state) {
+		/* Modem asserted A2_POWER_CONTROL — bring up */
 		if (bam_dmux_power_on(dmux)) {
-			/*
-			 * Match downstream init order: toggle ACK FIRST, then
-			 * write the RX doorbell.  On downstream, the sequence
-			 * is: sps_register_bam_device (SW_RST + init) →
-			 * sps_connect (pipe config) → toggle_apps_ack() →
-			 * queue_rx() (descriptors + doorbells).
-			 *
-			 * The modem's A2 firmware starts its DMA polling loop
-			 * only AFTER receiving the APPS bit 11 (ACK) toggle.
-			 * Posting descriptors before ACK means the modem isn't
-			 * yet listening when the doorbell is written.
-			 */
-
-			/* Toggle APPS bit 11 (ACK) — tells modem BAM is ready */
 			bam_dmux_pc_ack(dmux);
-			dev_info(dmux->dev,
-				"ACK sent (ack_state=%d), now writing doorbell\n",
-				dmux->pc_ack_state);
-
-			/*
-			 * Now write the RX doorbell.  The modem is listening
-			 * after receiving ACK and will see P_EVNT_REG advance.
-			 */
+			dev_info(dmux->dev, "pc_irq: ACK sent (ack_state=%d)\n",
+				 dmux->pc_ack_state);
 			dma_async_issue_pending(dmux->rx);
-			dev_info(dmux->dev,
-				"doorbell written, BAM_DMUX ready\n");
 		} else {
-			dev_err(dmux->dev, "power_on failed\n");
+			dev_err(dmux->dev, "pc_irq: power_on failed\n");
 			bam_dmux_power_off(dmux);
 		}
-	} else {
+	} else if (new_state && dmux->pc_state) {
+		/*
+		 * Modem asserted bit 1 but we already set up via boot_work.
+		 * Just re-ACK to keep modem happy.
+		 */
+		bam_dmux_pc_ack(dmux);
+		dma_async_issue_pending(dmux->rx);
+		dev_info(dmux->dev, "pc_irq: already up, re-ACK sent\n");
+	} else if (!new_state) {
+		/* Modem de-asserted — power down */
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
 		bam_dmux_power_off(dmux);
 		bam_dmux_pc_ack(dmux);
-		/*
-		 * Drop the pm_runtime reference that boot_work acquired.
-		 * This will trigger runtime_suspend → clear APPS bit 1,
-		 * completing the power-down handshake.
-		 */
 		pm_runtime_mark_last_busy(dmux->dev);
 		pm_runtime_put_autosuspend(dmux->dev);
 	}
@@ -832,75 +825,92 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 }
 
 /**
- * bam_dmux_boot_work() - kick-start BAM-DMUX on firmwares that need APPS to
- *                        initiate the power handshake.
+ * bam_dmux_boot_work_fn() - bring up BAM-DMUX matching the downstream 3.18
+ *                           kernel's initialization sequence.
  *
- * Some modem firmwares (e.g. Quectel OCPU variants) do not assert
- * A2_POWER_CONTROL until APPS requests first.  This work fires when the
- * modem signals readiness (SMDINIT via remote-ready IRQ), then triggers the
- * runtime resume path which sets APPS A2_POWER_CONTROL and waits for
- * the modem's response.
+ * The downstream kernel (msm/bam_dmux.c) does NOT use pm_runtime for the
+ * initial power-on.  Its sequence when the modem is ready:
+ *   1. reconnect_bam() — register BAM, connect pipes
+ *   2. toggle_apps_ack() — toggle APPS SMSM bit 11
+ *   3. queue_rx() — submit RX descriptors + write doorbell
+ *
+ * On Quectel OCPU firmware, the modem does not spontaneously assert
+ * A2_POWER_CONTROL (bit 1).  Instead APPS must signal first.  The modem
+ * then immediately starts DMA without explicitly ACKing back (no bit 11
+ * toggle from modem side).  The upstream driver's pm_runtime path times
+ * out waiting for an ACK that never arrives.
+ *
+ * This function replicates the downstream sequence directly:
+ *   1. Configure BAM (request DMA channels, submit RX buffers)
+ *   2. Set APPS A2_POWER_CONTROL (bit 1) — tells modem we want data
+ *   3. Toggle APPS A2_POWER_CONTROL_ACK (bit 11) — tells modem BAM is ready
+ *   4. Write RX doorbell — modem DMA can now see our descriptors
+ *   5. Force pm_runtime active (so TX path works without re-triggering resume)
  */
 static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux, boot_work.work);
-	int ret;
 
-	/* If the modem already initiated, nothing to do */
+	/* If the modem already initiated via pc_irq, nothing to do */
 	if (dmux->pc_state)
 		return;
 
-	dev_info(dmux->dev, "modem did not initiate, pre-configuring BAM\n");
+	dev_info(dmux->dev, "boot_work: configuring BAM for modem data\n");
 
-	/*
-	 * CRITICAL: Configure BAM + pipes + descriptors BEFORE signaling
-	 * the modem.  On this firmware the modem uses the "power resume"
-	 * path: it auto-ACKs and immediately tries to access the BAM.
-	 * If we signal first (set APPS bit 1) and configure after (as in
-	 * the pc_irq handler), the SW_RST in BAM init destroys whatever
-	 * state the modem set up in its auto-response, and the modem's
-	 * DMA engine never starts (P_SW_OFSTS stays at 0).
-	 *
-	 * By pre-configuring, the modem finds a fully initialized BAM
-	 * with descriptors posted and doorbell written when it responds.
-	 */
+	/* Step 1: Configure BAM — request DMA channels, submit RX buffers */
 	if (!bam_dmux_power_on(dmux)) {
-		dev_err(dmux->dev, "BAM pre-configure failed\n");
+		dev_err(dmux->dev, "boot_work: BAM configuration failed\n");
 		return;
 	}
 
-	/* Write RX doorbell so descriptors are visible to modem's DMA */
+	/*
+	 * Step 2: Set APPS A2_POWER_CONTROL (bit 1).
+	 * This tells the modem "APPS wants the A2 data path active".
+	 * Do NOT use bam_dmux_pc_vote() here — it reinit's the completion
+	 * which would break any concurrent pm_runtime path.  Just set the
+	 * bit directly.
+	 */
+	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
+	dev_info(dmux->dev, "boot_work: APPS A2_POWER_CONTROL set (bit 1)\n");
+
+	/*
+	 * Step 3: Toggle APPS A2_POWER_CONTROL_ACK (bit 11).
+	 * On downstream, toggle_apps_ack() is called immediately after
+	 * reconnect_bam().  This signal tells the modem's A2 DMA engine
+	 * that the BAM is configured and it can start polling.
+	 */
+	bam_dmux_pc_ack(dmux);
+	dev_info(dmux->dev, "boot_work: APPS ACK toggled (bit 11, ack_state=%d)\n",
+		 dmux->pc_ack_state);
+
+	/*
+	 * Step 4: Write RX doorbell — modem DMA will see descriptors when
+	 * it starts its polling loop.
+	 */
 	dma_async_issue_pending(dmux->rx);
-	dev_info(dmux->dev, "BAM pre-configured, doorbell written, now signaling modem\n");
+	dev_info(dmux->dev, "boot_work: RX doorbell written\n");
 
 	/*
-	 * Now signal the modem by setting APPS bit 1.  The modem will
-	 * auto-respond (set modem bit 1 + bit 11) and find the BAM ready.
-	 * The pc_irq handler will then just ACK (toggle bit 11) and
-	 * re-write the doorbell (harmless since it's the same value).
+	 * Step 5: Force pm_runtime into active state.  The TX path uses
+	 * pm_runtime_get to ensure the device is "on" before transmitting.
+	 * Since we brought things up manually (bypassing runtime_resume),
+	 * we must tell the framework the device is active and hold a
+	 * reference to prevent autosuspend from clearing APPS bit 1.
 	 */
-	ret = pm_runtime_resume_and_get(dmux->dev);
-	if (ret < 0) {
-		dev_err(dmux->dev, "boot power-on failed: %d\n", ret);
-		bam_dmux_power_off(dmux);
-		return;
-	}
+	pm_runtime_disable(dmux->dev);
+	pm_runtime_set_active(dmux->dev);
+	pm_runtime_enable(dmux->dev);
+	pm_runtime_get_noresume(dmux->dev);
 
 	/*
-	 * Do NOT call pm_runtime_put here.  We must keep APPS bit 1
-	 * (A2_POWER_CONTROL) asserted for the entire duration of the
-	 * connection.  The downstream kernel holds the vote indefinitely
-	 * after the first connection; it only clears bit 1 during an
-	 * explicit power-down request (ul_timeout_work after all TX is done).
-	 *
-	 * If we put the runtime reference here, the autosuspend timer
-	 * (1000ms) fires bam_dmux_runtime_suspend() which clears bit 1.
-	 * The modem interprets this as "APPS no longer needs A2 power" and
-	 * deactivates — tearing down the connection before any data flows.
-	 *
-	 * The reference will be released in power_off (pc_irq new_state=0)
-	 * when the modem initiates a controlled shutdown.
+	 * Mark ourselves as powered on.  If the modem eventually sends
+	 * pc_irq (sets its bit 1), the handler will see pc_state already
+	 * set and just re-ACK harmlessly.
 	 */
+	dmux->pc_state = true;
+	wake_up_all(&dmux->pc_wait);
+
+	dev_info(dmux->dev, "boot_work: BAM-DMUX ready, waiting for modem CMD_OPEN\n");
 }
 
 /**
@@ -914,20 +924,16 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 {
 	struct bam_dmux *dmux = data;
 
-	dev_info(dmux->dev, "remote ready (SMDINIT), scheduling power request\n");
+	dev_info(dmux->dev, "remote ready (SMDINIT), scheduling boot_work\n");
 
 	/*
-	 * Give the modem time to complete its A2/BAM_DMUX initialization
-	 * after the SMSM handshake.  The modem should spontaneously set
-	 * A2_POWER_CONTROL (bit 1) once ready — that triggers pc_irq and
-	 * the proper initial-boot flow with CMD_OPEN.
-	 *
-	 * If the modem doesn't initiate within 2 seconds, boot_work will
-	 * force APPS bit 1 as a fallback (AP-initiated resume path).
-	 * 2s is enough for A2 init (~1.5s observed) but short enough to
-	 * avoid the modem timing out its DATA channels.
+	 * The modem's A2/BAM_DMUX subsystem initializes shortly after
+	 * SMDINIT is set.  On the downstream 3.18 kernel, there's a ~1.5s
+	 * gap between modem SMSM signal and BAM registration.  Use 1s
+	 * delay — long enough for A2 init but short enough to avoid the
+	 * modem timing out its DATA channels.
 	 */
-	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(2000));
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(1000));
 
 	return IRQ_HANDLED;
 }
