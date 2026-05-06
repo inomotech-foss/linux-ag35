@@ -487,42 +487,52 @@ static void bam_reset(struct bam_device *bdev)
 }
 
 /**
- * bam_enable_irqs - Full BAM reset + initialization for powered-remotely BAMs
+ * bam_enable_irqs - Initialize powered-remotely BAM without SW_RST
  * @bdev: bam device
  *
  * Called when the first DMA channel is allocated on a powered-remotely BAM.
- * At this point the modem has already signaled readiness (SMSM bit 1 set),
- * so the BAM hardware is powered and accessible.
+ * At this point the modem's A2 DMA subsystem has already completed its own
+ * initialization (SMDINIT was set ~2s ago).
  *
- * The downstream Qualcomm SPS driver performs a FULL SW_RST even for
- * "remotely managed" BAMs (SPS_BAM_MGR_DEVICE_REMOTE).  After reset,
- * both AP and modem reconfigure their respective pipes.  The modem
- * reconfigures its side after seeing the APPS bit 11 (ACK) toggle.
+ * CRITICAL: Do NOT perform SW_RST here.  On firmwares where the modem uses
+ * a "power resume" path (triggered by APPS setting bit 1, rather than modem
+ * spontaneously setting its own bit 1), the modem does NOT re-initialize
+ * the BAM after a reset.  The modem's A2 configured the BAM during its
+ * own init (before SMDINIT) and expects that state to be preserved.
  *
- * Without SW_RST, the BAM may be in a partially-configured state from
- * the modem's initial A2 power-up, which can prevent DMA transactions
- * from completing (P_SW_OFSTS stays at 0 despite valid descriptors
- * and doorbell).
+ * SW_RST destroys ALL pipe state (both APPS and modem sides).  The modem's
+ * resume response then finds a wiped BAM and its DMA engine never starts
+ * (P_SW_OFSTS stays at 0).
+ *
+ * Instead, just ensure BAM_EN is set and configure global parameters.
+ * The modem's existing BAM state is preserved.  Per-pipe P_RST in
+ * bam_chan_init_hw() will reset individual pipes as needed.
  */
 static void bam_enable_irqs(struct bam_device *bdev)
 {
-	u32 val;
+	u32 val, i;
 
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-	dev_info(bdev->dev, "BAM init: BAM_CTRL=0x%08x (before reset)\n", val);
+	dev_info(bdev->dev, "BAM init (no SW_RST): BAM_CTRL=0x%08x\n", val);
 
-	/* SW_RST: reset all pipes, FIFOs, and internal state */
-	val |= BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-	val &= ~BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	/* Dump pre-existing BAM state for debugging */
+	dev_info(bdev->dev, "  pre-existing: DESC_CNT_TRSHLD=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK_EE=0x%08x\n",
+		 readl_relaxed(bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+	for (i = 0; i < bdev->num_channels && i < 6; i++)
+		dev_info(bdev->dev, "  pre-existing pipe %u: P_CTRL=0x%08x P_EVNT_REG=0x%08x P_SW_OFSTS=0x%08x\n",
+			 i,
+			 readl_relaxed(bam_addr(bdev, i, BAM_P_CTRL)),
+			 readl_relaxed(bam_addr(bdev, i, BAM_P_EVNT_REG)),
+			 readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)));
 
-	/* make sure reset completes before enabling BAM */
-	wmb();
-
-	/* enable BAM */
-	val |= BAM_EN;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	/* Enable BAM if not already enabled (preserve existing bits) */
+	if (!(val & BAM_EN)) {
+		val |= BAM_EN;
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+		wmb();
+	}
 
 	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD=4 */
 	writel_relaxed(DEFAULT_CNT_THRSHLD, bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
