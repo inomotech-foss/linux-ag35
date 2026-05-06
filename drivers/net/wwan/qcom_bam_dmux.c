@@ -735,11 +735,12 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	} else if (new_state && dmux->pc_state) {
 		/*
 		 * Modem asserted bit 1 but we already set up via boot_work.
-		 * Just re-ACK to keep modem happy.
+		 * Do NOT toggle ACK again — the modem interprets a second
+		 * toggle as "APPS wants to power down A2" and asserts.
+		 * Just re-issue the doorbell in case modem needs it.
 		 */
-		bam_dmux_pc_ack(dmux);
 		dma_async_issue_pending(dmux->rx);
-		dev_info(dmux->dev, "pc_irq: already up, re-ACK sent\n");
+		dev_info(dmux->dev, "pc_irq: already up, skipping re-ACK\n");
 	} else if (!new_state) {
 		/* Modem de-asserted — power down */
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
