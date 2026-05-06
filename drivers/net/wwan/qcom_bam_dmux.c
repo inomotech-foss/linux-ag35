@@ -895,8 +895,16 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 
 	dev_info(dmux->dev, "remote ready (SMDINIT), scheduling power request\n");
 
-	/* Use a short delay to let SMD channels finish opening */
-	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(500));
+	/*
+	 * Give the modem time to complete its A2/BAM_DMUX initialization
+	 * after the SMSM handshake.  The modem should spontaneously set
+	 * A2_POWER_CONTROL (bit 1) once ready — that triggers pc_irq and
+	 * the proper initial-boot flow with CMD_OPEN.
+	 *
+	 * If the modem doesn't initiate within 5 seconds, boot_work will
+	 * force APPS bit 1 as a fallback (AP-initiated resume path).
+	 */
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(5000));
 
 	return IRQ_HANDLED;
 }

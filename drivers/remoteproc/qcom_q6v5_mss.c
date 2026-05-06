@@ -1810,10 +1810,27 @@ static int q6v5_start(struct rproc *rproc)
 				dev_info(qproc->dev, "pre-start: cleared modem SMSM state\n");
 			}
 
-			/* Set APPS state: PROC_AWAKE | INIT | SMDINIT | RPCINIT */
-			writel(BIT(12) | BIT(0) | BIT(3) | BIT(5), &smsm_state[0]);
-			wmb();
-			dev_info(qproc->dev, "pre-start: APPS SMSM set to %#x (PROC_AWAKE|INIT|SMDINIT|RPCINIT)\n",
+			/*
+			 * Do NOT pre-set INIT or SMDINIT in APPS state here.
+			 *
+			 * The modem firmware expects a reactive handshake:
+			 *   1. Modem boots, sets INIT in modem_state, kicks APPS
+			 *   2. APPS mirrors INIT into apps_state (0→1 transition),
+			 *      kicks modem back
+			 *   3. Modem sees APPS INIT, sets SMDINIT, kicks APPS
+			 *   4. APPS mirrors SMDINIT (0→1 transition), kicks modem
+			 *   5. Modem sees APPS SMDINIT → starts A2/BAM_DMUX →
+			 *      sets A2_POWER_CONTROL (bit 1) → AP gets pc_irq
+			 *
+			 * If we pre-set INIT|SMDINIT before the modem boots,
+			 * smsm_update_bits() in the mirror handler sees no change
+			 * (bits already 1) → no kick sent back → modem never
+			 * proceeds to step 5 → A2/BAM_DMUX never activates.
+			 *
+			 * The SMSM driver already set PROC_AWAKE|RPCINIT at its
+			 * probe time; that's sufficient for modem boot.
+			 */
+			dev_info(qproc->dev, "pre-start: APPS SMSM = %#x (not modified)\n",
 				 readl(&smsm_state[0]));
 		}
 	}
