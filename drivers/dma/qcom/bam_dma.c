@@ -485,67 +485,55 @@ static void bam_reset(struct bam_device *bdev)
 }
 
 /**
- * bam_enable_irqs - Initialize powered-remotely BAM without SW_RST
+ * bam_reset_powered_remotely - Initialize powered-remotely BAM with SW_RST
  * @bdev: bam device
  *
  * Called when the first DMA channel is allocated on a powered-remotely BAM.
- * At this point the modem's A2 DMA subsystem has already completed its own
- * initialization (SMDINIT was set ~2s ago).
+ * At this point the modem has signaled readiness (SMDINIT) and the
+ * bam_dmux driver's boot_work has scheduled DMA channel allocation.
  *
- * CRITICAL: Do NOT perform SW_RST here.  On firmwares where the modem uses
- * a "power resume" path (triggered by APPS setting bit 1, rather than modem
- * spontaneously setting its own bit 1), the modem does NOT re-initialize
- * the BAM after a reset.  The modem's A2 configured the BAM during its
- * own init (before SMDINIT) and expects that state to be preserved.
+ * The downstream 3.18 kernel's SPS driver performs a full SW_RST even for
+ * the BAM_DMUX BAM.  The modem's A2 DMA subsystem expects APPS to reset
+ * and initialize the BAM — it only configures its own side of the pipes
+ * AFTER seeing the BAM has been reset and APPS has signaled via SMSM.
  *
- * SW_RST destroys ALL pipe state (both APPS and modem sides).  The modem's
- * resume response then finds a wiped BAM and its DMA engine never starts
- * (P_SW_OFSTS stays at 0).
- *
- * Instead, just ensure BAM_EN is set and configure global parameters.
- * The modem's existing BAM state is preserved.  Per-pipe P_RST in
- * bam_chan_init_hw() will reset individual pipes as needed.
+ * Evidence: without SW_RST, pipe 5 (RX) P_SW_OFSTS stays at 0 — the
+ * modem never starts its DMA producer side.  All pre-existing pipe
+ * registers are zeros at this point, confirming the modem hasn't touched
+ * the BAM yet and is waiting for APPS to initialize it.
  */
-static void bam_enable_irqs(struct bam_device *bdev)
+static void bam_reset_powered_remotely(struct bam_device *bdev)
 {
-	u32 val, i;
+	u32 val;
 
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-	dev_info(bdev->dev, "BAM init (no SW_RST): BAM_CTRL=0x%08x\n", val);
+	dev_info(bdev->dev, "BAM init (powered-remotely, with SW_RST): BAM_CTRL=0x%08x\n", val);
 
-	/* Dump pre-existing BAM state for debugging */
-	dev_info(bdev->dev, "  pre-existing: DESC_CNT_TRSHLD=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK_EE=0x%08x\n",
-		 readl_relaxed(bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD)),
-		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
-		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
-	for (i = 0; i < bdev->num_channels && i < 6; i++)
-		dev_info(bdev->dev, "  pre-existing pipe %u: P_CTRL=0x%08x P_EVNT_REG=0x%08x P_SW_OFSTS=0x%08x\n",
-			 i,
-			 readl_relaxed(bam_addr(bdev, i, BAM_P_CTRL)),
-			 readl_relaxed(bam_addr(bdev, i, BAM_P_EVNT_REG)),
-			 readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)));
+	/* SW_RST — same as bam_reset() and downstream SPS bam_init() */
+	val |= BAM_SW_RST;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	val &= ~BAM_SW_RST;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 
-	/* Enable BAM if not already enabled (preserve existing bits) */
-	if (!(val & BAM_EN)) {
-		val |= BAM_EN;
-		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-		wmb();
-	}
+	/* make sure reset completes before enabling */
+	wmb();
 
-	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD=4 */
-	writel_relaxed(DEFAULT_CNT_THRSHLD, bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
+	/* enable bam */
+	val |= BAM_EN;
+	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 
-	/*
-	 * Configure BAM behavior bits.  Downstream sets ALL bits except
-	 * BAM_FULL_PIPE (bit 11): 0xFFFFF7FF.
-	 */
-	writel_relaxed(0xFFFFF7FF, bam_addr(bdev, 0, BAM_CNFG_BITS));
+	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD */
+	writel_relaxed(DEFAULT_CNT_THRSHLD,
+			bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
+
+	/* Enable default set of h/w workarounds, ie all except BAM_FULL_PIPE */
+	writel_relaxed(BAM_CNFG_BITS_DEFAULT, bam_addr(bdev, 0, BAM_CNFG_BITS));
 
 	/* enable irqs for errors + timer (downstream value: 0x16) */
 	writel_relaxed(BAM_TIMER_EN | BAM_ERROR_EN | BAM_HRESP_ERR_EN,
 			bam_addr(bdev, 0, BAM_IRQ_EN));
 
-	/* unmask global bam interrupt (BAM-level errors) */
+	/* unmask global bam interrupt */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
 	dev_info(bdev->dev, "BAM configured: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
@@ -797,7 +785,7 @@ static int bam_alloc_chan(struct dma_chan *chan)
 	}
 
 	if (bdev->active_channels++ == 0 && bdev->powered_remotely)
-		bam_enable_irqs(bdev);
+		bam_reset_powered_remotely(bdev);
 
 	return 0;
 }
