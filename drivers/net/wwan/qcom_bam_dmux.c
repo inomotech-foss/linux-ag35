@@ -735,12 +735,22 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	} else if (new_state && dmux->pc_state) {
 		/*
 		 * Modem asserted bit 1 but we already set up via boot_work.
-		 * Do NOT toggle ACK again — the modem interprets a second
-		 * toggle as "APPS wants to power down A2" and asserts.
-		 * Just re-issue the doorbell in case modem needs it.
+		 *
+		 * The downstream kernel ALWAYS toggles ACK in response to
+		 * modem bit 1 assertion.  The modem's A2 DMA power manager
+		 * waits for this ACK before starting its DMA producer on
+		 * pipe 5.  Without it, pipe 5 P_SW_OFSTS stays at 0 and
+		 * no data ever flows from modem to APPS.
+		 *
+		 * Previously this caused a modem crash ("A2 Assertion
+		 * Failed"), but that was because SW_RST was missing —
+		 * the BAM was in an undefined state.  With proper SW_RST,
+		 * the modem handles the ACK toggle correctly.
 		 */
+		bam_dmux_pc_ack(dmux);
 		dma_async_issue_pending(dmux->rx);
-		dev_info(dmux->dev, "pc_irq: already up, skipping re-ACK\n");
+		dev_info(dmux->dev, "pc_irq: already up, ACK sent (ack_state=%d)\n",
+			 dmux->pc_ack_state);
 	} else if (!new_state) {
 		/* Modem de-asserted — power down */
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
