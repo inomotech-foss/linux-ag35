@@ -911,7 +911,23 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	dmux->pc_state = true;
 	wake_up_all(&dmux->pc_wait);
 
-	dev_info(dmux->dev, "boot_work: BAM-DMUX ready, waiting for modem CMD_OPEN\n");
+	dev_info(dmux->dev, "boot_work: BAM-DMUX ready, pre-registering netdevs\n");
+
+	/*
+	 * Step 6: Pre-register network interfaces for all channels.
+	 *
+	 * On the downstream 3.18 kernel (msm_rmnet_bam.c), rmnet0-rmnet7
+	 * are created at module init — the modem does NOT spontaneously
+	 * send CMD_OPEN.  Instead, APPS sends CMD_OPEN when userspace
+	 * opens the interface (e.g., "ifconfig rmnet0 up").  The modem
+	 * then responds with its own CMD_OPEN.
+	 *
+	 * The upstream driver waits for the modem to send CMD_OPEN first,
+	 * which never happens on this firmware.  Pre-register all channels
+	 * so userspace can open them and trigger the CMD_OPEN handshake.
+	 */
+	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
+	schedule_work(&dmux->register_netdev_work);
 }
 
 /**
