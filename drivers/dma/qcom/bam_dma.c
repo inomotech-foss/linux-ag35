@@ -339,7 +339,7 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
 #define P_OUT_OF_DESC_EN	BIT(3)
 #define P_ERR_EN		BIT(4)
 #define P_TRNSFR_END_EN		BIT(5)
-#define P_DEFAULT_IRQS_EN	P_TRNSFR_END_EN
+#define P_DEFAULT_IRQS_EN	(P_PRCSD_DESC_EN | P_ERR_EN | P_TRNSFR_END_EN)
 
 /* BAM_P_SW_OFSTS */
 #define P_SW_OFSTS_MASK		0xffff
