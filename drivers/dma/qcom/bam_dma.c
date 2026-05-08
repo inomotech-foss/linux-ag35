@@ -1778,7 +1778,7 @@ static int bam_dma_probe(struct platform_device *pdev)
 	bdev->powered_remotely = of_property_read_bool(pdev->dev.of_node,
 						"qcom,powered-remotely");
 
-	bdev->polling = bdev->controlled_remotely;
+	bdev->polling = bdev->controlled_remotely || bdev->powered_remotely;
 	if (bdev->polling) {
 		hrtimer_setup(&bdev->poll_timer, bam_poll_timer_fn,
 			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -1850,7 +1850,9 @@ static int bam_dma_probe(struct platform_device *pdev)
 	for (i = 0; i < bdev->num_channels; i++)
 		bam_channel_init(bdev, &bdev->channels[i], i);
 
-	if (!bdev->polling) {
+	{
+		/* Always register IRQ — even in polling mode the BAM
+		 * hardware may require the GIC line to be configured. */
 		ret = devm_request_irq(bdev->dev, bdev->irq, bam_dma_irq,
 				IRQF_TRIGGER_HIGH, "bam_dma", bdev);
 		if (ret)
