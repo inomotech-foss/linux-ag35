@@ -728,6 +728,17 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			dev_info(dmux->dev, "pc_irq: ACK sent (ack_state=%d)\n",
 				 dmux->pc_ack_state);
 			dma_async_issue_pending(dmux->rx);
+
+			/*
+			 * Force pm_runtime active.  The TX path uses
+			 * pm_runtime_get() which would trigger runtime_resume
+			 * and wait for handshake completion.  Since we brought
+			 * up BAM directly here, tell pm_runtime we're active.
+			 */
+			pm_runtime_disable(dmux->dev);
+			pm_runtime_set_active(dmux->dev);
+			pm_runtime_enable(dmux->dev);
+			pm_runtime_get_noresume(dmux->dev);
 		} else {
 			dev_err(dmux->dev, "pc_irq: power_on failed\n");
 			bam_dmux_power_off(dmux);
@@ -833,105 +844,28 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 }
 
 /**
- * bam_dmux_boot_work_fn() - bring up BAM-DMUX matching the downstream 3.18
- *                           kernel's initialization sequence.
+ * bam_dmux_boot_work_fn() - pre-register netdevs after modem SMDINIT.
  *
- * The downstream kernel (msm/bam_dmux.c) does NOT use pm_runtime for the
- * initial power-on.  Its sequence when the modem is ready:
- *   1. reconnect_bam() — register BAM, connect pipes
- *   2. toggle_apps_ack() — toggle APPS SMSM bit 11
- *   3. queue_rx() — submit RX descriptors + write doorbell
+ * In the downstream 3.18 kernel, rmnet0-rmnet7 are created at module
+ * init, before the modem is even running.  The upstream driver waits
+ * for the modem to send CMD_OPEN, which never happens on Quectel OCPU
+ * firmware.  Pre-register all channels so userspace can open them.
  *
- * On Quectel OCPU firmware, the modem does not spontaneously assert
- * A2_POWER_CONTROL (bit 1).  Instead APPS must signal first.  The modem
- * then immediately starts DMA without explicitly ACKing back (no bit 11
- * toggle from modem side).  The upstream driver's pm_runtime path times
- * out waiting for an ACK that never arrives.
- *
- * This function replicates the downstream bam_init() sequence:
- *   1. Configure BAM (request DMA channels, submit RX buffers)
- *   2. Toggle APPS A2_POWER_CONTROL_ACK (bit 11) — tells modem BAM is ready
- *   3. Write RX doorbell — modem DMA can now see our descriptors
- *   4. Force pm_runtime active (so TX path works without re-triggering resume)
- *
- * NOTE: APPS A2_POWER_CONTROL (bit 1) is NOT set here.  In downstream,
- * bit 1 is only set in a2_pc_connect() which runs AFTER the modem
- * responds with its own bit 1.  On this firmware, the smsm_probe already
- * set APPS bit 1 indirectly (SMSM_A2_POWER_CONTROL shares bit position
- * with OSENTRYA in the APPS SMSM word), so we don't need to touch it.
- * Setting it explicitly before the modem is ready can confuse the A2
- * power state machine.
+ * BAM configuration, ACK toggle, and doorbell are NOT done here.
+ * Those belong in pc_irq when the modem asserts A2_POWER_CONTROL
+ * (SMSM bit 1), matching the downstream bam_init() / a2_pc_connect()
+ * sequence.  Toggling ACK before the modem's A2 subsystem is ready
+ * causes an assertion failure in the modem's a2_power.c.
  */
 static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux, boot_work.work);
 
-	/* If the modem already initiated via pc_irq, nothing to do */
 	if (dmux->pc_state)
 		return;
 
-	dev_info(dmux->dev, "boot_work: configuring BAM for modem data\n");
+	dev_info(dmux->dev, "boot_work: modem ready, pre-registering netdevs\n");
 
-	/* Step 1: Configure BAM — request DMA channels, submit RX buffers */
-	if (!bam_dmux_power_on(dmux)) {
-		dev_err(dmux->dev, "boot_work: BAM configuration failed\n");
-		return;
-	}
-
-	/*
-	 * Step 2: Toggle APPS A2_POWER_CONTROL_ACK (bit 11).
-	 * This is the key signal: downstream's bam_init() toggles ACK
-	 * exactly once (0→1) after connecting pipes.  This tells the
-	 * modem's A2 DMA engine "BAM is configured, you may start".
-	 * ACK must stay HIGH (no second toggle) or the modem interprets
-	 * it as disconnect and crashes.
-	 */
-	bam_dmux_pc_ack(dmux);
-	dev_info(dmux->dev, "boot_work: APPS ACK toggled (bit 11, ack_state=%d)\n",
-		 dmux->pc_ack_state);
-
-	/*
-	 * Step 3: Write RX doorbell — modem DMA will see descriptors when
-	 * it starts its polling loop.
-	 */
-	dma_async_issue_pending(dmux->rx);
-	dev_info(dmux->dev, "boot_work: RX doorbell written\n");
-
-	/*
-	 * Step 4: Force pm_runtime into active state.  The TX path uses
-	 * pm_runtime_get to ensure the device is "on" before transmitting.
-	 * Since we brought things up manually (bypassing runtime_resume),
-	 * we must tell the framework the device is active and hold a
-	 * reference to prevent autosuspend from clearing APPS bit 1.
-	 */
-	pm_runtime_disable(dmux->dev);
-	pm_runtime_set_active(dmux->dev);
-	pm_runtime_enable(dmux->dev);
-	pm_runtime_get_noresume(dmux->dev);
-
-	/*
-	 * Mark ourselves as powered on.  If the modem eventually sends
-	 * pc_irq (sets its bit 1), the handler will see pc_state already
-	 * set and just re-issue the doorbell.
-	 */
-	dmux->pc_state = true;
-	wake_up_all(&dmux->pc_wait);
-
-	dev_info(dmux->dev, "boot_work: BAM-DMUX ready, pre-registering netdevs\n");
-
-	/*
-	 * Step 6: Pre-register network interfaces for all channels.
-	 *
-	 * On the downstream 3.18 kernel (msm_rmnet_bam.c), rmnet0-rmnet7
-	 * are created at module init — the modem does NOT spontaneously
-	 * send CMD_OPEN.  Instead, APPS sends CMD_OPEN when userspace
-	 * opens the interface (e.g., "ifconfig rmnet0 up").  The modem
-	 * then responds with its own CMD_OPEN.
-	 *
-	 * The upstream driver waits for the modem to send CMD_OPEN first,
-	 * which never happens on this firmware.  Pre-register all channels
-	 * so userspace can open them and trigger the CMD_OPEN handshake.
-	 */
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
 }
