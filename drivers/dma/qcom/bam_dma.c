@@ -1755,7 +1755,16 @@ static int bam_dma_probe(struct platform_device *pdev)
 	bdev->powered_remotely = of_property_read_bool(pdev->dev.of_node,
 						"qcom,powered-remotely");
 
-	bdev->polling = bdev->controlled_remotely;
+	/*
+	 * Use polling for both controlled-remotely and powered-remotely BAMs.
+	 * On MDM9607, the BAM_DMUX BAM (powered-remotely) has its interrupt
+	 * (SPI 29) configured as secure/Group0 by TrustZone, preventing Linux
+	 * from receiving it.  The BAM hardware sets P_IRQ_STTS correctly but
+	 * the interrupt never propagates through the GIC to Linux.
+	 * Polling at 50µs intervals provides adequate throughput for the
+	 * cellular data path.
+	 */
+	bdev->polling = bdev->controlled_remotely || bdev->powered_remotely;
 	if (bdev->polling) {
 		hrtimer_setup(&bdev->poll_timer, bam_poll_timer_fn,
 			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
