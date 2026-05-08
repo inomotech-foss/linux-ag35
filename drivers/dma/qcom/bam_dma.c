@@ -1207,8 +1207,12 @@ static enum hrtimer_restart bam_poll_timer_fn(struct hrtimer *timer)
 					       poll_timer);
 	bool any_active = false;
 	unsigned int i;
+	static int poll_count;
 
-	dev_dbg(bdev->dev, "poll_timer fired\n");
+	if (bdev->powered_remotely && poll_count < 3) {
+		dev_info(bdev->dev, "poll_timer[%d] fired\n", poll_count);
+		poll_count++;
+	}
 
 	for (i = 0; i < bdev->num_channels; i++) {
 		struct bam_chan *bchan = &bdev->channels[i];
@@ -1245,9 +1249,12 @@ static void bam_start_poll_timer(struct bam_device *bdev)
 	if (!bdev->polling)
 		return;
 
-	if (!atomic_xchg(&bdev->poll_timer_active, 1))
+	if (!atomic_xchg(&bdev->poll_timer_active, 1)) {
+		if (bdev->powered_remotely)
+			dev_info(bdev->dev, "poll timer started\n");
 		hrtimer_start(&bdev->poll_timer, ns_to_ktime(50000),
 			      HRTIMER_MODE_REL);
+	}
 }
 
 /**
