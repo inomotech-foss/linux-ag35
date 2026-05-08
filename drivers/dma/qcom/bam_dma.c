@@ -1572,6 +1572,30 @@ static void bam_start_dma(struct bam_chan *bchan)
 				readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)));
 
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
+
+		/* Diagnostic: poll for interrupt status after doorbell */
+		if (bdev->powered_remotely) {
+			int poll;
+
+			mdelay(100);
+			for (poll = 0; poll < 5; poll++) {
+				u32 srcs_ee = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_EE));
+				u32 p_stts = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_STTS));
+				u32 sw_ofsts = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS));
+
+				if (srcs_ee || p_stts || sw_ofsts) {
+					dev_info(bdev->dev,
+						"pipe %u POLL[%d]: IRQ_SRCS_EE=0x%x P_IRQ_STTS=0x%x P_SW_OFSTS=0x%x\n",
+						bchan->id, poll, srcs_ee, p_stts, sw_ofsts);
+					break;
+				}
+				mdelay(200);
+			}
+			if (poll == 5)
+				dev_info(bdev->dev,
+					"pipe %u POLL: no activity after 1s\n",
+					bchan->id);
+		}
 	}
 
 
