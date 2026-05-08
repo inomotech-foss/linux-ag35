@@ -1573,28 +1573,30 @@ static void bam_start_dma(struct bam_chan *bchan)
 
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 
-		/* Diagnostic: poll for interrupt status after doorbell */
+		/* Diagnostic: poll for modem DMA activity after doorbell */
 		if (bdev->powered_remotely) {
 			int poll;
 
-			mdelay(100);
-			for (poll = 0; poll < 5; poll++) {
+			/* Also dump the global (non-EE) mask register */
+			dev_info(bdev->dev,
+				"pipe %u BAM_IRQ_SRCS_MSK(global)=0x%x\n",
+				bchan->id,
+				readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK)));
+
+			for (poll = 0; poll < 10; poll++) {
 				u32 srcs_ee = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_EE));
 				u32 p_stts = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_STTS));
 				u32 sw_ofsts = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS));
+				u32 irq_stts = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_STTS));
 
-				if (srcs_ee || p_stts || sw_ofsts) {
-					dev_info(bdev->dev,
-						"pipe %u POLL[%d]: IRQ_SRCS_EE=0x%x P_IRQ_STTS=0x%x P_SW_OFSTS=0x%x\n",
-						bchan->id, poll, srcs_ee, p_stts, sw_ofsts);
+				dev_info(bdev->dev,
+					"pipe %u POLL[%d]: SRCS_EE=0x%x P_IRQ=0x%x SW_OFSTS=0x%x BAM_IRQ=0x%x\n",
+					bchan->id, poll, srcs_ee, p_stts, sw_ofsts, irq_stts);
+
+				if (sw_ofsts)
 					break;
-				}
 				mdelay(200);
 			}
-			if (poll == 5)
-				dev_info(bdev->dev,
-					"pipe %u POLL: no activity after 1s\n",
-					bchan->id);
 		}
 	}
 
