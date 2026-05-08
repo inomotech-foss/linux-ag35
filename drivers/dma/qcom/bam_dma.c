@@ -1083,7 +1083,7 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 	u32 offset;
 	unsigned int avail;
 
-	if (bdev->polling) {
+	if (bdev->polling || bdev->powered_remotely) {
 		u32 pipe_stts;
 
 		/*
@@ -1095,6 +1095,11 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		 * IRQ status bits (P_PRCSD_DESC, P_WAKE, etc.) from
 		 * completed operations are never cleared, which may
 		 * affect BAM internal state on subsequent operations.
+		 *
+		 * For powered-remotely BAMs, TZ blocks the IRQ so the
+		 * normal IRQ handler never clears P_IRQ_STTS.  Treat
+		 * these the same as polling: always read/clear and then
+		 * check P_SW_OFSTS unconditionally.
 		 */
 		pipe_stts = readl_relaxed(bam_addr(bdev, pipe,
 						   BAM_P_IRQ_STTS));
