@@ -1213,10 +1213,22 @@ static enum hrtimer_restart bam_poll_timer_fn(struct hrtimer *timer)
 	unsigned int i;
 	static int poll_count;
 
-	if (bdev->powered_remotely && poll_count < 3) {
-		dev_info(bdev->dev, "poll_timer[%d] fired\n", poll_count);
-		poll_count++;
+	if (bdev->powered_remotely && (poll_count < 5 || (poll_count % 10000) == 0)) {
+		for (i = 0; i < bdev->num_channels; i++) {
+			struct bam_chan *bchan = &bdev->channels[i];
+
+			if (list_empty(&bchan->desc_list))
+				continue;
+			dev_info(bdev->dev,
+				"poll[%d] pipe %u: SW_OFSTS=0x%x P_IRQ=0x%x head=%u descs=%d\n",
+				poll_count, i,
+				readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)),
+				readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS)),
+				bchan->head,
+				!list_empty(&bchan->desc_list));
+		}
 	}
+	poll_count++;
 
 	for (i = 0; i < bdev->num_channels; i++) {
 		struct bam_chan *bchan = &bdev->channels[i];
