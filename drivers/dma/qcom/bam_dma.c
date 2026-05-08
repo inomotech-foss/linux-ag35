@@ -1563,9 +1563,13 @@ static void bam_start_dma(struct bam_chan *bchan)
 
 		if (bdev->powered_remotely)
 			dev_info(bdev->dev,
-				"pipe %u doorbell: val=0x%x (tail=%u descs=%u)\n",
+				"pipe %u doorbell: val=0x%x (tail=%u descs=%u)"
+				" IRQ_SRCS_MSK_EE=0x%x P_IRQ_EN=0x%x P_CTRL=0x%x\n",
 				bchan->id, db_val, bchan->tail,
-				db_val / (u32)sizeof(struct bam_desc_hw));
+				db_val / (u32)sizeof(struct bam_desc_hw),
+				readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
+				readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_EN)),
+				readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)));
 
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 	}
