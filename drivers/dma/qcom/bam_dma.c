@@ -638,10 +638,14 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 *
 	 * TZ pre-sets IRQ_SRCS_MSK_EE = 0x80000007 (BAM + pipes 0-2).
 	 * The downstream clears all pipe bits since QPIC uses poll mode.
-	 * We match this behavior exactly.
+	 *
+	 * For powered-remotely BAMs (BAM_DMUX), KEEP pipe bits set even
+	 * in polling mode.  The modem's A2 DMA checks IRQ_SRCS_MSK_EE
+	 * to verify APPS has configured the pipe — if the pipe bit is
+	 * cleared, the modem never starts its DMA producer.
 	 */
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-	if (bdev->polling) {
+	if (bdev->polling && !bdev->powered_remotely) {
 		/*
 		 * Clear ALL pipe bits, not just the current pipe's.
 		 * TZ pre-sets bits for pipes 0-2.  Downstream clears
