@@ -485,61 +485,38 @@ static void bam_reset(struct bam_device *bdev)
 }
 
 /**
- * bam_reset_powered_remotely - Initialize powered-remotely BAM with SW_RST
+ * bam_check_powered_remotely - Verify powered-remotely BAM is enabled
  * @bdev: bam device
  *
  * Called when the first DMA channel is allocated on a powered-remotely BAM.
- * At this point the modem has signaled readiness (SMDINIT) and the
- * bam_dmux driver's boot_work has scheduled DMA channel allocation.
  *
- * The downstream 3.18 kernel's SPS driver performs a full SW_RST even for
- * the BAM_DMUX BAM.  The modem's A2 DMA subsystem expects APPS to reset
- * and initialize the BAM — it only configures its own side of the pipes
- * AFTER seeing the BAM has been reset and APPS has signaled via SMSM.
+ * The downstream 3.18 kernel's SPS driver uses bam_check() (not bam_init())
+ * for SPS_BAM_MGR_DEVICE_REMOTE BAMs — it only verifies BAM_EN is set and
+ * reads version/num_pipes.  No SW_RST, no BAM_EN write, no global config.
  *
- * Evidence: without SW_RST, pipe 5 (RX) P_SW_OFSTS stays at 0 — the
- * modem never starts its DMA producer side.  All pre-existing pipe
- * registers are zeros at this point, confirming the modem hasn't touched
- * the BAM yet and is waiting for APPS to initialize it.
+ * Firmware decompilation confirms: the modem is the BAM primary controller
+ * and does bamcore_pipe_init() to write all pipe registers.  APPS runs as
+ * satellite and must NOT reset the BAM hardware.
+ *
+ * Per-pipe initialization (P_RST, DESC_FIFO_ADDR, P_CTRL, P_EN) is handled
+ * by bam_chan_init_hw() when individual pipes are configured.
  */
-static void bam_reset_powered_remotely(struct bam_device *bdev)
+static void bam_check_powered_remotely(struct bam_device *bdev)
 {
 	u32 val;
 
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-	dev_info(bdev->dev, "BAM init (powered-remotely, with SW_RST): BAM_CTRL=0x%08x\n", val);
+	dev_info(bdev->dev,
+		 "BAM check (powered-remotely, satellite mode): BAM_CTRL=0x%08x BAM_EN=%d\n",
+		 val, !!(val & BAM_EN));
 
-	/* SW_RST — same as bam_reset() and downstream SPS bam_init() */
-	val |= BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-	val &= ~BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	if (!(val & BAM_EN))
+		dev_warn(bdev->dev, "BAM not yet enabled by remote — modem may not be ready\n");
 
-	/* make sure reset completes before enabling */
-	wmb();
-
-	/* enable bam */
-	val |= BAM_EN;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-
-	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD */
-	writel_relaxed(DEFAULT_CNT_THRSHLD,
-			bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
-
-	/* Enable default set of h/w workarounds, ie all except BAM_FULL_PIPE */
-	writel_relaxed(BAM_CNFG_BITS_DEFAULT, bam_addr(bdev, 0, BAM_CNFG_BITS));
-
-	/* enable irqs for errors + timer (downstream value: 0x16) */
-	writel_relaxed(BAM_TIMER_EN | BAM_ERROR_EN | BAM_HRESP_ERR_EN,
-			bam_addr(bdev, 0, BAM_IRQ_EN));
-
-	/* unmask global bam interrupt */
-	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-
-	dev_info(bdev->dev, "BAM configured: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
-		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
+	dev_info(bdev->dev, "BAM state: CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x IRQ_EN=0x%08x\n",
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
-		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN)));
 }
 
 /**
@@ -789,7 +766,7 @@ static int bam_alloc_chan(struct dma_chan *chan)
 	}
 
 	if (bdev->active_channels++ == 0 && bdev->powered_remotely)
-		bam_reset_powered_remotely(bdev);
+		bam_check_powered_remotely(bdev);
 
 	return 0;
 }
