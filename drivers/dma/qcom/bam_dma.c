@@ -1338,15 +1338,13 @@ static enum dma_status bam_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
 	unsigned int i;
 
 	/*
-	 * In polling mode, process hardware completions on ALL active
-	 * pipes before checking cookie status.  This is needed because
-	 * a multi-pipe peripheral (e.g. QPIC NAND with cmd/tx/rx pipes)
-	 * requires all pipes to be drained — otherwise completed
-	 * descriptors remain in desc_list, IS_BUSY stays true, and
-	 * subsequent operations on that pipe never get doorbelled.
-	 * This matches what bam_poll_timer_fn() already does.
+	 * Process hardware completions before checking cookie status.
+	 *
+	 * For polling-mode (controlled-remotely) and powered-remotely
+	 * BAMs where IRQs don't reach Linux, we must actively check
+	 * for completed descriptors by reading P_SW_OFSTS.
 	 */
-	if (bdev->polling) {
+	if (bdev->polling || bdev->powered_remotely) {
 		for (i = 0; i < bdev->num_channels; i++) {
 			struct bam_chan *bc = &bdev->channels[i];
 
@@ -1778,7 +1776,7 @@ static int bam_dma_probe(struct platform_device *pdev)
 	bdev->powered_remotely = of_property_read_bool(pdev->dev.of_node,
 						"qcom,powered-remotely");
 
-	bdev->polling = bdev->controlled_remotely || bdev->powered_remotely;
+	bdev->polling = bdev->controlled_remotely;
 	if (bdev->polling) {
 		hrtimer_setup(&bdev->poll_timer, bam_poll_timer_fn,
 			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -1850,9 +1848,7 @@ static int bam_dma_probe(struct platform_device *pdev)
 	for (i = 0; i < bdev->num_channels; i++)
 		bam_channel_init(bdev, &bdev->channels[i], i);
 
-	{
-		/* Always register IRQ — even in polling mode the BAM
-		 * hardware may require the GIC line to be configured. */
+	if (!bdev->polling) {
 		ret = devm_request_irq(bdev->dev, bdev->irq, bam_dma_irq,
 				IRQF_TRIGGER_HIGH, "bam_dma", bdev);
 		if (ret)

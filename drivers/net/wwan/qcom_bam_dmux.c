@@ -84,6 +84,7 @@ struct bam_dmux {
 	struct work_struct tx_wakeup_work;
 
 	struct delayed_work boot_work;
+	struct delayed_work rx_poll_work;
 
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
 	struct work_struct register_netdev_work;
@@ -736,6 +737,10 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			pm_runtime_set_active(dmux->dev);
 			pm_runtime_enable(dmux->dev);
 			pm_runtime_get_noresume(dmux->dev);
+
+			/* Start RX completion polling */
+			schedule_delayed_work(&dmux->rx_poll_work,
+					      msecs_to_jiffies(1));
 		} else {
 			dev_err(dmux->dev, "pc_irq: power_on failed\n");
 			bam_dmux_power_off(dmux);
@@ -747,6 +752,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	} else if (!new_state) {
 		/* Modem de-asserted — power down */
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
+		cancel_delayed_work(&dmux->rx_poll_work);
 		bam_dmux_power_off(dmux);
 		bam_dmux_pc_ack(dmux);
 		pm_runtime_mark_last_busy(dmux->dev);
@@ -853,6 +859,29 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 }
 
 /**
+ * bam_dmux_rx_poll_work_fn - poll for RX completions when BAM IRQ is blocked.
+ *
+ * On MDM9607, TrustZone blocks the BAM interrupt from reaching Linux.
+ * This work function periodically triggers completion processing by
+ * calling dmaengine_tx_status(), which reads P_SW_OFSTS in the BAM
+ * driver and fires callbacks for completed descriptors.
+ *
+ * Uses delayed_work (not hrtimer) to avoid high-frequency MMIO reads
+ * that interfere with the modem's BAM configuration.
+ */
+static void bam_dmux_rx_poll_work_fn(struct work_struct *work)
+{
+	struct bam_dmux *dmux = container_of(work, struct bam_dmux, rx_poll_work.work);
+
+	if (!dmux->rx || !dmux->pc_state)
+		return;
+
+	dmaengine_tx_status(dmux->rx, 0, NULL);
+
+	schedule_delayed_work(&dmux->rx_poll_work, msecs_to_jiffies(1));
+}
+
+/**
  * bam_dmux_remote_ready_irq - Modem has set SMDINIT, indicating it is ready
  *
  * This replaces the fixed 30-second delay with a deterministic trigger.
@@ -919,6 +948,7 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	INIT_WORK(&dmux->tx_wakeup_work, bam_dmux_tx_wakeup_work);
 	INIT_WORK(&dmux->register_netdev_work, bam_dmux_register_netdev_work);
 	INIT_DELAYED_WORK(&dmux->boot_work, bam_dmux_boot_work_fn);
+	INIT_DELAYED_WORK(&dmux->rx_poll_work, bam_dmux_rx_poll_work_fn);
 
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		dmux->rx_skbs[i].dmux = dmux;
