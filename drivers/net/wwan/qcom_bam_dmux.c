@@ -722,14 +722,14 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state && !dmux->pc_state) {
-		/* Modem asserted A2_POWER_CONTROL — bring up from scratch */
+		/* Modem asserted A2_POWER_CONTROL — full bring-up */
 		if (bam_dmux_power_on(dmux)) {
-			dma_async_issue_pending(dmux->rx);
 			bam_dmux_pc_ack(dmux);
 			qcom_smem_state_update_bits(dmux->pc,
 						    dmux->pc_mask,
 						    dmux->pc_mask);
-			dev_info(dmux->dev, "pc_irq: full init, ACK=%d\n",
+			dma_async_issue_pending(dmux->rx);
+			dev_info(dmux->dev, "pc_irq: BAM up, ACK=%d, APPS bit 1 set\n",
 				 dmux->pc_ack_state);
 
 			pm_runtime_disable(dmux->dev);
@@ -741,16 +741,9 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			bam_dmux_power_off(dmux);
 		}
 	} else if (new_state && dmux->pc_state) {
-		/*
-		 * boot_work already configured BAM and wrote doorbell.
-		 * Now modem has asserted bit 1 — do ACK + APPS bit 1
-		 * to match downstream a2_pc_connect().
-		 */
-		bam_dmux_pc_ack(dmux);
-		qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
+		/* Already up (shouldn't happen with current flow) */
 		dma_async_issue_pending(dmux->rx);
-		dev_info(dmux->dev, "pc_irq: ACK + APPS bit 1 (ack=%d), re-issued doorbell\n",
-			 dmux->pc_ack_state);
+		dev_info(dmux->dev, "pc_irq: already up, re-issued doorbell\n");
 	} else if (!new_state) {
 		/* Modem de-asserted — power down */
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
@@ -836,18 +829,15 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 }
 
 /**
- * bam_dmux_boot_work_fn() - configure BAM and pre-register netdevs.
+ * bam_dmux_boot_work_fn() - pre-register netdevs after modem SMDINIT.
  *
- * Matches the downstream bam_init()/reconnect_bam() sequence that runs
- * on SMDINIT:
- *   1. Request DMA channels, submit RX buffers
- *   2. Write RX doorbell
- *   3. Pre-register netdevs
+ * In the downstream 3.18 kernel, rmnet0-rmnet7 are created at module
+ * init, before the modem is even running.  The upstream driver waits
+ * for the modem to send CMD_OPEN, which never happens on Quectel OCPU
+ * firmware.  Pre-register all channels so userspace can open them.
  *
- * NO SMSM signaling here (no ACK toggle, no APPS bit 1).  The modem's
- * A2 subsystem may still be initializing.  ACK and APPS bit 1 are
- * deferred to pc_irq when the modem asserts A2_POWER_CONTROL (bit 1),
- * matching the downstream a2_pc_connect() sequence.
+ * BAM configuration and SMSM signaling are handled in pc_irq when the
+ * modem asserts A2_POWER_CONTROL (bit 1).
  */
 static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
@@ -856,26 +846,7 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	if (dmux->pc_state)
 		return;
 
-	dev_info(dmux->dev, "boot_work: configuring BAM\n");
-
-	if (!bam_dmux_power_on(dmux)) {
-		dev_err(dmux->dev, "boot_work: BAM configuration failed\n");
-		return;
-	}
-
-	/* Write RX doorbell so descriptors are visible to BAM */
-	dma_async_issue_pending(dmux->rx);
-
-	/* Force pm_runtime active */
-	pm_runtime_disable(dmux->dev);
-	pm_runtime_set_active(dmux->dev);
-	pm_runtime_enable(dmux->dev);
-	pm_runtime_get_noresume(dmux->dev);
-
-	dmux->pc_state = true;
-	wake_up_all(&dmux->pc_wait);
-
-	dev_info(dmux->dev, "boot_work: BAM ready, pre-registering netdevs\n");
+	dev_info(dmux->dev, "boot_work: pre-registering netdevs\n");
 
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
