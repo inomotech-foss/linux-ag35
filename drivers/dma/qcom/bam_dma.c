@@ -1127,12 +1127,21 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 			writel_relaxed(pipe_stts, bam_addr(bdev, pipe,
 						   BAM_P_IRQ_CLR));
 
-		dev_dbg(bdev->dev,
-			"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u\n",
-			pipe,
-			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
-			pipe_stts,
-			bchan->head);
+		if (bdev->powered_remotely)
+			dev_info(bdev->dev,
+				"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u desc_list_empty=%d\n",
+				pipe,
+				readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
+				pipe_stts,
+				bchan->head,
+				list_empty(&bchan->desc_list));
+		else
+			dev_dbg(bdev->dev,
+				"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u\n",
+				pipe,
+				readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
+				pipe_stts,
+				bchan->head);
 	} else {
 		u32 pipe_stts;
 
@@ -1152,6 +1161,11 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 	offset /= sizeof(struct bam_desc_hw);
 
 	avail = CIRC_CNT(offset, bchan->head, MAX_DESCRIPTORS + 1);
+
+	if (bdev->powered_remotely && avail)
+		dev_info(bdev->dev,
+			 "completions: pipe %u offset=%u head=%u avail=%u\n",
+			 pipe, offset, bchan->head, avail);
 
 	list_for_each_entry_safe(async_desc, tmp,
 				 &bchan->desc_list, desc_node) {
@@ -1349,6 +1363,12 @@ static enum dma_status bam_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
 	if (bdev->polling || bdev->powered_remotely) {
 		for (i = 0; i < bdev->num_channels; i++) {
 			struct bam_chan *bc = &bdev->channels[i];
+
+			if (bdev->powered_remotely && bc->initialized)
+				dev_info_once(bdev->dev,
+					"tx_status: ch %u initialized=%d desc_list_empty=%d\n",
+					i, bc->initialized,
+					list_empty(&bc->desc_list));
 
 			if (bc->initialized && !list_empty(&bc->desc_list))
 				bam_process_pipe_completions(bdev, i);

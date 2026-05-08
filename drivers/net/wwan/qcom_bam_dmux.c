@@ -872,11 +872,19 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 static void bam_dmux_rx_poll_work_fn(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux, rx_poll_work.work);
+	static unsigned int poll_count;
+	enum dma_status status;
 
 	if (!dmux->rx || !dmux->pc_state)
 		return;
 
-	dmaengine_tx_status(dmux->rx, 0, NULL);
+	status = dmaengine_tx_status(dmux->rx, 0, NULL);
+
+	/* Log first 5 polls, then every 500ms */
+	if (poll_count < 5 || (poll_count % 500) == 0)
+		dev_info(dmux->dev, "rx_poll[%u]: tx_status=%d\n",
+			 poll_count, status);
+	poll_count++;
 
 	schedule_delayed_work(&dmux->rx_poll_work, msecs_to_jiffies(1));
 }
