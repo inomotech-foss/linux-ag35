@@ -875,15 +875,16 @@ static void bam_dmux_rx_poll_work_fn(struct work_struct *work)
 	static unsigned int poll_count;
 	enum dma_status status;
 
+	dev_info(dmux->dev, "rx_poll[%u]: rx=%p pc_state=%d\n",
+		 poll_count, dmux->rx, dmux->pc_state);
+
 	if (!dmux->rx || !dmux->pc_state)
 		return;
 
 	status = dmaengine_tx_status(dmux->rx, 0, NULL);
 
-	/* Log first 5 polls, then every 500ms */
-	if (poll_count < 5 || (poll_count % 500) == 0)
-		dev_info(dmux->dev, "rx_poll[%u]: tx_status=%d\n",
-			 poll_count, status);
+	dev_info(dmux->dev, "rx_poll[%u]: tx_status=%d\n",
+		 poll_count, status);
 	poll_count++;
 
 	schedule_delayed_work(&dmux->rx_poll_work, msecs_to_jiffies(1));
