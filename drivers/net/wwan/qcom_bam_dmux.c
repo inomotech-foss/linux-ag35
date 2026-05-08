@@ -730,6 +730,17 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			dma_async_issue_pending(dmux->rx);
 
 			/*
+			 * Set APPS A2_POWER_CONTROL (bit 1).  Downstream's
+			 * a2_pc_connect() does this in response to modem
+			 * asserting its bit 1.  This tells the modem that
+			 * APPS wants the data path alive; without it the
+			 * modem's A2 power manager times out and shuts down.
+			 */
+			qcom_smem_state_update_bits(dmux->pc,
+						    dmux->pc_mask,
+						    dmux->pc_mask);
+
+			/*
 			 * Force pm_runtime active.  The TX path uses
 			 * pm_runtime_get() which would trigger runtime_resume
 			 * and wait for handshake completion.  Since we brought
