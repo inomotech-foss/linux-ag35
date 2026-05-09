@@ -965,8 +965,30 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 	if (flags & DMA_PREP_FENCE)
 		async_desc->flags |= DESC_FLAG_NWD;
 
-	if (flags & DMA_PREP_INTERRUPT)
-		async_desc->flags |= DESC_FLAG_EOT;
+	if (flags & DMA_PREP_INTERRUPT) {
+		/*
+		 * Downstream Qualcomm SPS driver uses different descriptor
+		 * flags for producer (RX) vs consumer (TX) pipes:
+		 *
+		 *   TX (consumer): SPS_IOVEC_FLAG_EOT | SPS_IOVEC_FLAG_INT
+		 *   RX (producer): SPS_IOVEC_FLAG_INT only
+		 *
+		 * On producer pipes, DESC_FLAG_EOT (BIT 14) tells the BAM
+		 * to wait for the peripheral to signal end-of-transfer
+		 * before completing the descriptor.  If the peripheral
+		 * never produces data (or signals EOT differently), the
+		 * BAM stalls with P_SW_OFSTS=0.  DESC_FLAG_INT (BIT 15)
+		 * simply requests an interrupt on completion without any
+		 * EOT synchronization.
+		 *
+		 * Use DESC_FLAG_INT for powered-remotely producer pipes
+		 * to match the downstream BAM_DMUX RX behavior.
+		 */
+		if (bdev->powered_remotely && direction == DMA_DEV_TO_MEM)
+			async_desc->flags |= DESC_FLAG_INT;
+		else
+			async_desc->flags |= DESC_FLAG_EOT;
+	}
 
 	async_desc->num_desc = num_alloc;
 	async_desc->curr_desc = async_desc->desc;
@@ -1524,7 +1546,7 @@ static void bam_start_dma(struct bam_chan *bchan)
 		 */
 		if (((avail <= async_desc->xfer_len) || !vd ||
 		     dmaengine_desc_callback_valid(&cb)) &&
-		    !(async_desc->flags & DESC_FLAG_EOT))
+		    !(async_desc->flags & (DESC_FLAG_EOT | DESC_FLAG_INT)))
 			desc[async_desc->xfer_len - 1].flags |=
 				cpu_to_le16(DESC_FLAG_INT);
 
