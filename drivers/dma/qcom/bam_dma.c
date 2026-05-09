@@ -485,19 +485,19 @@ static void bam_reset(struct bam_device *bdev)
 }
 
 /**
- * bam_init_powered_remotely - Initialize powered-remotely BAM with SW_RST
+ * bam_init_powered_remotely - Enable a powered-remotely BAM without SW_RST
  * @bdev: bam device
  *
- * Called when the first DMA channel is allocated on a powered-remotely BAM.
+ * For powered-remotely BAMs (e.g. BAM_DMUX on MDM9607), APPS must set
+ * BAM_EN before the modem configures its pipes.  The modem runs
+ * bam_check() (satellite-mode path) which expects BAM_EN=1.
  *
- * The downstream 3.18 kernel does NOT use satellite mode for the A2 BAM on
- * MDM9607 (no qcom,satellite-mode in DTS).  So SPS calls bam_init() — a
- * full SW_RST + BAM_EN — not bam_check().
- *
- * Device logs confirm: BAM_CTRL has BAM_EN=0 at this point.  Neither TZ
- * nor the modem enables BAM_EN — APPS must do it.  The modem configures
- * its own pipes (bamcore_pipe_init) only after seeing APPS has initialized
- * the BAM and signaled via SMSM.
+ * We intentionally skip SW_RST here.  SW_RST is destructive — it wipes
+ * all pipe configuration.  At probe time the BAM is already in its
+ * power-on reset state so SW_RST is redundant.  Skipping it also makes
+ * the init order-independent: if this function were ever called after
+ * the modem has configured its pipes, SW_RST would silently destroy
+ * that configuration with no way to recover.
  */
 static void bam_init_powered_remotely(struct bam_device *bdev)
 {
@@ -506,18 +506,12 @@ static void bam_init_powered_remotely(struct bam_device *bdev)
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
 	dev_info(bdev->dev, "BAM init (powered-remotely): BAM_CTRL=0x%08x\n", val);
 
-	/* SW_RST — same as bam_reset() and downstream SPS bam_init() */
-	val |= BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-	val &= ~BAM_SW_RST;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-
-	/* make sure reset completes before enabling */
-	wmb();
-
-	/* enable bam */
+	/* Enable BAM without resetting — preserves any existing pipe config */
 	val |= BAM_EN;
 	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+
+	/* Ensure BAM_EN is visible before subsequent register writes */
+	wmb();
 
 	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD */
 	writel_relaxed(DEFAULT_CNT_THRSHLD,
