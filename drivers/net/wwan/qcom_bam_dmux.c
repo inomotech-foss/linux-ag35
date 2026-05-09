@@ -749,24 +749,6 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		dev_info(dmux->dev, "pc_irq: modem up, ACK sent\n");
 
 		/*
-		 * Vote to keep A2 powered on.  The modem's A2 power state
-		 * machine monitors APPS bit 1 in APPS_STATE — if APPS
-		 * never votes, the modem's inactivity timer will power
-		 * down A2 after a few seconds.
-		 *
-		 * Downstream sets this via ul_wakeup() → power_vote(1)
-		 * when TX data needs to be sent.  We set it here to keep
-		 * A2 alive after the initial boot handshake so RX data
-		 * (CMD_OPEN responses, etc.) can flow.
-		 *
-		 * This must be AFTER the ACK toggle — setting bit 1 before
-		 * ACK confuses the handshake (modem treats it as a separate
-		 * wakeup request).
-		 */
-		bam_dmux_pc_vote(dmux, true);
-		dev_info(dmux->dev, "pc_irq: APPS bit 1 set (keep A2 alive)\n");
-
-		/*
 		 * Re-send CMD_OPEN now that the modem has fully initialized
 		 * A2 DMA.  The CMD_OPEN sent during boot_work may have been
 		 * consumed by BAM before A2 was ready to process it.
@@ -798,11 +780,31 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			}
 		}
 
+		/*
+		 * Reset pm_runtime state.  The boot_work CMD_OPEN triggered
+		 * pm_runtime_put_autosuspend() which starts the autosuspend
+		 * timer.  pm_runtime_disable() synchronously completes any
+		 * pending autosuspend, which calls bam_dmux_runtime_suspend()
+		 * → bam_dmux_pc_vote(false).  We must do this BEFORE setting
+		 * APPS bit 1, otherwise pm_runtime_disable clears our vote.
+		 */
 		pm_runtime_disable(dmux->dev);
 		dev_info(dmux->dev, "pc_irq: pm_runtime_disable done\n");
 		pm_runtime_set_active(dmux->dev);
 		pm_runtime_enable(dmux->dev);
 		pm_runtime_get_noresume(dmux->dev);
+
+		/*
+		 * Vote to keep A2 powered on.  Must be AFTER pm_runtime
+		 * reset above (which may clear a previous vote via
+		 * autosuspend) and AFTER the ACK toggle.
+		 *
+		 * The modem's A2 power state machine monitors APPS bit 1
+		 * in APPS_STATE.  Without this vote, the modem powers down
+		 * A2 after its inactivity timer fires (~2.5s).
+		 */
+		bam_dmux_pc_vote(dmux, true);
+		dev_info(dmux->dev, "pc_irq: APPS bit 1 set (keep A2 alive)\n");
 
 		/*
 		 * Re-ring RX doorbell.  The modem's A2 DMA init may have
