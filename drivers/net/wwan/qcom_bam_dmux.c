@@ -476,7 +476,7 @@ static bool bam_dmux_skb_dma_submit_rx(struct bam_dmux_skb_dma *skb_dma)
 
 	desc = dmaengine_prep_slave_single(dmux->rx, skb_dma->addr,
 					   skb_dma->skb->len, DMA_DEV_TO_MEM,
-					   0);
+					   DMA_PREP_INTERRUPT);
 	if (!desc) {
 		dev_err(dmux->dev, "Failed to prepare RX DMA buffer\n");
 		return false;
@@ -739,19 +739,8 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			pm_runtime_enable(dmux->dev);
 			pm_runtime_get_noresume(dmux->dev);
 
-			/* Inline poll test: poll directly from threaded IRQ */
-			{
-				int i;
-
-				for (i = 0; i < 5; i++) {
-					enum dma_status st;
-
-					msleep(200);
-					st = dmaengine_tx_status(dmux->rx, 0, NULL);
-					dev_info(dmux->dev, "inline_poll[%d]: status=%d\n",
-						 i, st);
-				}
-			}
+			/* Set pc_state BEFORE starting timer to avoid race */
+			dmux->pc_state = new_state;
 
 			/* Start RX completion polling via timer */
 			mod_timer(&dmux->rx_poll_timer,
@@ -893,6 +882,10 @@ static void bam_dmux_rx_poll_timer_fn(struct timer_list *t)
 	if (!dmux->rx || !dmux->pc_state) {
 		dev_info(dmux->dev, "rx_poll[%u]: skip rx=%p pc_state=%d\n",
 			 poll_count, dmux->rx, dmux->pc_state);
+		/* Re-arm even on skip — pc_state may be set momentarily */
+		if (dmux->rx)
+			mod_timer(&dmux->rx_poll_timer,
+				  jiffies + msecs_to_jiffies(5));
 		return;
 	}
 
