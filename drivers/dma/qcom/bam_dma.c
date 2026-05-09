@@ -1121,15 +1121,16 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 			writel_relaxed(pipe_stts, bam_addr(bdev, pipe,
 						   BAM_P_IRQ_CLR));
 
-		if (bdev->powered_remotely)
-			dev_info(bdev->dev,
-				"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u desc_list_empty=%d\n",
-				pipe,
-				readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
-				pipe_stts,
-				bchan->head,
-				list_empty(&bchan->desc_list));
-		else
+		if (bdev->powered_remotely) {
+			u32 sw_ofsts = readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS));
+
+			if (sw_ofsts || pipe_stts)
+				dev_info(bdev->dev,
+					"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u desc_list_empty=%d\n",
+					pipe, sw_ofsts, pipe_stts,
+					bchan->head,
+					list_empty(&bchan->desc_list));
+		} else
 			dev_dbg(bdev->dev,
 				"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u\n",
 				pipe,
