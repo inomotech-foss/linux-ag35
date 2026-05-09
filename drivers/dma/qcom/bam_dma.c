@@ -970,23 +970,24 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 		 * Downstream Qualcomm SPS driver uses different descriptor
 		 * flags for producer (RX) vs consumer (TX) pipes:
 		 *
-		 *   TX (consumer): SPS_IOVEC_FLAG_EOT | SPS_IOVEC_FLAG_INT
-		 *   RX (producer): SPS_IOVEC_FLAG_INT only
+		 *   TX (consumer): SPS_IOVEC_FLAG_EOT (0x4000)
+		 *   RX (producer): flags = 0 (no descriptor flags at all)
 		 *
-		 * On producer pipes, DESC_FLAG_EOT (BIT 14) tells the BAM
-		 * to wait for the peripheral to signal end-of-transfer
-		 * before completing the descriptor.  If the peripheral
-		 * never produces data (or signals EOT differently), the
-		 * BAM stalls with P_SW_OFSTS=0.  DESC_FLAG_INT (BIT 15)
-		 * simply requests an interrupt on completion without any
-		 * EOT synchronization.
+		 * The downstream sps_transfer_one() for RX passes flags=0.
+		 * The BAM fills the receive buffer autonomously when data
+		 * arrives from the peripheral, advancing P_SW_OFSTS.  The
+		 * polling code detects the offset change — no descriptor
+		 * flags are needed for completion detection.
 		 *
-		 * Use DESC_FLAG_INT for powered-remotely producer pipes
-		 * to match the downstream BAM_DMUX RX behavior.
+		 * Setting ANY flag (EOT or INT) on producer pipe descriptors
+		 * may alter BAM behavior:
+		 *   - EOT: BAM waits for peripheral EOT signal → stall
+		 *   - INT: may request interrupt acknowledgment → unknown
+		 *
+		 * Skip descriptor flags entirely for powered-remotely
+		 * producer pipes to match downstream exactly.
 		 */
-		if (bdev->powered_remotely && direction == DMA_DEV_TO_MEM)
-			async_desc->flags |= DESC_FLAG_INT;
-		else
+		if (!(bdev->powered_remotely && direction == DMA_DEV_TO_MEM))
 			async_desc->flags |= DESC_FLAG_EOT;
 	}
 
@@ -1543,10 +1544,16 @@ static void bam_start_dma(struct bam_chan *bchan)
 		 *  - If a callback completion was requested for this DESC,
 		 *     In this case, BAM will deliver the completion callback
 		 *     for this desc and continue processing the next desc.
+		 *
+		 * Skip for powered-remotely producer (RX) pipes: downstream
+		 * SPS submits RX descriptors with flags=0.  The polling code
+		 * detects completions via P_SW_OFSTS without needing INT.
 		 */
 		if (((avail <= async_desc->xfer_len) || !vd ||
 		     dmaengine_desc_callback_valid(&cb)) &&
-		    !(async_desc->flags & (DESC_FLAG_EOT | DESC_FLAG_INT)))
+		    !(async_desc->flags & (DESC_FLAG_EOT | DESC_FLAG_INT)) &&
+		    !(bdev->powered_remotely &&
+		      async_desc->dir == DMA_DEV_TO_MEM))
 			desc[async_desc->xfer_len - 1].flags |=
 				cpu_to_le16(DESC_FLAG_INT);
 
