@@ -749,6 +749,24 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		dev_info(dmux->dev, "pc_irq: modem up, ACK sent\n");
 
 		/*
+		 * Vote to keep A2 powered on.  The modem's A2 power state
+		 * machine monitors APPS bit 1 in APPS_STATE — if APPS
+		 * never votes, the modem's inactivity timer will power
+		 * down A2 after a few seconds.
+		 *
+		 * Downstream sets this via ul_wakeup() → power_vote(1)
+		 * when TX data needs to be sent.  We set it here to keep
+		 * A2 alive after the initial boot handshake so RX data
+		 * (CMD_OPEN responses, etc.) can flow.
+		 *
+		 * This must be AFTER the ACK toggle — setting bit 1 before
+		 * ACK confuses the handshake (modem treats it as a separate
+		 * wakeup request).
+		 */
+		bam_dmux_pc_vote(dmux, true);
+		dev_info(dmux->dev, "pc_irq: APPS bit 1 set (keep A2 alive)\n");
+
+		/*
 		 * Re-send CMD_OPEN now that the modem has fully initialized
 		 * A2 DMA.  The CMD_OPEN sent during boot_work may have been
 		 * consumed by BAM before A2 was ready to process it.
