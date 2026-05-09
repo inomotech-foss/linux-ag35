@@ -938,22 +938,6 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	}
 
 	/*
-	 * Toggle APPS ACK before setting vote bit.
-	 *
-	 * Downstream a2_mux_init() calls toggle_apps_ack() during init,
-	 * BEFORE the modem asserts A2_POWER_CONTROL.  This initial toggle
-	 * (0→1) tells the modem "APPS init is complete".  Later, when the
-	 * modem asserts its bit 1, pc_irq toggles ACK again (1→0) to
-	 * acknowledge the modem's power-up.  The modem's A2 power state
-	 * machine expects TWO ACK edges: one at init, one at power-up.
-	 * Without the first toggle, the modem wakes pipe 5 (P_WAKE) but
-	 * never starts its A2 DMA producer.
-	 */
-	bam_dmux_pc_ack(dmux);
-	dev_info(dmux->dev, "boot_work: ACK toggled (init), pc_ack_state=%d\n",
-		 dmux->pc_ack_state);
-
-	/*
 	 * Tell modem: "APPS BAM is ready".  The modem's A2 DMA driver
 	 * watches for this bit and starts its producer DMA only after
 	 * seeing it.
