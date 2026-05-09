@@ -841,15 +841,19 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 }
 
 /**
- * bam_dmux_boot_work_fn() - pre-register netdevs after modem SMDINIT.
+ * bam_dmux_boot_work_fn() - early BAM init and netdev pre-registration.
  *
- * In the downstream 3.18 kernel, rmnet0-rmnet7 are created at module
- * init, before the modem is even running.  The upstream driver waits
- * for the modem to send CMD_OPEN, which never happens on Quectel OCPU
- * firmware.  Pre-register all channels so userspace can open them.
+ * Runs ~1s after modem SMDINIT (SMSM bit 0).  This is a critical
+ * timing window: the modem's A2 DMA subsystem initializes ~2s after
+ * SMDINIT.  We must set BAM_EN before the modem tries to use the BAM,
+ * otherwise the modem's A2 DMA silently fails (BAM_EN=0 → no DMA).
  *
- * BAM configuration and SMSM signaling are handled in pc_irq when the
- * modem asserts A2_POWER_CONTROL (bit 1).
+ * The downstream 3.18 kernel enables the BAM at sps_register_bam_device()
+ * time, which is called from bam_dmux's a2_mux_init() — also triggered
+ * by SMDINIT via smsm_state_cb.
+ *
+ * Also pre-registers netdevs (rmnet0-7) since the Quectel OCPU firmware
+ * never sends CMD_OPEN packets.
  */
 static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
@@ -858,7 +862,22 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	if (dmux->pc_state)
 		return;
 
-	dev_info(dmux->dev, "boot_work: pre-registering netdevs\n");
+	dev_info(dmux->dev, "boot_work: early BAM init + netdev pre-registration\n");
+
+	/*
+	 * Allocate DMA channels, which triggers bam_alloc_chan() →
+	 * bam_init_powered_remotely() → BAM_EN + config.  This must
+	 * happen before the modem asserts A2_POWER_CONTROL, because
+	 * the modem's A2 DMA engine requires BAM_EN=1 to function.
+	 *
+	 * Also queues 32 RX SKBs (but doesn't doorbell — that happens
+	 * in pc_irq via dma_async_issue_pending).
+	 */
+	if (!bam_dmux_power_on(dmux)) {
+		dev_err(dmux->dev, "boot_work: power_on failed\n");
+		bam_dmux_power_off(dmux);
+		return;
+	}
 
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
