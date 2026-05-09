@@ -724,33 +724,38 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state && !dmux->pc_state) {
-		/* Modem asserted A2_POWER_CONTROL — full bring-up */
-		if (bam_dmux_power_on(dmux)) {
-			bam_dmux_pc_ack(dmux);
+		/* Modem asserted A2_POWER_CONTROL */
+		if (!dmux->rx) {
+			/* boot_work hasn't run yet — do full init */
+			dev_warn(dmux->dev, "pc_irq: BAM not ready, doing late init\n");
+			if (!bam_dmux_power_on(dmux)) {
+				dev_err(dmux->dev, "pc_irq: power_on failed\n");
+				bam_dmux_power_off(dmux);
+				goto out;
+			}
+			dma_async_issue_pending(dmux->rx);
 			qcom_smem_state_update_bits(dmux->pc,
 						    dmux->pc_mask,
 						    dmux->pc_mask);
-			dma_async_issue_pending(dmux->rx);
-			dev_info(dmux->dev, "pc_irq: BAM up, ACK=%d, APPS bit 1 set\n",
-				 dmux->pc_ack_state);
-
-			pm_runtime_disable(dmux->dev);
-			pm_runtime_set_active(dmux->dev);
-			pm_runtime_enable(dmux->dev);
-			pm_runtime_get_noresume(dmux->dev);
-
-			/* Set pc_state BEFORE starting timer to avoid race */
-			dmux->pc_state = new_state;
-
-			/* Start RX completion polling via timer */
-			mod_timer(&dmux->rx_poll_timer,
-				  jiffies + msecs_to_jiffies(1));
-			dev_info(dmux->dev, "pc_irq: timer started, jiffies=%lu\n",
-				 jiffies);
-		} else {
-			dev_err(dmux->dev, "pc_irq: power_on failed\n");
-			bam_dmux_power_off(dmux);
 		}
+
+		bam_dmux_pc_ack(dmux);
+		dev_info(dmux->dev, "pc_irq: modem up, ACK sent\n");
+
+		pm_runtime_disable(dmux->dev);
+		dev_info(dmux->dev, "pc_irq: pm_runtime_disable done\n");
+		pm_runtime_set_active(dmux->dev);
+		pm_runtime_enable(dmux->dev);
+		pm_runtime_get_noresume(dmux->dev);
+
+		/* Set pc_state BEFORE starting timer to avoid race */
+		dmux->pc_state = new_state;
+
+		/* Start RX completion polling via timer */
+		mod_timer(&dmux->rx_poll_timer,
+			  jiffies + msecs_to_jiffies(1));
+		dev_info(dmux->dev, "pc_irq: timer started, jiffies=%lu\n",
+			 jiffies);
 	} else if (new_state && dmux->pc_state) {
 		/* Already up (shouldn't happen with current flow) */
 		dma_async_issue_pending(dmux->rx);
@@ -768,6 +773,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	dmux->pc_state = new_state;
 	wake_up_all(&dmux->pc_wait);
 
+out:
 	return IRQ_HANDLED;
 }
 
@@ -865,19 +871,33 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	dev_info(dmux->dev, "boot_work: early BAM init + netdev pre-registration\n");
 
 	/*
-	 * Allocate DMA channels, which triggers bam_alloc_chan() →
-	 * bam_init_powered_remotely() → BAM_EN + config.  This must
-	 * happen before the modem asserts A2_POWER_CONTROL, because
-	 * the modem's A2 DMA engine requires BAM_EN=1 to function.
+	 * Full BAM setup matching downstream a2_mux_init() sequence:
+	 *   1. power_on → DMA channels → BAM_EN + pipe init + RX descriptors
+	 *   2. doorbell → submit descriptors to BAM hardware
+	 *   3. APPS bit 1 → tell modem "BAM is ready, start A2 DMA"
 	 *
-	 * Also queues 32 RX SKBs (but doesn't doorbell — that happens
-	 * in pc_irq via dma_async_issue_pending).
+	 * The modem's A2 DMA driver watches for APPS bit 1 before it
+	 * starts producing data.  In downstream, APPS sets bit 1 during
+	 * a2_mux_init() (triggered by SMDINIT), well before the modem
+	 * asserts its own bit 1 (A2_POWER_CONTROL).
 	 */
 	if (!bam_dmux_power_on(dmux)) {
 		dev_err(dmux->dev, "boot_work: power_on failed\n");
 		bam_dmux_power_off(dmux);
 		return;
 	}
+
+	/* Submit RX descriptors to BAM hardware */
+	dma_async_issue_pending(dmux->rx);
+
+	/*
+	 * Tell modem: "APPS BAM is ready".  The modem's A2 DMA driver
+	 * watches for this bit and starts its producer DMA only after
+	 * seeing it.
+	 */
+	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
+
+	dev_info(dmux->dev, "boot_work: BAM ready, APPS bit 1 set, RX doorbell done\n");
 
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
