@@ -747,6 +747,38 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		bam_dmux_pc_ack(dmux);
 		dev_info(dmux->dev, "pc_irq: modem up, ACK sent\n");
 
+		/*
+		 * Re-send CMD_OPEN now that the modem has fully initialized
+		 * A2 DMA.  The CMD_OPEN sent during boot_work may have been
+		 * consumed by BAM before A2 was ready to process it.
+		 */
+		{
+			struct sk_buff *cmd_skb;
+			struct bam_dmux_hdr *hdr;
+			struct bam_dmux_skb_dma *skb_dma;
+
+			cmd_skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
+			if (cmd_skb) {
+				hdr = skb_put_zero(cmd_skb, sizeof(*hdr));
+				hdr->magic = BAM_DMUX_HDR_MAGIC;
+				hdr->cmd = BAM_DMUX_CMD_OPEN;
+				hdr->ch = BAM_DMUX_CH_DATA_0;
+
+				skb_dma = bam_dmux_tx_queue(dmux, cmd_skb);
+				if (skb_dma &&
+				    bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE) &&
+				    bam_dmux_skb_dma_submit_tx(skb_dma)) {
+					dma_async_issue_pending(dmux->tx);
+					dev_info(dmux->dev,
+						 "pc_irq: CMD_OPEN ch=0 re-sent (post-handshake)\n");
+				} else {
+					if (skb_dma)
+						bam_dmux_tx_done(skb_dma);
+					dev_kfree_skb(cmd_skb);
+				}
+			}
+		}
+
 		pm_runtime_disable(dmux->dev);
 		dev_info(dmux->dev, "pc_irq: pm_runtime_disable done\n");
 		pm_runtime_set_active(dmux->dev);

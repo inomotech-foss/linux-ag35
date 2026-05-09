@@ -582,6 +582,26 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	struct bam_device *bdev = bchan->bdev;
 	u32 val;
 
+	/*
+	 * Dump pipe registers BEFORE reset for powered-remotely BAMs.
+	 * The modem may have already configured the pipe between SMDINIT
+	 * and our init.  Our P_RST would destroy the modem's setup.
+	 */
+	if (bdev->powered_remotely)
+		dev_info(bdev->dev,
+			"pipe %u PRE-RESET: P_CTRL=0x%x P_DESC_FIFO_ADDR=0x%x "
+			"P_FIFO_SIZES=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x\n",
+			bchan->id,
+			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_DESC_FIFO_ADDR)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_FIFO_SIZES)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_EVNT_REG)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_SW_OFSTS)));
+
 	/* Reset the channel to clear internal state of the FIFO */
 	bam_reset_channel(bchan);
 
