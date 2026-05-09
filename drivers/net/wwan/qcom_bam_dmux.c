@@ -695,6 +695,10 @@ static void bam_dmux_free_skbs(struct bam_dmux_skb_dma skbs[],
 
 static void bam_dmux_power_off(struct bam_dmux *dmux)
 {
+	/* Stop timer FIRST to prevent accessing released channels */
+	timer_delete_sync(&dmux->rx_poll_timer);
+	dmux->pc_state = false;
+
 	if (dmux->tx) {
 		dmaengine_terminate_sync(dmux->tx);
 		dma_release_channel(dmux->tx);

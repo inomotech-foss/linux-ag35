@@ -281,7 +281,8 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
 				 BAM_REG_P_EN |		\
 				 BAM_PSM_P_HD_DATA |	\
 				 BAM_AU_ACCUMED |	\
-				 BAM_CMD_ENABLE)
+				 BAM_CMD_ENABLE |	\
+				 BIT(29) | BIT(30) | BIT(31))
 
 /* PIPE CTRL */
 #define P_EN			BIT(1)
