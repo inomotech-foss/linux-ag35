@@ -743,9 +743,6 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 				goto out;
 			}
 			dma_async_issue_pending(dmux->rx);
-			qcom_smem_state_update_bits(dmux->pc,
-						    dmux->pc_mask,
-						    dmux->pc_mask);
 		}
 
 		bam_dmux_pc_ack(dmux);
@@ -988,13 +985,22 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	}
 
 	/*
-	 * Tell modem: "APPS BAM is ready".  The modem's A2 DMA driver
-	 * watches for this bit and starts its producer DMA only after
-	 * seeing it.
+	 * Do NOT set APPS SMSM bit 1 (A2_POWER_CONTROL) here.
+	 *
+	 * Downstream boot sequence is modem-initiated:
+	 *   1. Modem boots → sets bit 1 in MODEM_STATE
+	 *   2. APPS sees modem bit 1 (pc_irq fires)
+	 *   3. APPS connects pipes, submits RX descriptors
+	 *   4. APPS toggles ACK (bit 11) only — NEVER sets bit 1
+	 *   5. Modem sees ACK → apps_bam_link_ready = true → data flows
+	 *
+	 * Setting APPS bit 1 triggers the modem's a2_apps_smsm_callback()
+	 * which treats it as an uplink wakeup request, not a boot handshake.
+	 * At boot time, the modem's A2 hardware may not even be initialized
+	 * yet, causing the wakeup path to fail silently.
 	 */
-	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
 
-	dev_info(dmux->dev, "boot_work: BAM ready, APPS bit 1 set, RX doorbell done\n");
+	dev_info(dmux->dev, "boot_work: BAM ready, RX doorbell done (waiting for modem bit 1)\n");
 
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
