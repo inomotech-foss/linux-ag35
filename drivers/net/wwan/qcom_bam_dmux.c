@@ -598,13 +598,15 @@ static void bam_dmux_rx_callback(void *data)
 	struct bam_dmux_skb_dma *skb_dma = data;
 	struct bam_dmux *dmux = skb_dma->dmux;
 	struct sk_buff *skb = skb_dma->skb;
-	struct bam_dmux_hdr *hdr = (struct bam_dmux_hdr *)skb->data;
+	struct bam_dmux_hdr *hdr;
+
+	bam_dmux_skb_dma_unmap(skb_dma, DMA_FROM_DEVICE);
+
+	hdr = (struct bam_dmux_hdr *)skb->data;
 
 	dev_info(dmux->dev, "rx_callback! dma_addr=0x%pad len=%u first_bytes=%*ph\n",
 		 &skb_dma->addr, skb->len,
 		 min_t(int, 16, skb->len), skb->data);
-
-	bam_dmux_skb_dma_unmap(skb_dma, DMA_FROM_DEVICE);
 
 	if (hdr->magic != BAM_DMUX_HDR_MAGIC) {
 		dev_err(dmux->dev, "Invalid magic in header: %#x\n", hdr->magic);
