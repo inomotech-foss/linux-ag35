@@ -192,6 +192,11 @@ static bool bam_dmux_skb_dma_submit_tx(struct bam_dmux_skb_dma *skb_dma)
 	struct bam_dmux *dmux = skb_dma->dmux;
 	struct dma_async_tx_descriptor *desc;
 
+	dev_info(dmux->dev, "tx_submit: dma=0x%pad len=%u data=%*ph\n",
+		 &skb_dma->addr, skb_dma->skb->len,
+		 min_t(unsigned int, skb_dma->skb->len, 16),
+		 skb_dma->skb->data);
+
 	desc = dmaengine_prep_slave_single(dmux->tx, skb_dma->addr,
 					   skb_dma->skb->len, DMA_MEM_TO_DEV,
 					   DMA_PREP_INTERRUPT);
@@ -889,6 +894,48 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 
 	/* Submit RX descriptors to BAM hardware */
 	dma_async_issue_pending(dmux->rx);
+
+	/*
+	 * Force TX pipe init + send CMD_OPEN for channel 0.
+	 *
+	 * In downstream, both pipes are configured (via sps_connect) BEFORE
+	 * APPS sets SMSM bit 1.  The modem's A2 DMA checks that both the
+	 * producer (pipe 4) and consumer (pipe 5) pipes are configured when
+	 * processing the power control handshake.  If pipe 4 is not enabled
+	 * (P_EN=0), the modem may skip its A2 DMA producer setup.
+	 *
+	 * Sending CMD_OPEN here also tells the modem to open the data
+	 * channel, instead of waiting for userspace to bring up wwan0.
+	 */
+	{
+		struct sk_buff *cmd_skb;
+		struct bam_dmux_hdr *hdr;
+		struct bam_dmux_skb_dma *skb_dma;
+
+		cmd_skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
+		if (cmd_skb) {
+			hdr = skb_put_zero(cmd_skb, sizeof(*hdr));
+			hdr->magic = BAM_DMUX_HDR_MAGIC;
+			hdr->cmd = BAM_DMUX_CMD_OPEN;
+			hdr->ch = BAM_DMUX_CH_DATA_0;
+
+			skb_dma = bam_dmux_tx_queue(dmux, cmd_skb);
+			if (skb_dma) {
+				pm_runtime_get_noresume(dmux->dev);
+				if (bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE) &&
+				    bam_dmux_skb_dma_submit_tx(skb_dma)) {
+					dma_async_issue_pending(dmux->tx);
+					dev_info(dmux->dev,
+						 "boot_work: CMD_OPEN ch=0 sent (TX pipe init)\n");
+				} else {
+					bam_dmux_tx_done(skb_dma);
+					dev_kfree_skb(cmd_skb);
+				}
+			} else {
+				dev_kfree_skb(cmd_skb);
+			}
+		}
+	}
 
 	/*
 	 * Tell modem: "APPS BAM is ready".  The modem's A2 DMA driver
