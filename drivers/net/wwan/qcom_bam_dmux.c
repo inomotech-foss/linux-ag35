@@ -745,6 +745,8 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			/* Start RX completion polling via timer */
 			mod_timer(&dmux->rx_poll_timer,
 				  jiffies + msecs_to_jiffies(1));
+			dev_info(dmux->dev, "pc_irq: timer started, jiffies=%lu\n",
+				 jiffies);
 		} else {
 			dev_err(dmux->dev, "pc_irq: power_on failed\n");
 			bam_dmux_power_off(dmux);
