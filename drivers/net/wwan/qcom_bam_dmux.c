@@ -18,6 +18,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/soc/qcom/smem_state.h>
 #include <linux/spinlock.h>
+#include <linux/timer.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <net/pkt_sched.h>
@@ -84,7 +85,7 @@ struct bam_dmux {
 	struct work_struct tx_wakeup_work;
 
 	struct delayed_work boot_work;
-	struct delayed_work rx_poll_work;
+	struct timer_list rx_poll_timer;
 
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
 	struct work_struct register_netdev_work;
@@ -738,9 +739,23 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			pm_runtime_enable(dmux->dev);
 			pm_runtime_get_noresume(dmux->dev);
 
-			/* Start RX completion polling */
-			schedule_delayed_work(&dmux->rx_poll_work,
-					      msecs_to_jiffies(1));
+			/* Inline poll test: poll directly from threaded IRQ */
+			{
+				int i;
+
+				for (i = 0; i < 5; i++) {
+					enum dma_status st;
+
+					msleep(200);
+					st = dmaengine_tx_status(dmux->rx, 0, NULL);
+					dev_info(dmux->dev, "inline_poll[%d]: status=%d\n",
+						 i, st);
+				}
+			}
+
+			/* Start RX completion polling via timer */
+			mod_timer(&dmux->rx_poll_timer,
+				  jiffies + msecs_to_jiffies(1));
 		} else {
 			dev_err(dmux->dev, "pc_irq: power_on failed\n");
 			bam_dmux_power_off(dmux);
@@ -752,7 +767,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	} else if (!new_state) {
 		/* Modem de-asserted — power down */
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
-		cancel_delayed_work(&dmux->rx_poll_work);
+		timer_delete_sync(&dmux->rx_poll_timer);
 		bam_dmux_power_off(dmux);
 		bam_dmux_pc_ack(dmux);
 		pm_runtime_mark_last_busy(dmux->dev);
@@ -859,35 +874,36 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 }
 
 /**
- * bam_dmux_rx_poll_work_fn - poll for RX completions when BAM IRQ is blocked.
+ * bam_dmux_rx_poll_timer_fn - poll for RX completions when BAM IRQ is blocked.
  *
  * On MDM9607, TrustZone blocks the BAM interrupt from reaching Linux.
- * This work function periodically triggers completion processing by
+ * This timer callback periodically triggers completion processing by
  * calling dmaengine_tx_status(), which reads P_SW_OFSTS in the BAM
  * driver and fires callbacks for completed descriptors.
  *
- * Uses delayed_work (not hrtimer) to avoid high-frequency MMIO reads
- * that interfere with the modem's BAM configuration.
+ * Runs in softirq context via timer_list (more reliable than delayed_work
+ * on single-CPU embedded systems where workqueue scheduling can stall).
  */
-static void bam_dmux_rx_poll_work_fn(struct work_struct *work)
+static void bam_dmux_rx_poll_timer_fn(struct timer_list *t)
 {
-	struct bam_dmux *dmux = container_of(work, struct bam_dmux, rx_poll_work.work);
+	struct bam_dmux *dmux = container_of(t, struct bam_dmux, rx_poll_timer);
 	static unsigned int poll_count;
 	enum dma_status status;
 
-	dev_info(dmux->dev, "rx_poll[%u]: rx=%p pc_state=%d\n",
-		 poll_count, dmux->rx, dmux->pc_state);
-
-	if (!dmux->rx || !dmux->pc_state)
+	if (!dmux->rx || !dmux->pc_state) {
+		dev_info(dmux->dev, "rx_poll[%u]: skip rx=%p pc_state=%d\n",
+			 poll_count, dmux->rx, dmux->pc_state);
 		return;
+	}
 
 	status = dmaengine_tx_status(dmux->rx, 0, NULL);
 
-	dev_info(dmux->dev, "rx_poll[%u]: tx_status=%d\n",
-		 poll_count, status);
+	if (poll_count < 10 || !(poll_count % 1000))
+		dev_info(dmux->dev, "rx_poll[%u]: tx_status=%d\n",
+			 poll_count, status);
 	poll_count++;
 
-	schedule_delayed_work(&dmux->rx_poll_work, msecs_to_jiffies(1));
+	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
 }
 
 /**
@@ -957,7 +973,7 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	INIT_WORK(&dmux->tx_wakeup_work, bam_dmux_tx_wakeup_work);
 	INIT_WORK(&dmux->register_netdev_work, bam_dmux_register_netdev_work);
 	INIT_DELAYED_WORK(&dmux->boot_work, bam_dmux_boot_work_fn);
-	INIT_DELAYED_WORK(&dmux->rx_poll_work, bam_dmux_rx_poll_work_fn);
+	timer_setup(&dmux->rx_poll_timer, bam_dmux_rx_poll_timer_fn, 0);
 
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		dmux->rx_skbs[i].dmux = dmux;
