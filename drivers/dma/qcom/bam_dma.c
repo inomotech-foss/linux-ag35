@@ -779,13 +779,8 @@ static int bam_alloc_chan(struct dma_chan *chan)
 		return -ENOMEM;
 	}
 
-	if (bdev->active_channels++ == 0 && bdev->powered_remotely) {
-		/* BAM-level init already done at probe time.
-		 * Just log the current state for diagnostics.
-		 */
-		dev_info(bdev->dev, "first channel alloc: BAM_CTRL=0x%08x\n",
-			 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)));
-	}
+	if (bdev->active_channels++ == 0 && bdev->powered_remotely)
+		bam_init_powered_remotely(bdev);
 
 	return 0;
 }
@@ -1725,23 +1720,11 @@ static int bam_init(struct bam_device *bdev)
 	/* Reset BAM now if fully controlled locally */
 	if (!bdev->controlled_remotely && !bdev->powered_remotely) {
 		bam_reset(bdev);
-	} else if (bdev->powered_remotely) {
-		/*
-		 * For powered-remotely BAMs (e.g. BAM_DMUX on MDM9607),
-		 * APPS must enable the BAM before the modem boots.
-		 * The modem will configure its own pipes after seeing
-		 * BAM_EN set.  If we defer this to channel alloc time
-		 * (when pc_irq fires), the modem has already configured
-		 * its pipes and our SW_RST would destroy that config.
-		 *
-		 * Downstream 3.18 SPS does bam_init() (SW_RST + BAM_EN)
-		 * at probe time for non-satellite BAMs.
-		 */
-		bam_init_powered_remotely(bdev);
 	} else {
 		/*
-		 * For controlled-remotely BAMs, TZ already initialized
-		 * the global config.  Don't touch global registers.
+		 * For remotely-controlled/powered BAMs, registers may be
+		 * inaccessible until the remote processor enables clocks.
+		 * Defer init to first channel allocation.
 		 */
 	}
 
