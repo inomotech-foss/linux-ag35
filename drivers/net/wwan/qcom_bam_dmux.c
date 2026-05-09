@@ -785,6 +785,20 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		pm_runtime_enable(dmux->dev);
 		pm_runtime_get_noresume(dmux->dev);
 
+		/*
+		 * Re-ring RX doorbell.  The modem's A2 DMA init may have
+		 * reset pipe 5 (P_RST) between boot_work and now, which
+		 * clears the BAM's internal descriptor count even though
+		 * our descriptors are still in DDR.  Re-issuing pending
+		 * rewrites P_EVNT_REG with the current tail offset,
+		 * restoring the "32 descriptors available" state.
+		 *
+		 * Without this, the A2 peripheral sees pipe 5 has zero
+		 * available descriptors and sends P_WAKE instead of data.
+		 */
+		dma_async_issue_pending(dmux->rx);
+		dev_info(dmux->dev, "pc_irq: RX doorbell re-issued\n");
+
 		/* Set pc_state BEFORE starting timer to avoid race */
 		dmux->pc_state = new_state;
 
