@@ -515,6 +515,9 @@ static bool bam_dmux_skb_dma_queue_rx(struct bam_dmux_skb_dma *skb_dma, gfp_t gf
 		skb_put(skb_dma->skb, BAM_DMUX_BUFFER_SIZE);
 	}
 
+	/* Fill with known pattern to detect if DMA actually writes data */
+	memset(skb_dma->skb->data, 0xAA, skb_dma->skb->len);
+
 	return bam_dmux_skb_dma_map(skb_dma, DMA_FROM_DEVICE) &&
 	       bam_dmux_skb_dma_submit_rx(skb_dma);
 }
@@ -599,14 +602,20 @@ static void bam_dmux_rx_callback(void *data)
 	struct bam_dmux *dmux = skb_dma->dmux;
 	struct sk_buff *skb = skb_dma->skb;
 	struct bam_dmux_hdr *hdr;
+	dma_addr_t saved_addr = skb_dma->addr;
 
 	bam_dmux_skb_dma_unmap(skb_dma, DMA_FROM_DEVICE);
 
 	hdr = (struct bam_dmux_hdr *)skb->data;
 
-	dev_info(dmux->dev, "rx_callback! dma_addr=0x%pad len=%u first_bytes=%*ph\n",
-		 &skb_dma->addr, skb->len,
-		 min_t(int, 16, skb->len), skb->data);
+	dev_info(dmux->dev,
+		 "rx_callback: dma=0x%pad virt=%px phys=0x%lx len=%u\n"
+		 "  bytes[0-31]=%*ph\n"
+		 "  hdr: magic=%#06x cmd=%u ch=%u pkt_len=%u pad=%u\n",
+		 &saved_addr, skb->data, (unsigned long)virt_to_phys(skb->data),
+		 skb->len,
+		 min_t(int, 32, skb->len), skb->data,
+		 hdr->magic, hdr->cmd, hdr->ch, hdr->len, hdr->pad);
 
 	if (hdr->magic != BAM_DMUX_HDR_MAGIC) {
 		dev_err(dmux->dev, "Invalid magic in header: %#x\n", hdr->magic);
