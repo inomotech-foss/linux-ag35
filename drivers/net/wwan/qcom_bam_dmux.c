@@ -746,8 +746,12 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	if (new_state && !dmux->pc_state) {
 		/* Modem asserted A2_POWER_CONTROL */
 		if (!dmux->rx) {
-			/* boot_work hasn't run yet — do full init */
+			/* boot_work hasn't run yet — do full init including pm_runtime */
 			dev_warn(dmux->dev, "pc_irq: BAM not ready, doing late init\n");
+			pm_runtime_disable(dmux->dev);
+			pm_runtime_set_active(dmux->dev);
+			pm_runtime_enable(dmux->dev);
+			pm_runtime_get_noresume(dmux->dev);
 			if (!bam_dmux_power_on(dmux)) {
 				dev_err(dmux->dev, "pc_irq: power_on failed\n");
 				bam_dmux_power_off(dmux);
@@ -756,21 +760,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			dma_async_issue_pending(dmux->rx);
 		}
 
-		/*
-		 * Reset pm_runtime BEFORE ACK to avoid delay.
-		 *
-		 * Without pending CMD_OPEN autosuspend (removed from
-		 * boot_work), pm_runtime_disable() returns instantly.
-		 * This must complete before ACK because the modem
-		 * expects immediate response — any delay > ~2s causes
-		 * the modem's inactivity timer to power down A2.
-		 */
-		dev_info(dmux->dev, "pc_irq: before pm_runtime_disable\n");
-		pm_runtime_disable(dmux->dev);
-		dev_info(dmux->dev, "pc_irq: after pm_runtime_disable\n");
-		pm_runtime_set_active(dmux->dev);
-		pm_runtime_enable(dmux->dev);
-		pm_runtime_get_noresume(dmux->dev);
+		/* pm_runtime already reset by boot_work (or late init above) */
 
 		bam_dmux_pc_ack(dmux);
 		dev_info(dmux->dev, "pc_irq: modem up, ACK sent\n");
@@ -944,16 +934,22 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	dev_info(dmux->dev, "boot_work: early BAM init + netdev pre-registration\n");
 
 	/*
-	 * Full BAM setup matching downstream a2_mux_init() sequence:
-	 *   1. power_on → DMA channels → BAM_EN + pipe init + RX descriptors
-	 *   2. doorbell → submit descriptors to BAM hardware
-	 *   3. APPS bit 1 → tell modem "BAM is ready, start A2 DMA"
+	 * Reset pm_runtime to ACTIVE state NOW, before anything else.
 	 *
-	 * The modem's A2 DMA driver watches for APPS bit 1 before it
-	 * starts producing data.  In downstream, APPS sets bit 1 during
-	 * a2_mux_init() (triggered by SMDINIT), well before the modem
-	 * asserts its own bit 1 (A2_POWER_CONTROL).
+	 * At this point, nothing has called pm_runtime_get/put since
+	 * probe, so pm_runtime_disable() returns instantly (no pending
+	 * autosuspend, no work queued).
+	 *
+	 * We must NOT do this in pc_irq because dma_request_chan()
+	 * (called from power_on below) creates device links that
+	 * interact with pm_runtime, causing pm_runtime_disable() to
+	 * block for ~2.3s in the threaded IRQ context.
 	 */
+	pm_runtime_disable(dmux->dev);
+	pm_runtime_set_active(dmux->dev);
+	pm_runtime_enable(dmux->dev);
+	pm_runtime_get_noresume(dmux->dev);
+
 	if (!bam_dmux_power_on(dmux)) {
 		dev_err(dmux->dev, "boot_work: power_on failed\n");
 		bam_dmux_power_off(dmux);
