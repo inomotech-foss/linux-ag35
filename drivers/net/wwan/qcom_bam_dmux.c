@@ -756,10 +756,33 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			dma_async_issue_pending(dmux->rx);
 		}
 
-		/* pm_runtime already reset by boot_work (or late init above) */
-
+		/*
+		 * ACK and APPS bit 1 FIRST — modem needs both immediately.
+		 *
+		 * ACK toggle tells the modem we received its power-up.
+		 * APPS bit 1 (A2_POWER_CONTROL) triggers the modem's
+		 * a2_apps_smsm_callback() which sets apps_bam_link_ready
+		 * = true, enabling downlink data production.
+		 *
+		 * These must happen BEFORE pm_runtime_disable() below,
+		 * which blocks for ~2.3s.  Without the ACK, the modem's
+		 * inactivity timer (~2-3s) would fire during the block.
+		 */
 		bam_dmux_pc_ack(dmux);
-		dev_info(dmux->dev, "pc_irq: modem up, ACK sent\n");
+		bam_dmux_pc_vote(dmux, true);
+		dev_info(dmux->dev, "pc_irq: modem up, ACK + APPS bit 1 sent\n");
+
+		/*
+		 * Reset pm_runtime to ACTIVE.  Blocks ~2.3s because
+		 * dma_request_chan() created device links that interact
+		 * with pm_runtime.  This is safe now because the modem
+		 * already has ACK + APPS bit 1 and is producing data.
+		 */
+		pm_runtime_disable(dmux->dev);
+		pm_runtime_set_active(dmux->dev);
+		pm_runtime_enable(dmux->dev);
+		pm_runtime_get_noresume(dmux->dev);
+		dev_info(dmux->dev, "pc_irq: pm_runtime reset done\n");
 
 		/*
 		 * Send CMD_OPEN now that BAM and handshake are ready.
@@ -1073,34 +1096,22 @@ static int bam_dmux_probe(struct platform_device *pdev)
 		dmux->tx_skbs[i].dmux = dmux;
 	}
 
-	/*
-	 * Enable runtime PM but keep the device permanently active.
+	/* Runtime PM manages our own power vote.
+	 * Note that the RX path may be active even if we are runtime suspended,
+	 * since it is controlled by the remote side.
 	 *
-	 * pm_runtime_enable() is REQUIRED because dma_request_chan()
-	 * creates device links with DL_FLAG_PM_RUNTIME between bam-dmux
-	 * (consumer) and the BAM DMA controller (supplier).  Without
-	 * pm_runtime enabled, these links don't properly manage the BAM
-	 * controller's power state, which prevents the modem from seeing
-	 * the BAM as ready and asserting SMSM bit 1.
-	 *
-	 * pm_runtime_set_active() BEFORE enable ensures the device starts
-	 * as RPM_ACTIVE instead of RPM_SUSPENDED (the default).
-	 *
-	 * pm_runtime_get_noresume() increments usage_count to 1, preventing
-	 * rpm_idle (triggered by enable) from scheduling autosuspend.
-	 * This avoids bam_dmux_runtime_suspend() running during boot,
-	 * which would clear the power vote before the handshake completes.
-	 *
-	 * The net effect: pm_runtime is enabled (device links work) but
-	 * the device never suspends.  No blocking pm_runtime_disable()
-	 * is needed in pc_irq.  The downstream 3.18 kernel achieves the
-	 * same by not using pm_runtime at all.
+	 * CRITICAL: Do NOT call pm_runtime_set_active() or
+	 * pm_runtime_get_noresume() here.  The device must start as
+	 * RPM_SUSPENDED so that dma_request_chan() (in boot_work) creates
+	 * device links in DL_STATE_DORMANT without touching the BAM DMA
+	 * controller's pm_runtime.  If the device starts RPM_ACTIVE,
+	 * device_link_add calls pm_runtime_get_sync() on the BAM DMA
+	 * controller, which disrupts the modem's A2 DMA initialization
+	 * and prevents it from asserting SMSM bit 1.
 	 */
 	pm_runtime_set_autosuspend_delay(dev, BAM_DMUX_AUTOSUSPEND_DELAY);
 	pm_runtime_use_autosuspend(dev);
-	pm_runtime_set_active(dev);
 	pm_runtime_enable(dev);
-	pm_runtime_get_noresume(dev);
 
 	ret = devm_request_threaded_irq(dev, pc_ack_irq, NULL, bam_dmux_pc_ack_irq,
 					IRQF_ONESHOT, NULL, dmux);
