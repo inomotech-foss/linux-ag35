@@ -757,26 +757,25 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		}
 
 		/*
-		 * ACK and APPS bit 1 FIRST — modem needs both immediately.
-		 *
-		 * ACK toggle tells the modem we received its power-up.
-		 * APPS bit 1 (A2_POWER_CONTROL) triggers the modem's
-		 * a2_apps_smsm_callback() which sets apps_bam_link_ready
-		 * = true, enabling downlink data production.
-		 *
-		 * These must happen BEFORE pm_runtime_disable() below,
-		 * which blocks for ~2.3s.  Without the ACK, the modem's
-		 * inactivity timer (~2-3s) would fire during the block.
+		 * ACK toggle only — tells modem we received its power-up.
+		 * Do NOT set APPS bit 1 here — see below.
 		 */
 		bam_dmux_pc_ack(dmux);
-		bam_dmux_pc_vote(dmux, true);
-		dev_info(dmux->dev, "pc_irq: modem up, ACK + APPS bit 1 sent\n");
+		dev_info(dmux->dev, "pc_irq: ACK sent\n");
 
 		/*
 		 * Reset pm_runtime to ACTIVE.  Blocks ~2.3s because
-		 * dma_request_chan() created device links that interact
-		 * with pm_runtime.  This is safe now because the modem
-		 * already has ACK + APPS bit 1 and is producing data.
+		 * dma_request_chan() created device links whose pm_runtime
+		 * barrier must complete.
+		 *
+		 * CRITICAL: APPS bit 1 must NOT be set before this call.
+		 * pm_runtime_disable() runs __pm_runtime_barrier() which
+		 * may execute a pending runtime_suspend callback.  That
+		 * callback calls bam_dmux_pc_vote(false), clearing APPS
+		 * bit 1.  The modem sees bit 1 go 1→0 and powers down A2.
+		 *
+		 * With bit 1 unset, runtime_suspend's pc_vote(false) is a
+		 * no-op (already cleared), so the modem stays up.
 		 */
 		pm_runtime_disable(dmux->dev);
 		pm_runtime_set_active(dmux->dev);
@@ -785,9 +784,20 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		dev_info(dmux->dev, "pc_irq: pm_runtime reset done\n");
 
 		/*
-		 * Send CMD_OPEN now that BAM and handshake are ready.
-		 * The modem processes CMD_OPEN after seeing our ACK toggle
-		 * and setting apps_bam_link_ready = true.
+		 * NOW set APPS bit 1 — safe because pm_runtime is reset
+		 * to ACTIVE with usage_count=1 (from get_noresume above).
+		 * No autosuspend will fire until usage_count drops to 0.
+		 */
+		bam_dmux_pc_vote(dmux, true);
+		dev_info(dmux->dev, "pc_irq: APPS bit 1 set\n");
+
+		/*
+		 * Send CMD_OPEN.  Must call pm_runtime_get_noresume()
+		 * first to balance the pm_runtime_put_autosuspend() that
+		 * bam_dmux_tx_done() calls on TX completion.  Without
+		 * this, the put decrements usage_count to 0, starting
+		 * autosuspend → runtime_suspend → pc_vote(false) → modem
+		 * sees bit 1 cleared → powers down A2.
 		 */
 		{
 			struct sk_buff *cmd_skb;
@@ -805,6 +815,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 				if (skb_dma &&
 				    bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE) &&
 				    bam_dmux_skb_dma_submit_tx(skb_dma)) {
+					pm_runtime_get_noresume(dmux->dev);
 					dma_async_issue_pending(dmux->tx);
 					dev_info(dmux->dev,
 						 "pc_irq: CMD_OPEN ch=0 sent\n");
