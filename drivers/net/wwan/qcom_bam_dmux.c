@@ -933,28 +933,30 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 
 	dev_info(dmux->dev, "boot_work: early BAM init + netdev pre-registration\n");
 
-	/*
-	 * Reset pm_runtime to ACTIVE state NOW, before anything else.
-	 *
-	 * At this point, nothing has called pm_runtime_get/put since
-	 * probe, so pm_runtime_disable() returns instantly (no pending
-	 * autosuspend, no work queued).
-	 *
-	 * We must NOT do this in pc_irq because dma_request_chan()
-	 * (called from power_on below) creates device links that
-	 * interact with pm_runtime, causing pm_runtime_disable() to
-	 * block for ~2.3s in the threaded IRQ context.
-	 */
-	pm_runtime_disable(dmux->dev);
-	pm_runtime_set_active(dmux->dev);
-	pm_runtime_enable(dmux->dev);
-	pm_runtime_get_noresume(dmux->dev);
-
 	if (!bam_dmux_power_on(dmux)) {
 		dev_err(dmux->dev, "boot_work: power_on failed\n");
 		bam_dmux_power_off(dmux);
 		return;
 	}
+
+	/*
+	 * Reset pm_runtime to ACTIVE state AFTER power_on.
+	 *
+	 * Must happen AFTER dma_request_chan() (inside power_on) because
+	 * doing pm_runtime_get_noresume() before dma_request_chan() alters
+	 * the device link pm_runtime propagation to the BAM DMA controller,
+	 * which prevents the modem from setting its SMSM bit 1.
+	 *
+	 * Must happen BEFORE pc_irq (which fires ~100ms after boot_work
+	 * completes) because pm_runtime_disable() blocks for ~2.3s when
+	 * called after dma_request_chan() has created device links.
+	 * Here, nothing has called pm_runtime_get/put yet, so
+	 * pm_runtime_disable() returns instantly.
+	 */
+	pm_runtime_disable(dmux->dev);
+	pm_runtime_set_active(dmux->dev);
+	pm_runtime_enable(dmux->dev);
+	pm_runtime_get_noresume(dmux->dev);
 
 	/* Submit RX descriptors to BAM hardware */
 	dma_async_issue_pending(dmux->rx);
