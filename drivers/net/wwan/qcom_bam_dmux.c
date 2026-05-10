@@ -746,12 +746,8 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	if (new_state && !dmux->pc_state) {
 		/* Modem asserted A2_POWER_CONTROL */
 		if (!dmux->rx) {
-			/* boot_work hasn't run yet — do full init including pm_runtime */
+			/* boot_work hasn't run yet — do full init */
 			dev_warn(dmux->dev, "pc_irq: BAM not ready, doing late init\n");
-			pm_runtime_disable(dmux->dev);
-			pm_runtime_set_active(dmux->dev);
-			pm_runtime_enable(dmux->dev);
-			pm_runtime_get_noresume(dmux->dev);
 			if (!bam_dmux_power_on(dmux)) {
 				dev_err(dmux->dev, "pc_irq: power_on failed\n");
 				bam_dmux_power_off(dmux);
@@ -939,25 +935,6 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 	}
 
-	/*
-	 * Reset pm_runtime to ACTIVE state AFTER power_on.
-	 *
-	 * Must happen AFTER dma_request_chan() (inside power_on) because
-	 * doing pm_runtime_get_noresume() before dma_request_chan() alters
-	 * the device link pm_runtime propagation to the BAM DMA controller,
-	 * which prevents the modem from setting its SMSM bit 1.
-	 *
-	 * Must happen BEFORE pc_irq (which fires ~100ms after boot_work
-	 * completes) because pm_runtime_disable() blocks for ~2.3s when
-	 * called after dma_request_chan() has created device links.
-	 * Here, nothing has called pm_runtime_get/put yet, so
-	 * pm_runtime_disable() returns instantly.
-	 */
-	pm_runtime_disable(dmux->dev);
-	pm_runtime_set_active(dmux->dev);
-	pm_runtime_enable(dmux->dev);
-	pm_runtime_get_noresume(dmux->dev);
-
 	/* Submit RX descriptors to BAM hardware */
 	dma_async_issue_pending(dmux->rx);
 
@@ -1096,13 +1073,29 @@ static int bam_dmux_probe(struct platform_device *pdev)
 		dmux->tx_skbs[i].dmux = dmux;
 	}
 
-	/* Runtime PM manages our own power vote.
-	 * Note that the RX path may be active even if we are runtime suspended,
-	 * since it is controlled by the remote side.
+	/*
+	 * Mark device as ACTIVE but do NOT enable runtime PM.
+	 *
+	 * The upstream driver uses pm_runtime to manage APPS SMSM bit 1
+	 * power voting.  However, bam_dmux_runtime_resume() contains
+	 * blocking wait_for_completion_timeout() calls (up to 2s each).
+	 * When dma_request_chan() creates device links to the BAM DMA
+	 * controller, pm_runtime operations cascade into those blocking
+	 * waits, causing pm_runtime_disable() to block for 2.3s.
+	 *
+	 * The modem's inactivity timer (~2-3s) fires during this delay,
+	 * powering down A2 before the handshake completes.
+	 *
+	 * The downstream 3.18 kernel has NO pm_runtime at all — it
+	 * manages power voting directly.  By leaving pm_runtime disabled
+	 * (set_active but not enable), all pm_runtime_* calls elsewhere
+	 * in the driver become harmless no-ops, and the handshake
+	 * completes in ~1ms like downstream.
+	 *
+	 * Power voting for subsequent UL wakeup cycles will need to be
+	 * done directly via bam_dmux_pc_vote() instead of pm_runtime.
 	 */
-	pm_runtime_set_autosuspend_delay(dev, BAM_DMUX_AUTOSUSPEND_DELAY);
-	pm_runtime_use_autosuspend(dev);
-	pm_runtime_enable(dev);
+	pm_runtime_set_active(dev);
 
 	ret = devm_request_threaded_irq(dev, pc_ack_irq, NULL, bam_dmux_pc_ack_irq,
 					IRQF_ONESHOT, NULL, dmux);
