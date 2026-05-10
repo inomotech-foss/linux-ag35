@@ -1074,28 +1074,33 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	}
 
 	/*
-	 * Mark device as ACTIVE but do NOT enable runtime PM.
+	 * Enable runtime PM but keep the device permanently active.
 	 *
-	 * The upstream driver uses pm_runtime to manage APPS SMSM bit 1
-	 * power voting.  However, bam_dmux_runtime_resume() contains
-	 * blocking wait_for_completion_timeout() calls (up to 2s each).
-	 * When dma_request_chan() creates device links to the BAM DMA
-	 * controller, pm_runtime operations cascade into those blocking
-	 * waits, causing pm_runtime_disable() to block for 2.3s.
+	 * pm_runtime_enable() is REQUIRED because dma_request_chan()
+	 * creates device links with DL_FLAG_PM_RUNTIME between bam-dmux
+	 * (consumer) and the BAM DMA controller (supplier).  Without
+	 * pm_runtime enabled, these links don't properly manage the BAM
+	 * controller's power state, which prevents the modem from seeing
+	 * the BAM as ready and asserting SMSM bit 1.
 	 *
-	 * The modem's inactivity timer (~2-3s) fires during this delay,
-	 * powering down A2 before the handshake completes.
+	 * pm_runtime_set_active() BEFORE enable ensures the device starts
+	 * as RPM_ACTIVE instead of RPM_SUSPENDED (the default).
 	 *
-	 * The downstream 3.18 kernel has NO pm_runtime at all — it
-	 * manages power voting directly.  By leaving pm_runtime disabled
-	 * (set_active but not enable), all pm_runtime_* calls elsewhere
-	 * in the driver become harmless no-ops, and the handshake
-	 * completes in ~1ms like downstream.
+	 * pm_runtime_get_noresume() increments usage_count to 1, preventing
+	 * rpm_idle (triggered by enable) from scheduling autosuspend.
+	 * This avoids bam_dmux_runtime_suspend() running during boot,
+	 * which would clear the power vote before the handshake completes.
 	 *
-	 * Power voting for subsequent UL wakeup cycles will need to be
-	 * done directly via bam_dmux_pc_vote() instead of pm_runtime.
+	 * The net effect: pm_runtime is enabled (device links work) but
+	 * the device never suspends.  No blocking pm_runtime_disable()
+	 * is needed in pc_irq.  The downstream 3.18 kernel achieves the
+	 * same by not using pm_runtime at all.
 	 */
+	pm_runtime_set_autosuspend_delay(dev, BAM_DMUX_AUTOSUSPEND_DELAY);
+	pm_runtime_use_autosuspend(dev);
 	pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
+	pm_runtime_get_noresume(dev);
 
 	ret = devm_request_threaded_irq(dev, pc_ack_irq, NULL, bam_dmux_pc_ack_irq,
 					IRQF_ONESHOT, NULL, dmux);
