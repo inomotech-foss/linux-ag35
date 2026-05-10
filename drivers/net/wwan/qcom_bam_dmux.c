@@ -980,22 +980,21 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	dma_async_issue_pending(dmux->rx);
 
 	/*
-	 * Do NOT send CMD_OPEN or set APPS bit 1 here.
+	 * Set APPS SMSM bit 1 (A2_POWER_CONTROL) to tell the modem that
+	 * our BAM is ready.  The modem's A2 DMA init waits for this bit
+	 * before asserting its own SMSM bit 1 (which triggers pc_irq).
 	 *
-	 * Downstream boot sequence:
-	 *   1. APPS enables BAM + connects pipes (power_on above)
-	 *   2. APPS waits for modem SMSM bit 1 (pc_irq)
-	 *   3. APPS toggles ACK — immediately, no delay
-	 *   4. Modem sees ACK → apps_bam_link_ready = true → data flows
+	 * In downstream, the entire bam_init() sequence (BAM enable +
+	 * pipe connect + ACK + queue_rx) runs synchronously inside the
+	 * modem's SMSM callback.  The modem fires bit 1, APPS responds
+	 * within 1ms.  Here we set bit 1 proactively after BAM init so
+	 * the modem sees it as soon as its A2 DMA subsystem is ready.
 	 *
-	 * Sending CMD_OPEN here creates a pm_runtime_put_autosuspend()
-	 * from the TX completion callback.  When pc_irq later calls
-	 * pm_runtime_disable(), it blocks for 1-2.4s waiting for the
-	 * autosuspend to complete.  This delay causes the modem's
-	 * inactivity timer to fire, powering down A2.
-	 *
-	 * CMD_OPEN is sent from pc_irq after the handshake completes.
+	 * The boot_done guard in runtime_suspend/resume prevents the
+	 * pm_runtime subsystem from interfering with this SMSM state.
 	 */
+	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
+	dev_info(dmux->dev, "boot_work: APPS SMSM bit 1 set\n");
 
 	dev_info(dmux->dev, "boot_work: BAM ready, RX doorbell done (waiting for modem bit 1)\n");
 
