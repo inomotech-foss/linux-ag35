@@ -756,13 +756,27 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			dma_async_issue_pending(dmux->rx);
 		}
 
+		/*
+		 * Reset pm_runtime BEFORE ACK to avoid delay.
+		 *
+		 * Without pending CMD_OPEN autosuspend (removed from
+		 * boot_work), pm_runtime_disable() returns instantly.
+		 * This must complete before ACK because the modem
+		 * expects immediate response — any delay > ~2s causes
+		 * the modem's inactivity timer to power down A2.
+		 */
+		pm_runtime_disable(dmux->dev);
+		pm_runtime_set_active(dmux->dev);
+		pm_runtime_enable(dmux->dev);
+		pm_runtime_get_noresume(dmux->dev);
+
 		bam_dmux_pc_ack(dmux);
 		dev_info(dmux->dev, "pc_irq: modem up, ACK sent\n");
 
 		/*
-		 * Re-send CMD_OPEN now that the modem has fully initialized
-		 * A2 DMA.  The CMD_OPEN sent during boot_work may have been
-		 * consumed by BAM before A2 was ready to process it.
+		 * Send CMD_OPEN now that BAM and handshake are ready.
+		 * The modem processes CMD_OPEN after seeing our ACK toggle
+		 * and setting apps_bam_link_ready = true.
 		 */
 		{
 			struct sk_buff *cmd_skb;
@@ -782,7 +796,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 				    bam_dmux_skb_dma_submit_tx(skb_dma)) {
 					dma_async_issue_pending(dmux->tx);
 					dev_info(dmux->dev,
-						 "pc_irq: CMD_OPEN ch=0 re-sent (post-handshake)\n");
+						 "pc_irq: CMD_OPEN ch=0 sent\n");
 				} else {
 					if (skb_dma)
 						bam_dmux_tx_done(skb_dma);
@@ -790,32 +804,6 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 				}
 			}
 		}
-
-		/*
-		 * Reset pm_runtime state.  The boot_work CMD_OPEN triggered
-		 * pm_runtime_put_autosuspend() which starts the autosuspend
-		 * timer.  pm_runtime_disable() synchronously completes any
-		 * pending autosuspend, which calls bam_dmux_runtime_suspend()
-		 * → bam_dmux_pc_vote(false).  We must do this BEFORE setting
-		 * APPS bit 1, otherwise pm_runtime_disable clears our vote.
-		 */
-		pm_runtime_disable(dmux->dev);
-		dev_info(dmux->dev, "pc_irq: pm_runtime_disable done\n");
-		pm_runtime_set_active(dmux->dev);
-		pm_runtime_enable(dmux->dev);
-		pm_runtime_get_noresume(dmux->dev);
-
-		/*
-		 * Vote to keep A2 powered on.  Must be AFTER pm_runtime
-		 * reset above (which may clear a previous vote via
-		 * autosuspend) and AFTER the ACK toggle.
-		 *
-		 * The modem's A2 power state machine monitors APPS bit 1
-		 * in APPS_STATE.  Without this vote, the modem powers down
-		 * A2 after its inactivity timer fires (~2.5s).
-		 */
-		bam_dmux_pc_vote(dmux, true);
-		dev_info(dmux->dev, "pc_irq: APPS bit 1 set (keep A2 alive)\n");
 
 		/*
 		 * Re-ring RX doorbell.  The modem's A2 DMA init may have
@@ -974,61 +962,21 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	dma_async_issue_pending(dmux->rx);
 
 	/*
-	 * Force TX pipe init + send CMD_OPEN for channel 0.
+	 * Do NOT send CMD_OPEN or set APPS bit 1 here.
 	 *
-	 * In downstream, both pipes are configured (via sps_connect) BEFORE
-	 * APPS sets SMSM bit 1.  The modem's A2 DMA checks that both the
-	 * producer (pipe 4) and consumer (pipe 5) pipes are configured when
-	 * processing the power control handshake.  If pipe 4 is not enabled
-	 * (P_EN=0), the modem may skip its A2 DMA producer setup.
+	 * Downstream boot sequence:
+	 *   1. APPS enables BAM + connects pipes (power_on above)
+	 *   2. APPS waits for modem SMSM bit 1 (pc_irq)
+	 *   3. APPS toggles ACK — immediately, no delay
+	 *   4. Modem sees ACK → apps_bam_link_ready = true → data flows
 	 *
-	 * Sending CMD_OPEN here also tells the modem to open the data
-	 * channel, instead of waiting for userspace to bring up wwan0.
-	 */
-	{
-		struct sk_buff *cmd_skb;
-		struct bam_dmux_hdr *hdr;
-		struct bam_dmux_skb_dma *skb_dma;
-
-		cmd_skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
-		if (cmd_skb) {
-			hdr = skb_put_zero(cmd_skb, sizeof(*hdr));
-			hdr->magic = BAM_DMUX_HDR_MAGIC;
-			hdr->cmd = BAM_DMUX_CMD_OPEN;
-			hdr->ch = BAM_DMUX_CH_DATA_0;
-
-			skb_dma = bam_dmux_tx_queue(dmux, cmd_skb);
-			if (skb_dma) {
-				pm_runtime_get_noresume(dmux->dev);
-				if (bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE) &&
-				    bam_dmux_skb_dma_submit_tx(skb_dma)) {
-					dma_async_issue_pending(dmux->tx);
-					dev_info(dmux->dev,
-						 "boot_work: CMD_OPEN ch=0 sent (TX pipe init)\n");
-				} else {
-					bam_dmux_tx_done(skb_dma);
-					dev_kfree_skb(cmd_skb);
-				}
-			} else {
-				dev_kfree_skb(cmd_skb);
-			}
-		}
-	}
-
-	/*
-	 * Do NOT set APPS SMSM bit 1 (A2_POWER_CONTROL) here.
+	 * Sending CMD_OPEN here creates a pm_runtime_put_autosuspend()
+	 * from the TX completion callback.  When pc_irq later calls
+	 * pm_runtime_disable(), it blocks for 1-2.4s waiting for the
+	 * autosuspend to complete.  This delay causes the modem's
+	 * inactivity timer to fire, powering down A2.
 	 *
-	 * Downstream boot sequence is modem-initiated:
-	 *   1. Modem boots → sets bit 1 in MODEM_STATE
-	 *   2. APPS sees modem bit 1 (pc_irq fires)
-	 *   3. APPS connects pipes, submits RX descriptors
-	 *   4. APPS toggles ACK (bit 11) only — NEVER sets bit 1
-	 *   5. Modem sees ACK → apps_bam_link_ready = true → data flows
-	 *
-	 * Setting APPS bit 1 triggers the modem's a2_apps_smsm_callback()
-	 * which treats it as an uplink wakeup request, not a boot handshake.
-	 * At boot time, the modem's A2 hardware may not even be initialized
-	 * yet, causing the wakeup path to fail silently.
+	 * CMD_OPEN is sent from pc_irq after the handshake completes.
 	 */
 
 	dev_info(dmux->dev, "boot_work: BAM ready, RX doorbell done (waiting for modem bit 1)\n");
