@@ -757,25 +757,38 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		}
 
 		/*
-		 * ACK toggle only — tells modem we received its power-up.
-		 * Do NOT set APPS bit 1 here — see below.
+		 * ACK toggle — tells modem we received its power-up.
+		 * Immediately re-ring RX doorbell and start poll timer.
+		 *
+		 * In downstream, the entire init (pipes + ACK + queue_rx)
+		 * completes in ~1ms inside the SMSM callback.  The modem
+		 * starts producing data immediately after seeing ACK.
+		 * Its DL inactivity timer (~2.4s) fires if no data flows.
+		 *
+		 * We must get ACK + RX doorbell + timer all done BEFORE
+		 * the 2.3s pm_runtime_disable() block below.  That way
+		 * the modem can produce data autonomously (BAM hardware
+		 * writes to our buffers) and our timer polls for completions
+		 * during the block.
 		 */
 		bam_dmux_pc_ack(dmux);
-		dev_info(dmux->dev, "pc_irq: ACK sent\n");
+		dma_async_issue_pending(dmux->rx);
+		dmux->pc_state = new_state;
+		mod_timer(&dmux->rx_poll_timer,
+			  jiffies + msecs_to_jiffies(1));
+		dev_info(dmux->dev, "pc_irq: ACK + doorbell + timer done\n");
 
 		/*
 		 * Reset pm_runtime to ACTIVE.  Blocks ~2.3s because
 		 * dma_request_chan() created device links whose pm_runtime
 		 * barrier must complete.
 		 *
-		 * CRITICAL: APPS bit 1 must NOT be set before this call.
-		 * pm_runtime_disable() runs __pm_runtime_barrier() which
-		 * may execute a pending runtime_suspend callback.  That
-		 * callback calls bam_dmux_pc_vote(false), clearing APPS
-		 * bit 1.  The modem sees bit 1 go 1→0 and powers down A2.
-		 *
-		 * With bit 1 unset, runtime_suspend's pc_vote(false) is a
-		 * no-op (already cleared), so the modem stays up.
+		 * Safe because:
+		 * - ACK already sent (modem won't timeout)
+		 * - RX descriptors posted + doorbell rung (data can flow)
+		 * - Timer running (completions polled during block)
+		 * - APPS bit 1 NOT set yet (runtime_suspend's pc_vote(false)
+		 *   is a no-op since bit is already 0)
 		 */
 		pm_runtime_disable(dmux->dev);
 		pm_runtime_set_active(dmux->dev);
@@ -786,18 +799,13 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		/*
 		 * NOW set APPS bit 1 — safe because pm_runtime is reset
 		 * to ACTIVE with usage_count=1 (from get_noresume above).
-		 * No autosuspend will fire until usage_count drops to 0.
 		 */
 		bam_dmux_pc_vote(dmux, true);
 		dev_info(dmux->dev, "pc_irq: APPS bit 1 set\n");
 
 		/*
-		 * Send CMD_OPEN.  Must call pm_runtime_get_noresume()
-		 * first to balance the pm_runtime_put_autosuspend() that
-		 * bam_dmux_tx_done() calls on TX completion.  Without
-		 * this, the put decrements usage_count to 0, starting
-		 * autosuspend → runtime_suspend → pc_vote(false) → modem
-		 * sees bit 1 cleared → powers down A2.
+		 * Send CMD_OPEN with extra pm_runtime_get to balance
+		 * tx_done's pm_runtime_put_autosuspend.
 		 */
 		{
 			struct sk_buff *cmd_skb;
@@ -826,29 +834,6 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 				}
 			}
 		}
-
-		/*
-		 * Re-ring RX doorbell.  The modem's A2 DMA init may have
-		 * reset pipe 5 (P_RST) between boot_work and now, which
-		 * clears the BAM's internal descriptor count even though
-		 * our descriptors are still in DDR.  Re-issuing pending
-		 * rewrites P_EVNT_REG with the current tail offset,
-		 * restoring the "32 descriptors available" state.
-		 *
-		 * Without this, the A2 peripheral sees pipe 5 has zero
-		 * available descriptors and sends P_WAKE instead of data.
-		 */
-		dma_async_issue_pending(dmux->rx);
-		dev_info(dmux->dev, "pc_irq: RX doorbell re-issued\n");
-
-		/* Set pc_state BEFORE starting timer to avoid race */
-		dmux->pc_state = new_state;
-
-		/* Start RX completion polling via timer */
-		mod_timer(&dmux->rx_poll_timer,
-			  jiffies + msecs_to_jiffies(1));
-		dev_info(dmux->dev, "pc_irq: timer started, jiffies=%lu\n",
-			 jiffies);
 	} else if (new_state && dmux->pc_state) {
 		/* Already up (shouldn't happen with current flow) */
 		dma_async_issue_pending(dmux->rx);
