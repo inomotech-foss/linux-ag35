@@ -86,6 +86,7 @@ struct bam_dmux {
 
 	struct delayed_work boot_work;
 	struct timer_list rx_poll_timer;
+	bool boot_done; /* true after first successful pc_irq handshake */
 
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
 	struct work_struct register_netdev_work;
@@ -801,6 +802,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		 * to ACTIVE with usage_count=1 (from get_noresume above).
 		 */
 		bam_dmux_pc_vote(dmux, true);
+		dmux->boot_done = true;
 		dev_info(dmux->dev, "pc_irq: APPS bit 1 set\n");
 
 		/*
@@ -870,6 +872,11 @@ static int bam_dmux_runtime_suspend(struct device *dev)
 	struct bam_dmux *dmux = dev_get_drvdata(dev);
 
 	dev_dbg(dev, "runtime suspend\n");
+
+	/* Same guard as runtime_resume — don't touch SMSM during boot */
+	if (!dmux->boot_done)
+		return 0;
+
 	bam_dmux_pc_vote(dmux, false);
 
 	return 0;
@@ -881,7 +888,22 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 
 	dev_dbg(dev, "runtime resume\n");
 
-	/* Wait until previous power down was acked */
+	/*
+	 * During boot, the pc_irq handler manages the SMSM handshake
+	 * directly.  runtime_resume must not touch SMSM until the boot
+	 * handshake is complete, because:
+	 *
+	 * 1. dma_request_chan() creates device links that can trigger
+	 *    runtime_resume, setting APPS bit 1 prematurely.
+	 * 2. pm_runtime_disable()'s barrier can invoke runtime_resume,
+	 *    whose wait_for_completion_timeout will expire (no modem
+	 *    ACK for a redundant bit-1-set), causing it to clear bit 1.
+	 *    The modem sees bit 1 go 1→0 and powers down A2.
+	 */
+	if (!dmux->boot_done) {
+		dev_dbg(dev, "runtime resume: boot not done, skipping\n");
+		return 0;
+	}
 	if (!wait_for_completion_timeout(&dmux->pc_ack_completion,
 					 BAM_DMUX_REMOTE_TIMEOUT))
 		return -ETIMEDOUT;
