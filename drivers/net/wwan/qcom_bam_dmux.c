@@ -765,7 +765,9 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		 * expects immediate response — any delay > ~2s causes
 		 * the modem's inactivity timer to power down A2.
 		 */
+		dev_info(dmux->dev, "pc_irq: before pm_runtime_disable\n");
 		pm_runtime_disable(dmux->dev);
+		dev_info(dmux->dev, "pc_irq: after pm_runtime_disable\n");
 		pm_runtime_set_active(dmux->dev);
 		pm_runtime_enable(dmux->dev);
 		pm_runtime_get_noresume(dmux->dev);
