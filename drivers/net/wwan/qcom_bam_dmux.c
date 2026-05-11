@@ -233,17 +233,18 @@ static void bam_dmux_bam_init(struct bam_dmux *dmux)
 	u32 val;
 
 	val = bam_readl(dmux, BAM_CTRL);
-	dev_info(dmux->dev, "bam_init: BAM_CTRL=0x%08x (pre-reset)\n", val);
+	dev_info(dmux->dev, "bam_init: BAM_CTRL=0x%08x (pre-init)\n", val);
 
-	/* SW_RST: clear all internal state */
-	bam_writel(dmux, BAM_CTRL, val | BAM_SW_RST);
-	bam_writel(dmux, BAM_CTRL, val & ~BAM_SW_RST);
-
-	/* Barrier: ensure reset is complete before enabling */
-	wmb();
+	/*
+	 * Do NOT do SW_RST here.  The modem already did SW_RST during
+	 * its own BAM init (before setting its SMSM bit 1).  A second
+	 * SW_RST from APPS would break the modem's internal connection
+	 * to the BAM device ports.
+	 *
+	 * Just enable BAM and configure the global registers.
+	 */
 
 	/* Enable BAM */
-	val = bam_readl(dmux, BAM_CTRL);
 	val |= BAM_EN;
 	bam_writel(dmux, BAM_CTRL, val);
 
