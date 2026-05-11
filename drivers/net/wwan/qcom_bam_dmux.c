@@ -744,21 +744,21 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state && !dmux->pc_state) {
 		/* Modem asserted A2_POWER_CONTROL — BAM is initialized */
-		if (!dmux->rx) {
-			/*
-			 * Normal path: modem fired bit 1, meaning its BAM
-			 * is fully initialized (a2_bam_init complete).
-			 * NOW configure our pipes — any earlier and the
-			 * modem's BAM reset would wipe our configuration.
-			 */
-			dev_info(dmux->dev, "pc_irq: initializing BAM + pipes\n");
-			if (!bam_dmux_power_on(dmux)) {
-				dev_err(dmux->dev, "pc_irq: power_on failed\n");
-				bam_dmux_power_off(dmux);
-				goto out;
-			}
-			dma_async_issue_pending(dmux->rx);
+		/*
+		 * Always call power_on — even if dmux->rx was pre-allocated
+		 * by boot_work (for BAM_EN timing).  power_on() will:
+		 * - Skip dma_request_chan("rx") if dmux->rx already set
+		 * - Do dmaengine_slave_config on the existing RX channel
+		 * - Allocate TX channel (if !dmux->tx)
+		 * - Submit RX descriptors
+		 */
+		dev_info(dmux->dev, "pc_irq: initializing BAM + pipes\n");
+		if (!bam_dmux_power_on(dmux)) {
+			dev_err(dmux->dev, "pc_irq: power_on failed\n");
+			bam_dmux_power_off(dmux);
+			goto out;
 		}
+		dma_async_issue_pending(dmux->rx);
 
 		/*
 		 * ACK toggle — tells modem we received its power-up.
@@ -833,9 +833,18 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 					dev_info(dmux->dev,
 						 "pc_irq: CMD_OPEN ch=0 sent\n");
 				} else {
-					if (skb_dma)
+					/*
+					 * bam_dmux_tx_done calls pm_runtime_put
+					 * — balance it with a get to prevent
+					 * usage count underflow.
+					 */
+					if (skb_dma) {
+						pm_runtime_get_noresume(dmux->dev);
 						bam_dmux_tx_done(skb_dma);
+					}
 					dev_kfree_skb(cmd_skb);
+					dev_err(dmux->dev,
+						"pc_irq: CMD_OPEN ch=0 FAILED\n");
 				}
 			}
 		}
@@ -876,8 +885,14 @@ static int bam_dmux_runtime_suspend(struct device *dev)
 
 	dev_dbg(dev, "runtime suspend\n");
 
-	/* Same guard as runtime_resume — don't touch SMSM during boot */
-	if (!dmux->boot_done)
+	/*
+	 * Don't touch SMSM during boot or when modem is already down.
+	 * When the modem powers down (clears its bit 1), pc_irq does
+	 * power_off + ACK + put_autosuspend.  If we also clear APPS
+	 * bit 1 here, the modem sees the change and re-powers — causing
+	 * an infinite power cycle storm.
+	 */
+	if (!dmux->boot_done || !dmux->pc_state)
 		return 0;
 
 	bam_dmux_pc_vote(dmux, false);
@@ -907,43 +922,42 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 		dev_dbg(dev, "runtime resume: boot not done, skipping\n");
 		return 0;
 	}
-	if (!wait_for_completion_timeout(&dmux->pc_ack_completion,
-					 BAM_DMUX_REMOTE_TIMEOUT))
-		return -ETIMEDOUT;
 
-	/* Vote for power state */
+	/*
+	 * Ensure BAM_EN is set before waking the modem.  During
+	 * power_off, dma_release_channel() triggers bam_free_chan()
+	 * which does SW_RST when active_channels drops to 0, clearing
+	 * BAM_EN.  The modem's bam_check() requires BAM_EN=1.
+	 *
+	 * Same pattern as boot_work: allocate RX channel to trigger
+	 * bam_alloc_chan() → bam_init_powered_remotely() (SW_RST +
+	 * BAM_EN).  Keep it allocated so BAM_EN persists.
+	 */
+	if (!dmux->rx) {
+		dmux->rx = dma_request_chan(dev, "rx");
+		if (IS_ERR(dmux->rx)) {
+			dev_err(dev, "runtime resume: RX DMA request failed: %pe\n",
+				dmux->rx);
+			dmux->rx = NULL;
+			return -ENXIO;
+		}
+	}
+
+	/* Vote for power state (sets APPS bit 1, wakes modem) */
 	bam_dmux_pc_vote(dmux, true);
 
-	/* Wait for ack */
+	/* Wait for modem to ACK our power vote */
 	if (!wait_for_completion_timeout(&dmux->pc_ack_completion,
 					 BAM_DMUX_REMOTE_TIMEOUT)) {
 		bam_dmux_pc_vote(dmux, false);
 		return -ETIMEDOUT;
 	}
 
-	/* Wait until we're up */
+	/* Wait for modem to come up (pc_irq sets pc_state) */
 	if (!wait_event_timeout(dmux->pc_wait, dmux->pc_state,
 				BAM_DMUX_REMOTE_TIMEOUT)) {
 		bam_dmux_pc_vote(dmux, false);
 		return -ETIMEDOUT;
-	}
-
-	/* Ensure that we actually initialized successfully */
-	if (!dmux->rx) {
-		bam_dmux_pc_vote(dmux, false);
-		return -ENXIO;
-	}
-
-	/* Request TX channel if necessary */
-	if (dmux->tx)
-		return 0;
-
-	dmux->tx = dma_request_chan(dev, "tx");
-	if (IS_ERR(dmux->tx)) {
-		dev_err(dev, "Failed to request TX DMA channel: %pe\n", dmux->tx);
-		dmux->tx = NULL;
-		bam_dmux_runtime_suspend(dev);
-		return -ENXIO;
 	}
 
 	return 0;
