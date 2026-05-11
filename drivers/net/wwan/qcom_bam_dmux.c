@@ -758,22 +758,14 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			bam_dmux_power_off(dmux);
 			goto out;
 		}
-		dma_async_issue_pending(dmux->rx);
 
 		/*
-		 * ACK toggle — tells modem we received its power-up.
-		 * Immediately re-ring RX doorbell and start poll timer.
+		 * Match downstream bam_init() order exactly:
+		 *   1. toggle_apps_ack()  — ACK first
+		 *   2. queue_rx()         — descriptors + doorbell AFTER ACK
 		 *
-		 * In downstream, the entire init (pipes + ACK + queue_rx)
-		 * completes in ~1ms inside the SMSM callback.  The modem
-		 * starts producing data immediately after seeing ACK.
-		 * Its DL inactivity timer (~2.4s) fires if no data flows.
-		 *
-		 * We must get ACK + RX doorbell + timer all done BEFORE
-		 * the 2.3s pm_runtime_disable() block below.  That way
-		 * the modem can produce data autonomously (BAM hardware
-		 * writes to our buffers) and our timer polls for completions
-		 * during the block.
+		 * The modem's a2_apps_smsm_ack_callback fires when it sees
+		 * the ACK.  Downstream submits RX descriptors AFTER ACK.
 		 */
 		bam_dmux_pc_ack(dmux);
 		dma_async_issue_pending(dmux->rx);
@@ -809,45 +801,16 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		dev_info(dmux->dev, "pc_irq: APPS bit 1 set\n");
 
 		/*
-		 * Send CMD_OPEN with extra pm_runtime_get to balance
-		 * tx_done's pm_runtime_put_autosuspend.
+		 * Do NOT send CMD_OPEN here.  Downstream protocol:
+		 *   1. Modem sends CMD_OPEN to APPS first (on pipe 5)
+		 *   2. APPS receives CMD_OPEN → marks channel remote-open
+		 *   3. APPS sends CMD_OPEN back only when netdev opens
+		 *
+		 * Sending CMD_OPEN before modem sends its own may confuse
+		 * the modem's BAM-DMUX state machine.
 		 */
-		{
-			struct sk_buff *cmd_skb;
-			struct bam_dmux_hdr *hdr;
-			struct bam_dmux_skb_dma *skb_dma;
-
-			cmd_skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
-			if (cmd_skb) {
-				hdr = skb_put_zero(cmd_skb, sizeof(*hdr));
-				hdr->magic = BAM_DMUX_HDR_MAGIC;
-				hdr->cmd = BAM_DMUX_CMD_OPEN;
-				hdr->ch = BAM_DMUX_CH_DATA_0;
-
-				skb_dma = bam_dmux_tx_queue(dmux, cmd_skb);
-				if (skb_dma &&
-				    bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE) &&
-				    bam_dmux_skb_dma_submit_tx(skb_dma)) {
-					pm_runtime_get_noresume(dmux->dev);
-					dma_async_issue_pending(dmux->tx);
-					dev_info(dmux->dev,
-						 "pc_irq: CMD_OPEN ch=0 sent\n");
-				} else {
-					/*
-					 * bam_dmux_tx_done calls pm_runtime_put
-					 * — balance it with a get to prevent
-					 * usage count underflow.
-					 */
-					if (skb_dma) {
-						pm_runtime_get_noresume(dmux->dev);
-						bam_dmux_tx_done(skb_dma);
-					}
-					dev_kfree_skb(cmd_skb);
-					dev_err(dmux->dev,
-						"pc_irq: CMD_OPEN ch=0 FAILED\n");
-				}
-			}
-		}
+		dev_info(dmux->dev,
+			 "pc_irq: init complete, waiting for modem CMD_OPEN\n");
 	} else if (new_state && dmux->pc_state) {
 		/* Already up (shouldn't happen with current flow) */
 		dma_async_issue_pending(dmux->rx);
@@ -1060,7 +1023,7 @@ static void bam_dmux_rx_poll_timer_fn(struct timer_list *t)
 
 	status = dmaengine_tx_status(dmux->rx, 0, NULL);
 
-	if (poll_count < 10 || !(poll_count % 1000))
+	if (poll_count < 20 || !(poll_count % 5000))
 		dev_info(dmux->dev, "rx_poll[%u]: tx_status=%d\n",
 			 poll_count, status);
 	poll_count++;

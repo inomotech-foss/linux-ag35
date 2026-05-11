@@ -1198,6 +1198,7 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 						   BAM_P_IRQ_CLR));
 
 		if (bdev->powered_remotely) {
+			static unsigned int poll_diag_count;
 			u32 sw_ofsts = readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS));
 
 			if (sw_ofsts || pipe_stts)
@@ -1206,6 +1207,47 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 					pipe, sw_ofsts, pipe_stts,
 					bchan->head,
 					list_empty(&bchan->desc_list));
+
+			/* Comprehensive register dump on first few polls */
+			if (poll_diag_count < 5 ||
+			    (poll_diag_count < 100 && !(poll_diag_count % 50))) {
+				struct bam_desc_hw *fifo;
+
+				dev_info(bdev->dev,
+					"diag[%u]: pipe %u BAM_CTRL=0x%x "
+					"P_CTRL=0x%x P_EVNT_REG=0x%x "
+					"P_SW_OFSTS=0x%x P_DESC_FIFO_ADDR=0x%x "
+					"P_FIFO_SIZES=0x%x P_HALT=0x%x "
+					"P_IRQ_STTS=0x%x P_IRQ_EN=0x%x "
+					"IRQ_SRCS_MSK_EE=0x%x\n",
+					poll_diag_count, pipe,
+					readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
+					readl_relaxed(bam_addr(bdev, pipe, BAM_P_CTRL)),
+					readl_relaxed(bam_addr(bdev, pipe, BAM_P_EVNT_REG)),
+					readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
+					readl_relaxed(bam_addr(bdev, pipe, BAM_P_DESC_FIFO_ADDR)),
+					readl_relaxed(bam_addr(bdev, pipe, BAM_P_FIFO_SIZES)),
+					readl_relaxed(bam_addr(bdev, pipe, BAM_P_HALT)),
+					readl_relaxed(bam_addr(bdev, pipe, BAM_P_IRQ_STTS)),
+					readl_relaxed(bam_addr(bdev, pipe, BAM_P_IRQ_EN)),
+					readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+
+				/* Dump first 4 descriptors in the FIFO */
+				fifo = PTR_ALIGN(bchan->fifo_virt,
+						 sizeof(struct bam_desc_hw));
+				if (poll_diag_count == 0) {
+					int d;
+
+					for (d = 0; d < 4 && d < (int)(MAX_DESCRIPTORS + 1); d++)
+						dev_info(bdev->dev,
+							"diag: pipe %u desc[%d] addr=0x%08x size=%u flags=0x%04x\n",
+							pipe, d,
+							le32_to_cpu(fifo[d].addr),
+							le16_to_cpu(fifo[d].size),
+							le16_to_cpu(fifo[d].flags));
+				}
+			}
+			poll_diag_count++;
 		} else
 			dev_dbg(bdev->dev,
 				"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u\n",
