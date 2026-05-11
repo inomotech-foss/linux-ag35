@@ -658,15 +658,13 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 	};
 	int i;
 
-	/* Already powered on (reconnect path) */
-	if (dmux->rx)
-		return true;
-
-	dmux->rx = dma_request_chan(dev, "rx");
-	if (IS_ERR(dmux->rx)) {
-		dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
-		dmux->rx = NULL;
-		return false;
+	if (!dmux->rx) {
+		dmux->rx = dma_request_chan(dev, "rx");
+		if (IS_ERR(dmux->rx)) {
+			dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
+			dmux->rx = NULL;
+			return false;
+		}
 	}
 	dmaengine_slave_config(dmux->rx, &dma_rx_conf);
 
@@ -952,23 +950,24 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 }
 
 /**
- * bam_dmux_boot_work_fn() - set APPS bit 1 and pre-register netdevs.
+ * bam_dmux_boot_work_fn() - initialize BAM, set APPS bit 1, register netdevs.
  *
- * Runs ~1s after modem SMDINIT (SMSM bit 0).  Sets APPS SMSM bit 1
- * (A2_POWER_CONTROL) to tell the modem we want the A2 data path.
- * The modem's a2_apps_smsm_callback fires, initializes its BAM pipes,
- * and asserts modem SMSM bit 1 — which triggers pc_irq.
+ * Runs ~1s after modem SMDINIT (SMSM bit 0).
  *
- * BAM init and pipe configuration are deliberately deferred to pc_irq.
- * The modem's a2_bam_init() may reset the BAM (SW_RST) as part of its
- * A2 subsystem boot.  If APPS configures pipes before the modem's BAM
- * init completes, the reset wipes our pipe configuration and the modem
- * never sees our RX descriptors (P_SW_OFSTS stays at 0).
+ * CRITICAL ORDERING: The modem's A2 DMA subsystem uses satellite mode
+ * (SPS_BAM_MGR_DEVICE_REMOTE) — when it calls bam_check(), it expects
+ * BAM_EN=1.  If BAM_EN=0, bam_check() returns -ENODEV and the modem's
+ * SPS registration fails.  The modem cannot configure its BAM pipes.
  *
- * By waiting for modem bit 1, we know the modem's BAM is fully
- * initialized.  This matches the downstream 3.18 kernel flow where
- * bam_init() (BAM enable + pipe connect + ACK + queue_rx) runs in
- * the SMSM callback AFTER modem fires bit 1.
+ * The modem defers a2_bam_init() to its a2_apps_smsm_callback, which
+ * fires when we set APPS SMSM bit 1.  Therefore we MUST set BAM_EN
+ * BEFORE setting APPS bit 1.  We do this by requesting a DMA channel,
+ * which triggers bam_alloc_chan() → bam_init_powered_remotely()
+ * (SW_RST + BAM_EN).
+ *
+ * Pipe configuration (descriptors, doorbell) is still deferred to
+ * pc_irq, after the modem has completed its A2 init and fired its
+ * own SMSM bit 1.
  *
  * Also pre-registers netdevs (rmnet0-7) since the Quectel OCPU firmware
  * never sends CMD_OPEN packets.
@@ -976,19 +975,40 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux, boot_work.work);
+	struct dma_chan *ch;
 
 	if (dmux->pc_state)
 		return;
 
-	dev_info(dmux->dev, "boot_work: setting APPS bit 1 + pre-registering netdevs\n");
+	dev_info(dmux->dev, "boot_work: initializing BAM + setting APPS bit 1\n");
+
+	/*
+	 * Request an RX DMA channel to trigger BAM global init.
+	 * bam_alloc_chan() calls bam_init_powered_remotely() on the first
+	 * channel allocation, which does SW_RST + BAM_EN.  This ensures
+	 * BAM_EN=1 before the modem's bam_check() runs.
+	 *
+	 * We keep the channel allocated (set dmux->rx) because releasing
+	 * it would decrement active_channels to 0, triggering another
+	 * SW_RST that clears BAM_EN.  pc_irq's bam_dmux_power_on() will
+	 * find dmux->rx already set and continue from there.
+	 */
+	ch = dma_request_chan(dmux->dev, "rx");
+	if (IS_ERR(ch)) {
+		dev_err(dmux->dev, "boot_work: RX DMA channel request failed: %pe\n", ch);
+		/* Retry — BAM DMA controller might not be ready yet */
+		schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(500));
+		return;
+	}
+	dmux->rx = ch;
+	dev_info(dmux->dev, "boot_work: BAM initialized (BAM_EN set)\n");
 
 	/*
 	 * Set APPS SMSM bit 1 (A2_POWER_CONTROL) to trigger the modem's
-	 * A2 DMA subsystem initialization.  The modem will respond by
-	 * setting its own bit 1 (firing pc_irq) once A2 and BAM are ready.
-	 *
-	 * The boot_done guard in runtime_suspend/resume prevents the
-	 * pm_runtime subsystem from interfering with this SMSM state.
+	 * A2 DMA subsystem initialization.  The modem's a2_apps_smsm_callback
+	 * will call bam_check() — which now succeeds because BAM_EN=1.
+	 * The modem will respond by setting its own bit 1 (firing pc_irq)
+	 * once A2 and BAM pipes are ready.
 	 */
 	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
 	dev_info(dmux->dev, "boot_work: APPS SMSM bit 1 set (waiting for modem bit 1)\n");
