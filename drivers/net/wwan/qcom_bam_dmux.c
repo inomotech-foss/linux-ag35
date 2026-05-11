@@ -845,11 +845,11 @@ static bool bam_dmux_hw_init(struct bam_dmux *dmux)
 	/* Step 3: RX pipe (producer, DEV->MEM) */
 	bam_dmux_pipe_init(dmux, &dmux->rx_pipe, true);
 
-	/* Step 4: Submit RX buffers + doorbell */
-	bam_dmux_queue_rx(dmux);
-
-	/* Step 5: Toggle ACK */
+	/* Step 4: Toggle ACK (signals modem that APPS is ready) */
 	bam_dmux_pc_ack(dmux);
+
+	/* Step 5: Submit RX buffers + doorbell */
+	bam_dmux_queue_rx(dmux);
 
 	dmux->bam_initialized = true;
 
@@ -1026,9 +1026,8 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	dev_info(dmux->dev,
-		 "boot_work: toggle ACK + set APPS bit 1 (no BAM init)\n");
+		 "boot_work: set APPS bit 1 (no BAM init, no ACK)\n");
 
-	bam_dmux_pc_ack(dmux);
 	bam_dmux_pc_vote(dmux, true);
 
 	dev_info(dmux->dev,
