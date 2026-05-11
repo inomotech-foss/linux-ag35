@@ -247,20 +247,39 @@ static inline void bam_writel(struct bam_dmux *dmux, u32 offset, u32 val)
 static void bam_dmux_bam_init(struct bam_dmux *dmux)
 {
 	u32 val;
+	u32 pre_trust, pre_p4_trust, pre_p5_trust, pre_pipe_attr;
+	u32 pre_p4_ctrl, pre_p5_ctrl;
 
 	val = bam_readl(dmux, BAM_CTRL);
-	dev_info(dmux->dev, "bam_init: BAM_CTRL=0x%08x (pre-init)\n", val);
+
+	/* Read ALL state BEFORE SW_RST to see what TZ/modem configured */
+	pre_trust = bam_readl(dmux, BAM_TRUST_REG);
+	pre_p4_trust = bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_TX_PIPE));
+	pre_p5_trust = bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_RX_PIPE));
+	pre_pipe_attr = bam_readl(dmux, BAM_PIPE_ATTR_EE);
+	pre_p4_ctrl = bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE));
+	pre_p5_ctrl = bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE));
+
+	dev_info(dmux->dev, "bam_init: PRE-RST BAM_CTRL=0x%08x "
+		 "TRUST=0x%x P_TR[4]=0x%x P_TR[5]=0x%x "
+		 "PIPE_ATTR=0x%x P4_CTRL=0x%x P5_CTRL=0x%x\n",
+		 val, pre_trust, pre_p4_trust, pre_p5_trust,
+		 pre_pipe_attr, pre_p4_ctrl, pre_p5_ctrl);
 
 	/*
-	 * SW_RST: reset BAM to clean state.
-	 * The downstream SPS framework always does SW_RST for non-satellite
-	 * BAMs.  This matches that behavior exactly.
+	 * SKIP SW_RST! Hypothesis: TZ configures trust registers
+	 * during A2 power-up. Our SW_RST destroys this config,
+	 * preventing the modem (on a different EE) from accessing
+	 * pipe 5. The HW has 6 EEs (REV=0x00664127 bits[19:16]=6).
+	 *
+	 * Instead, just ensure BAM_EN is set and configure what we need.
 	 */
+#if 0
+	/* Disabled: SW_RST might destroy TZ/modem trust config */
 	bam_writel(dmux, BAM_CTRL, val | BAM_SW_RST);
 	bam_writel(dmux, BAM_CTRL, val & ~BAM_SW_RST);
-
-	/* Barrier: ensure reset is complete before enabling */
 	wmb();
+#endif
 
 	/* Enable BAM + LOCAL_CLK_GATING (match downstream RMW sequence) */
 	val = bam_readl(dmux, BAM_CTRL);
