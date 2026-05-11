@@ -801,16 +801,41 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		dev_info(dmux->dev, "pc_irq: APPS bit 1 set\n");
 
 		/*
-		 * Do NOT send CMD_OPEN here.  Downstream protocol:
-		 *   1. Modem sends CMD_OPEN to APPS first (on pipe 5)
-		 *   2. APPS receives CMD_OPEN → marks channel remote-open
-		 *   3. APPS sends CMD_OPEN back only when netdev opens
-		 *
-		 * Sending CMD_OPEN before modem sends its own may confuse
-		 * the modem's BAM-DMUX state machine.
+		 * Send CMD_OPEN for ch 0.  On MDM9607/AG35 the modem
+		 * expects APPS to initiate channel open.  Balance
+		 * pm_runtime for tx_done's put_autosuspend.
 		 */
-		dev_info(dmux->dev,
-			 "pc_irq: init complete, waiting for modem CMD_OPEN\n");
+		{
+			struct sk_buff *cmd_skb;
+			struct bam_dmux_hdr *hdr;
+			struct bam_dmux_skb_dma *skb_dma;
+
+			cmd_skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
+			if (cmd_skb) {
+				hdr = skb_put_zero(cmd_skb, sizeof(*hdr));
+				hdr->magic = BAM_DMUX_HDR_MAGIC;
+				hdr->cmd = BAM_DMUX_CMD_OPEN;
+				hdr->ch = BAM_DMUX_CH_DATA_0;
+
+				skb_dma = bam_dmux_tx_queue(dmux, cmd_skb);
+				if (skb_dma &&
+				    bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE) &&
+				    bam_dmux_skb_dma_submit_tx(skb_dma)) {
+					pm_runtime_get_noresume(dmux->dev);
+					dma_async_issue_pending(dmux->tx);
+					dev_info(dmux->dev,
+						 "pc_irq: CMD_OPEN ch=0 sent\n");
+				} else {
+					if (skb_dma) {
+						pm_runtime_get_noresume(dmux->dev);
+						bam_dmux_tx_done(skb_dma);
+					}
+					dev_kfree_skb(cmd_skb);
+					dev_err(dmux->dev,
+						"pc_irq: CMD_OPEN ch=0 FAILED\n");
+				}
+			}
+		}
 	} else if (new_state && dmux->pc_state) {
 		/* Already up (shouldn't happen with current flow) */
 		dma_async_issue_pending(dmux->rx);

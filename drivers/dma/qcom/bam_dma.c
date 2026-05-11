@@ -537,8 +537,14 @@ static void bam_init_powered_remotely(struct bam_device *bdev)
 	writel_relaxed(DEFAULT_CNT_THRSHLD,
 			bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
 
-	/* Enable default set of h/w workarounds, ie all except BAM_FULL_PIPE */
-	writel_relaxed(BAM_CNFG_BITS_DEFAULT, bam_addr(bdev, 0, BAM_CNFG_BITS));
+	/*
+	 * Enable h/w workarounds.  Downstream MDM9607 uses 0xFFFFF7FF
+	 * (all bits set except BAM_FULL_PIPE).  The upstream default
+	 * (0xEFFFF004) leaves bits 0-1, 3-10, 28 clear which may
+	 * prevent the remote (modem) BAM satellite from connecting
+	 * its producer pipe.
+	 */
+	writel_relaxed(0xFFFFF7FF, bam_addr(bdev, 0, BAM_CNFG_BITS));
 
 	/* enable irqs for errors + timer */
 	writel_relaxed(BAM_TIMER_EN | BAM_ERROR_EN | BAM_HRESP_ERR_EN,
