@@ -296,28 +296,57 @@ static void bam_dmux_pipe_init(struct bam_dmux *dmux,
 		 bam_readl(dmux, BAM_P_EVNT_REG(p)),
 		 bam_readl(dmux, BAM_P_SW_OFSTS(p)));
 
-	/* Pipe reset */
+	/*
+	 * Downstream bam_pipe_init sequence (1:1 match):
+	 * 1. P_RST
+	 * 2. IRQ_SRCS_MSK_EE: set pipe bit
+	 * 3. P_IRQ_EN = 0 (disabled during init)
+	 * 4. P_CTRL: direction
+	 * 5. P_CTRL: sys_mode
+	 * 6. P_EVNT_GEN_TRSHLD
+	 * 7. P_DESC_FIFO_ADDR
+	 * 8. P_FIFO_SIZES
+	 * 9. P_CTRL: sys_strm = 0
+	 * 10. P_CTRL: lock_group = 0
+	 * 11. P_CTRL: P_EN = 1
+	 */
+
+	/* Step 1: Pipe reset */
 	bam_writel(dmux, BAM_P_RST(p), 1);
 	bam_writel(dmux, BAM_P_RST(p), 0);
 
-	/* Descriptor FIFO base + size */
+	/* Step 2: Enable pipe interrupt source at BAM level */
+	val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE);
+	val |= BIT(p);
+	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE, val);
+
+	/* Step 3: Disable pipe IRQ during init (downstream sets 0 here) */
+	bam_writel(dmux, BAM_P_IRQ_EN(p), 0);
+
+	/* Steps 4-5: Set direction and system mode via RMW */
+	val = bam_readl(dmux, BAM_P_CTRL(p));
+	if (dir_producer)
+		val |= P_DIRECTION;
+	else
+		val &= ~P_DIRECTION;
+	val |= P_SYS_MODE;
+	bam_writel(dmux, BAM_P_CTRL(p), val);
+
+	/* Step 6: Event threshold */
+	bam_writel(dmux, BAM_P_EVNT_GEN_TRSHLD(p), 0x10);
+
+	/* Step 7-8: Descriptor FIFO base + size */
 	bam_writel(dmux, BAM_P_DESC_FIFO_ADDR(p), pipe->desc_fifo_phys);
 	bam_writel(dmux, BAM_P_FIFO_SIZES(p), BAM_DESC_FIFO_SIZE);
 
-	/* Event threshold (matches downstream) */
-	bam_writel(dmux, BAM_P_EVNT_GEN_TRSHLD(p), 0x10);
+	/* Steps 9-10: sys_strm=0, lock_group=0 (already 0 after reset) */
 
-	/* Per-pipe IRQ enable */
-	bam_writel(dmux, BAM_P_IRQ_EN(p),
-		   P_PRCSD_DESC_EN | P_ERR_EN | P_TRNSFR_END_EN);
-
-	/* P_CTRL: enable pipe, set direction, system mode */
-	val = P_EN | P_SYS_MODE;
-	if (dir_producer)
-		val |= P_DIRECTION;
+	/* Step 11: Enable pipe (RMW to preserve direction + mode) */
+	val = bam_readl(dmux, BAM_P_CTRL(p));
+	val |= P_EN;
 	bam_writel(dmux, BAM_P_CTRL(p), val);
 
-	/* Read back to ensure BAM has processed */
+	/* Read back to confirm */
 	val = bam_readl(dmux, BAM_P_CTRL(p));
 
 	/* Reset FIFO pointers */
@@ -678,18 +707,18 @@ static bool bam_dmux_submit_rx(struct bam_dmux *dmux, int idx)
 static void bam_dmux_queue_rx(struct bam_dmux *dmux)
 {
 	int i;
-	bool submitted = false;
 
+	/*
+	 * Downstream sps_transfer_one rings doorbell after EACH descriptor.
+	 * Match this exactly: submit + doorbell per descriptor.
+	 */
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (dmux->rx_skbs[i].addr)
 			continue;
 		if (!bam_dmux_submit_rx(dmux, i))
 			break;
-		submitted = true;
-	}
-
-	if (submitted)
 		bam_dmux_pipe_doorbell(dmux, &dmux->rx_pipe);
+	}
 }
 
 static void bam_dmux_cmd_data(struct bam_dmux *dmux,
@@ -842,10 +871,11 @@ static void bam_dmux_process_tx_completions(struct bam_dmux *dmux)
 }
 
 /*
- * BAM+pipe hardware init — configures BAM global registers, both pipes,
- * and queues RX buffers.  Must be called BEFORE setting APPS bit 1 so
- * that the modem's A2 DMA engine finds the pipes already configured
- * when it powers on in response to APPS bit 1.
+ * BAM+pipe hardware init — configures BAM global registers, both pipes.
+ * Matches downstream bam_init() which is called from bam_dmux_smsm_cb
+ * AFTER the modem asserts A2_POWER_CONTROL (bit 1).
+ *
+ * Downstream sequence: pipe_init → pipe_set_irq → ACK → queue_rx.
  */
 static bool bam_dmux_hw_init(struct bam_dmux *dmux)
 {
@@ -858,7 +888,22 @@ static bool bam_dmux_hw_init(struct bam_dmux *dmux)
 	/* Step 3: RX pipe (producer, DEV->MEM) */
 	bam_dmux_pipe_init(dmux, &dmux->rx_pipe, true);
 
-	/* Step 4: Submit RX buffers + doorbell */
+	/*
+	 * Step 4: Enable pipe IRQs (downstream pipe_set_irq).
+	 * Downstream sets P_IRQ_EN=0x20 (EOT only) AFTER pipe init,
+	 * then clears stale P_IRQ_STTS.
+	 */
+	bam_writel(dmux, BAM_P_IRQ_EN(dmux->tx_pipe.pipe_num),
+		   P_TRNSFR_END_EN);
+	bam_writel(dmux, BAM_P_IRQ_CLR(dmux->tx_pipe.pipe_num), 0xFF);
+	bam_writel(dmux, BAM_P_IRQ_EN(dmux->rx_pipe.pipe_num),
+		   P_TRNSFR_END_EN);
+	bam_writel(dmux, BAM_P_IRQ_CLR(dmux->rx_pipe.pipe_num), 0xFF);
+
+	/* Step 5: Toggle ACK (downstream: toggle_apps_ack before queue_rx) */
+	bam_dmux_pc_ack(dmux);
+
+	/* Step 6: Submit RX buffers (per-descriptor doorbell) */
 	bam_dmux_queue_rx(dmux);
 
 	dmux->bam_initialized = true;
@@ -985,8 +1030,8 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 			 "poll[%u]: rx P_OFSTS=0x%x P_EVNT=0x%x "
 			 "tx P_OFSTS=0x%x P_EVNT=0x%x "
 			 "P5_CTRL=0x%x P4_CTRL=0x%x BAM_CTRL=0x%x "
-			 "rx_IRQ_STTS=0x%x tx_IRQ_STTS=0x%x "
-			 "BAM_IRQ_STTS=0x%x\n",
+			 "rx_IRQ=0x%x tx_IRQ=0x%x "
+			 "rx_DESC=0x%x rx_SIZES=0x%x\n",
 			 poll_count,
 			 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
 			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
@@ -997,7 +1042,8 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 			 bam_readl(dmux, BAM_CTRL),
 			 bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_RX_PIPE)),
 			 bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_IRQ_STTS));
+			 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_FIFO_SIZES(BAM_DMUX_RX_PIPE)));
 	}
 	poll_count++;
 
@@ -1022,17 +1068,14 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	if (new_state && !dmux->pc_state) {
 		/*
 		 * Modem asserted A2_POWER_CONTROL.
-		 * BAM+pipes were already configured in boot_work BEFORE
-		 * we set APPS bit 1.  Now just ACK + send CMD_OPEN.
+		 * Downstream bam_dmux_smsm_cb does bam_init() HERE
+		 * (after modem bit 1).  Match exactly.
 		 */
-		if (!dmux->bam_initialized) {
-			dev_err(dmux->dev,
-				"pc_irq: BAM not initialized yet!\n");
+		if (!bam_dmux_hw_init(dmux)) {
+			dev_err(dmux->dev, "pc_irq: hw_init failed\n");
+			bam_dmux_hw_deinit(dmux);
 			goto out;
 		}
-
-		/* Toggle ACK (signals modem that APPS is ready) */
-		bam_dmux_pc_ack(dmux);
 
 		dmux->pc_state = new_state;
 
@@ -1078,21 +1121,12 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Configure BAM + pipes BEFORE setting APPS bit 1.
-	 * This ensures the modem's A2 DMA engine finds fully
-	 * configured pipes when it powers on in response to
-	 * APPS bit 1.  (Downstream does the same: bam_init runs
-	 * before APPS sets A2_POWER_CONTROL via ul_wakeup.)
+	 * Downstream: APPS sets bit 1 first (via power_vote from ul_wakeup),
+	 * modem responds with bit 1, then SMSM callback does bam_init.
+	 * We do the same: just set APPS bit 1 here; BAM init in pc_irq.
 	 */
-	dev_info(dmux->dev, "boot_work: initializing BAM + pipes\n");
-	if (!bam_dmux_hw_init(dmux)) {
-		dev_err(dmux->dev, "boot_work: hw_init failed\n");
-		bam_dmux_hw_deinit(dmux);
-		return;
-	}
-
 	dev_info(dmux->dev,
-		 "boot_work: set APPS bit 1 (BAM already configured)\n");
+		 "boot_work: set APPS bit 1 (BAM init deferred to pc_irq)\n");
 
 	bam_dmux_pc_vote(dmux, true);
 
