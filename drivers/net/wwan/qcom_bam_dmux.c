@@ -30,6 +30,7 @@
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
@@ -192,6 +193,7 @@ struct bam_dmux {
 
 	/* SMSM */
 	int pc_irq;
+	int bam_irq;	/* GIC SPI 29 — BAM hardware interrupt */
 	bool pc_state, pc_ack_state;
 	struct qcom_smem_state *pc, *pc_ack;
 	u32 pc_mask, pc_ack_mask;
@@ -267,19 +269,13 @@ static void bam_dmux_bam_init(struct bam_dmux *dmux)
 		 pre_pipe_attr, pre_p4_ctrl, pre_p5_ctrl);
 
 	/*
-	 * SKIP SW_RST! Hypothesis: TZ configures trust registers
-	 * during A2 power-up. Our SW_RST destroys this config,
-	 * preventing the modem (on a different EE) from accessing
-	 * pipe 5. The HW has 6 EEs (REV=0x00664127 bits[19:16]=6).
-	 *
-	 * Instead, just ensure BAM_EN is set and configure what we need.
+	 * SW_RST: downstream sps_register_bam_device does this.
+	 * Trust registers are all-zero before and after reset on
+	 * MDM9607. Re-enabled for 1:1 downstream match.
 	 */
-#if 0
-	/* Disabled: SW_RST might destroy TZ/modem trust config */
 	bam_writel(dmux, BAM_CTRL, val | BAM_SW_RST);
 	bam_writel(dmux, BAM_CTRL, val & ~BAM_SW_RST);
 	wmb();
-#endif
 
 	/* Enable BAM + LOCAL_CLK_GATING (match downstream RMW sequence) */
 	val = bam_readl(dmux, BAM_CTRL);
@@ -824,10 +820,24 @@ static void bam_dmux_cmd_open(struct bam_dmux *dmux, struct bam_dmux_hdr *hdr)
 		return;
 	}
 
-	if (dmux->netdevs[hdr->ch])
+	if (dmux->netdevs[hdr->ch]) {
 		netif_device_attach(dmux->netdevs[hdr->ch]);
-	else
+	} else {
 		schedule_work(&dmux->register_netdev_work);
+	}
+
+	/*
+	 * Downstream: APPS responds to modem CMD_OPEN by sending
+	 * CMD_OPEN back. This completes the bidirectional handshake.
+	 * (In downstream, this happens in msm_bam_dmux_open() when
+	 * rmnet_bam probes onto the platform device. We simplify by
+	 * responding immediately.)
+	 */
+	if (bam_dmux_send_cmd(dmux, BAM_DMUX_CMD_OPEN, hdr->ch))
+		dev_err(dmux->dev, "Failed to send CMD_OPEN response ch=%u\n",
+			hdr->ch);
+	else
+		dev_info(dmux->dev, "CMD_OPEN response sent ch=%u\n", hdr->ch);
 }
 
 static void bam_dmux_cmd_close(struct bam_dmux *dmux, struct bam_dmux_hdr *hdr)
@@ -1122,6 +1132,44 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 	mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
 }
 
+/* ===== BAM hardware ISR (downstream: SPS handles GIC SPI 29) ===== */
+
+/*
+ * The BAM asserts GIC SPI 29 when pipe interrupts are pending.
+ * Downstream, the SPS framework registers this ISR, reads
+ * BAM_IRQ_SRCS_EE, and clears pipe interrupt status.
+ * Without handling this interrupt, the BAM may misbehave.
+ */
+static irqreturn_t bam_dmux_bam_isr(int irq, void *data)
+{
+	struct bam_dmux *dmux = data;
+	u32 srcs, stts;
+
+	srcs = bam_readl(dmux, BAM_IRQ_SRCS_EE);
+	if (!srcs)
+		return IRQ_NONE;
+
+	/* Clear global BAM interrupt status */
+	if (srcs & BIT(31)) {
+		stts = bam_readl(dmux, BAM_IRQ_STTS);
+		bam_writel(dmux, BAM_IRQ_CLR, stts);
+	}
+
+	/* Clear pipe 4 (TX) interrupt status */
+	if (srcs & BIT(BAM_DMUX_TX_PIPE)) {
+		stts = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE));
+		bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_TX_PIPE), stts);
+	}
+
+	/* Clear pipe 5 (RX) interrupt status */
+	if (srcs & BIT(BAM_DMUX_RX_PIPE)) {
+		stts = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_RX_PIPE));
+		bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_RX_PIPE), stts);
+	}
+
+	return IRQ_HANDLED;
+}
+
 /* ===== IRQ handlers ===== */
 
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
@@ -1151,19 +1199,30 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 		dmux->pc_state = new_state;
 
+		/*
+		 * Clear APPS bit 1 (A2_POWER_CONTROL) after hw_init.
+		 *
+		 * Downstream NEVER sets APPS bit 1 during initial link
+		 * setup. It's only used for uplink wakeup (power_vote).
+		 * We set it in boot_work to trigger modem A2 power-on,
+		 * but now that bam_init + ACK is done, clear it to match
+		 * the downstream state. The modem distinguishes:
+		 *   - APPS bit 1 SET + ACK = uplink wakeup (wait for data)
+		 *   - APPS bit 1 NOT SET + ACK = initial link (send CMD_OPEN)
+		 */
+		bam_dmux_pc_vote(dmux, false);
+		dev_info(dmux->dev, "pc_irq: cleared APPS bit 1\n");
+
 		/* Start polling */
 		mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
 
-		/* Send CMD_OPEN ch=0 */
-		if (bam_dmux_send_cmd(dmux, BAM_DMUX_CMD_OPEN,
-				      BAM_DMUX_CH_DATA_0))
-			dev_err(dmux->dev, "pc_irq: CMD_OPEN ch=0 failed\n");
-		else
-			dev_info(dmux->dev, "pc_irq: CMD_OPEN ch=0 sent\n");
-
-		/* Pre-register all netdevs */
-		bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
-		schedule_work(&dmux->register_netdev_work);
+		/*
+		 * Don't send CMD_OPEN — match downstream flow:
+		 * Modem sends CMD_OPEN first after seeing our ACK toggle.
+		 * We process it and respond with CMD_OPEN back.
+		 */
+		dev_info(dmux->dev,
+			 "pc_irq: waiting for modem CMD_OPEN on RX pipe\n");
 
 	} else if (!new_state && dmux->pc_state) {
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
@@ -1193,9 +1252,12 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Downstream: APPS sets bit 1 first (via power_vote from ul_wakeup),
-	 * modem responds with bit 1, then SMSM callback does bam_init.
-	 * We do the same: just set APPS bit 1 here; BAM init in pc_irq.
+	 * Downstream: modem auto-sets bit 1 without APPS requesting it.
+	 * On OCPU firmware, the modem waits for APPS to request A2 power
+	 * by setting APPS bit 1. We set it here; BAM init happens in
+	 * pc_irq after modem responds. We clear APPS bit 1 AFTER hw_init
+	 * to match the downstream state (APPS bit 1 NOT set during initial
+	 * link setup — it's only used for uplink wakeup).
 	 */
 	dev_info(dmux->dev,
 		 "boot_work: set APPS bit 1 (BAM init deferred to pc_irq)\n");
@@ -1250,10 +1312,16 @@ static int bam_dmux_probe(struct platform_device *pdev)
 					     "No BAM address source\n");
 
 		ret = of_address_to_resource(bam_node, 0, &res);
-		of_node_put(bam_node);
-		if (ret)
+		if (ret) {
+			of_node_put(bam_node);
 			return dev_err_probe(dev, ret,
 					     "Failed to get BAM resource\n");
+		}
+
+		/* Get BAM hardware IRQ (GIC SPI 29) from DMA phandle */
+		dmux->bam_irq = irq_of_parse_and_map(bam_node, 0);
+
+		of_node_put(bam_node);
 
 		dmux->bam_base = devm_ioremap(dev, res.start,
 					      resource_size(&res));
@@ -1343,8 +1411,23 @@ static int bam_dmux_probe(struct platform_device *pdev)
 				 ret);
 	}
 
-	dev_info(dev, "probe complete: pc_state=%d bam_base=%p\n",
-		 dmux->pc_state, dmux->bam_base);
+	/*
+	 * Request BAM hardware interrupt (GIC SPI 29).
+	 * Downstream SPS framework handles this to clear P_IRQ_STTS.
+	 * Without it, pending BAM interrupts are never acknowledged.
+	 */
+	if (dmux->bam_irq > 0) {
+		ret = devm_request_irq(dev, dmux->bam_irq, bam_dmux_bam_isr,
+				       IRQF_TRIGGER_HIGH, "bam_dmux_bam", dmux);
+		if (ret)
+			dev_warn(dev, "failed to request BAM IRQ %d: %d\n",
+				 dmux->bam_irq, ret);
+		else
+			dev_info(dev, "BAM IRQ %d registered\n", dmux->bam_irq);
+	}
+
+	dev_info(dev, "probe complete: pc_state=%d bam_base=%p bam_irq=%d\n",
+		 dmux->pc_state, dmux->bam_base, dmux->bam_irq);
 
 	if (dmux->pc_state) {
 		dev_info(dev, "modem already powered, initializing\n");
