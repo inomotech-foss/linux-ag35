@@ -88,6 +88,7 @@ struct bam_dmux_hdr {
 #define BAM_IRQ_SRCS_MSK_EE		0x03004	/* EE0 */
 #define BAM_IRQ_EN			0x0001C
 #define BAM_CNFG_BITS			0x0007C
+#define BAM_IRQ_STTS			0x00014
 
 /* BAM_CTRL bits */
 #define BAM_SW_RST			BIT(0)
@@ -236,16 +237,23 @@ static void bam_dmux_bam_init(struct bam_dmux *dmux)
 	dev_info(dmux->dev, "bam_init: BAM_CTRL=0x%08x (pre-init)\n", val);
 
 	/*
-	 * Do NOT do SW_RST here.  The modem already did SW_RST during
-	 * its own BAM init (before setting its SMSM bit 1).  A second
-	 * SW_RST from APPS would break the modem's internal connection
-	 * to the BAM device ports.
-	 *
-	 * Just enable BAM and configure the global registers.
+	 * SW_RST: reset BAM to clean state.
+	 * The downstream SPS framework always does SW_RST for non-satellite
+	 * BAMs.  This matches that behavior exactly.
 	 */
+	bam_writel(dmux, BAM_CTRL, val | BAM_SW_RST);
+	bam_writel(dmux, BAM_CTRL, val & ~BAM_SW_RST);
 
-	/* Enable BAM */
+	/* Barrier: ensure reset is complete before enabling */
+	wmb();
+
+	/* Enable BAM + LOCAL_CLK_GATING (match downstream RMW sequence) */
+	val = bam_readl(dmux, BAM_CTRL);
 	val |= BAM_EN;
+	val &= ~(3 << 17);	/* clear LOCAL_CLK_GATING field (bits 17:16) */
+	val |= (1 << 17);	/* set LOCAL_CLK_GATING = 1 */
+	val &= ~BIT(19);	/* clear CACHE_MISS_ERR_RESP_EN */
+	val &= ~BIT(20);	/* clear BAM_MESS_ONLY_CANCEL_WB */
 	bam_writel(dmux, BAM_CTRL, val);
 
 	/* Descriptor count threshold */
@@ -854,6 +862,40 @@ static bool bam_dmux_hw_init(struct bam_dmux *dmux)
 
 	dmux->bam_initialized = true;
 
+	/* Diagnostic: dump descriptor FIFO content and BAM error status */
+	{
+		int i;
+		u32 p = dmux->rx_pipe.pipe_num;
+
+		dev_info(dmux->dev,
+			 "hw_init diag: RX P_IRQ_STTS=0x%x P_EVNT=0x%x "
+			 "P_SW_OFSTS=0x%x P_HALT=0x%x BAM_IRQ_STTS=0x%x\n",
+			 bam_readl(dmux, BAM_P_IRQ_STTS(p)),
+			 bam_readl(dmux, BAM_P_EVNT_REG(p)),
+			 bam_readl(dmux, BAM_P_SW_OFSTS(p)),
+			 bam_readl(dmux, BAM_P_HALT(p)),
+			 bam_readl(dmux, BAM_IRQ_STTS));
+
+		/* Dump first 4 RX descriptors from FIFO */
+		for (i = 0; i < 4 && i < BAM_DMUX_NUM_SKB; i++) {
+			struct bam_desc_hw *d = &dmux->rx_pipe.desc_fifo[i];
+
+			dev_info(dmux->dev,
+				 "  rx_desc[%d]: addr=0x%08x size=%u flags=0x%04x "
+				 "skb_dma=0x%pad\n",
+				 i, le32_to_cpu(d->addr), le16_to_cpu(d->size),
+				 le16_to_cpu(d->flags), &dmux->rx_skbs[i].addr);
+		}
+
+		p = dmux->tx_pipe.pipe_num;
+		dev_info(dmux->dev,
+			 "hw_init diag: TX P_IRQ_STTS=0x%x P_EVNT=0x%x "
+			 "P_SW_OFSTS=0x%x\n",
+			 bam_readl(dmux, BAM_P_IRQ_STTS(p)),
+			 bam_readl(dmux, BAM_P_EVNT_REG(p)),
+			 bam_readl(dmux, BAM_P_SW_OFSTS(p)));
+	}
+
 	dev_info(dmux->dev, "hw_init complete: pipes + RX buffers ready\n");
 	return true;
 }
@@ -941,7 +983,9 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 		dev_info(dmux->dev,
 			 "poll[%u]: rx P_OFSTS=0x%x P_EVNT=0x%x "
 			 "tx P_OFSTS=0x%x P_EVNT=0x%x "
-			 "P5_CTRL=0x%x P4_CTRL=0x%x BAM_CTRL=0x%x\n",
+			 "P5_CTRL=0x%x P4_CTRL=0x%x BAM_CTRL=0x%x "
+			 "rx_IRQ_STTS=0x%x tx_IRQ_STTS=0x%x "
+			 "BAM_IRQ_STTS=0x%x\n",
 			 poll_count,
 			 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
 			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
@@ -949,7 +993,10 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_TX_PIPE)),
 			 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
 			 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_CTRL));
+			 bam_readl(dmux, BAM_CTRL),
+			 bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE)),
+			 bam_readl(dmux, BAM_IRQ_STTS));
 	}
 	poll_count++;
 
