@@ -841,8 +841,12 @@ static void bam_dmux_process_tx_completions(struct bam_dmux *dmux)
 	}
 }
 
-/* ===== Full BAM+pipe init (called when modem sets bit 1) ===== */
-
+/*
+ * BAM+pipe hardware init — configures BAM global registers, both pipes,
+ * and queues RX buffers.  Must be called BEFORE setting APPS bit 1 so
+ * that the modem's A2 DMA engine finds the pipes already configured
+ * when it powers on in response to APPS bit 1.
+ */
 static bool bam_dmux_hw_init(struct bam_dmux *dmux)
 {
 	/* Step 1: BAM global init (SW_RST + BAM_EN + CNFG) */
@@ -854,10 +858,7 @@ static bool bam_dmux_hw_init(struct bam_dmux *dmux)
 	/* Step 3: RX pipe (producer, DEV->MEM) */
 	bam_dmux_pipe_init(dmux, &dmux->rx_pipe, true);
 
-	/* Step 4: Toggle ACK (signals modem that APPS is ready) */
-	bam_dmux_pc_ack(dmux);
-
-	/* Step 5: Submit RX buffers + doorbell */
+	/* Step 4: Submit RX buffers + doorbell */
 	bam_dmux_queue_rx(dmux);
 
 	dmux->bam_initialized = true;
@@ -1021,14 +1022,17 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	if (new_state && !dmux->pc_state) {
 		/*
 		 * Modem asserted A2_POWER_CONTROL.
-		 * Modem has finished its own BAM init.
-		 * NOW do our full BAM init.
+		 * BAM+pipes were already configured in boot_work BEFORE
+		 * we set APPS bit 1.  Now just ACK + send CMD_OPEN.
 		 */
-		if (!bam_dmux_hw_init(dmux)) {
-			dev_err(dmux->dev, "pc_irq: hw_init failed\n");
-			bam_dmux_hw_deinit(dmux);
+		if (!dmux->bam_initialized) {
+			dev_err(dmux->dev,
+				"pc_irq: BAM not initialized yet!\n");
 			goto out;
 		}
+
+		/* Toggle ACK (signals modem that APPS is ready) */
+		bam_dmux_pc_ack(dmux);
 
 		dmux->pc_state = new_state;
 
@@ -1073,8 +1077,22 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	if (dmux->pc_state)
 		return;
 
+	/*
+	 * Configure BAM + pipes BEFORE setting APPS bit 1.
+	 * This ensures the modem's A2 DMA engine finds fully
+	 * configured pipes when it powers on in response to
+	 * APPS bit 1.  (Downstream does the same: bam_init runs
+	 * before APPS sets A2_POWER_CONTROL via ul_wakeup.)
+	 */
+	dev_info(dmux->dev, "boot_work: initializing BAM + pipes\n");
+	if (!bam_dmux_hw_init(dmux)) {
+		dev_err(dmux->dev, "boot_work: hw_init failed\n");
+		bam_dmux_hw_deinit(dmux);
+		return;
+	}
+
 	dev_info(dmux->dev,
-		 "boot_work: set APPS bit 1 (no BAM init, no ACK)\n");
+		 "boot_work: set APPS bit 1 (BAM already configured)\n");
 
 	bam_dmux_pc_vote(dmux, true);
 
