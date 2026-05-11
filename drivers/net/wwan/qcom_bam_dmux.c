@@ -761,11 +761,13 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 		/*
 		 * Match downstream bam_init() order exactly:
-		 *   1. toggle_apps_ack()  — ACK first
+		 *   1. toggle_apps_ack()  — ACK first (APPS bit 1 is clear,
+		 *      matching downstream where bit 1 is never set during init)
 		 *   2. queue_rx()         — descriptors + doorbell AFTER ACK
 		 *
 		 * The modem's a2_apps_smsm_ack_callback fires when it sees
-		 * the ACK.  Downstream submits RX descriptors AFTER ACK.
+		 * the ACK toggle.  APPS bit 1 will be set later as ul_wakeup
+		 * right before CMD_OPEN is transmitted.
 		 */
 		bam_dmux_pc_ack(dmux);
 		dma_async_issue_pending(dmux->rx);
@@ -792,19 +794,16 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		pm_runtime_get_noresume(dmux->dev);
 		dev_info(dmux->dev, "pc_irq: pm_runtime reset done\n");
 
-		/*
-		 * NOW set APPS bit 1 — safe because pm_runtime is reset
-		 * to ACTIVE with usage_count=1 (from get_noresume above).
-		 */
-		bam_dmux_pc_vote(dmux, true);
 		dmux->boot_done = true;
-		dev_info(dmux->dev, "pc_irq: APPS bit 1 set\n");
 
 		/*
-		 * Send CMD_OPEN for ch 0.  On MDM9607/AG35 the modem
-		 * expects APPS to initiate channel open.  Balance
-		 * pm_runtime for tx_done's put_autosuspend.
+		 * Send CMD_OPEN for ch 0.  Set APPS bit 1 right before
+		 * CMD_OPEN as ul_wakeup signal — this is the ONLY time
+		 * downstream sets bit 1 (power_vote(1) from ul_wakeup).
+		 * Balance pm_runtime for tx_done's put_autosuspend.
 		 */
+		bam_dmux_pc_vote(dmux, true);
+		dev_info(dmux->dev, "pc_irq: APPS bit 1 set (ul_wakeup for CMD_OPEN)\n");
 		{
 			struct sk_buff *cmd_skb;
 			struct bam_dmux_hdr *hdr;
@@ -1006,14 +1005,19 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	dev_info(dmux->dev, "boot_work: BAM initialized (BAM_EN set)\n");
 
 	/*
-	 * Set APPS SMSM bit 1 (A2_POWER_CONTROL) to trigger the modem's
-	 * A2 DMA subsystem initialization.  The modem's a2_apps_smsm_callback
-	 * will call bam_check() — which now succeeds because BAM_EN=1.
-	 * The modem will respond by setting its own bit 1 (firing pc_irq)
-	 * once A2 and BAM pipes are ready.
+	 * Do NOT set APPS SMSM bit 1 here.  In downstream, APPS never
+	 * sets bit 1 during init — it's only set by ul_wakeup() when
+	 * the first UL data/command needs to be sent.
+	 *
+	 * The modem's A2 DMA subsystem initializes on its own schedule
+	 * (triggered by the modem's internal boot sequence after MPSS
+	 * authentication completes).  It will set MODEM SMSM bit 1 when
+	 * ready, firing our pc_irq.
+	 *
+	 * BAM_EN is already set (via dma_request_chan above), so the
+	 * modem's bam_check() will succeed when it runs.
 	 */
-	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
-	dev_info(dmux->dev, "boot_work: APPS SMSM bit 1 set (waiting for modem bit 1)\n");
+	dev_info(dmux->dev, "boot_work: waiting for modem bit 1 (APPS bit 1 NOT set)\n");
 
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
