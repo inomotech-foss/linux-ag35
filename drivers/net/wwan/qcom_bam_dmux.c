@@ -85,10 +85,18 @@ struct bam_dmux_hdr {
 #define BAM_REVISION			0x01000
 #define BAM_NUM_PIPES			0x01008
 #define BAM_DESC_CNT_TRSHLD		0x00008
-#define BAM_IRQ_SRCS_MSK_EE		0x03004	/* EE0 */
+#define BAM_IRQ_SRCS_EE			0x03000	/* EE0: pending IRQ sources */
+#define BAM_IRQ_SRCS_MSK_EE		0x03004	/* EE0: IRQ source mask */
+#define BAM_IRQ_SRCS_UNMASKED_EE	0x03008	/* EE0 */
+#define BAM_PIPE_ATTR_EE		0x0300C	/* EE0: pipe attributes */
 #define BAM_IRQ_EN			0x0001C
 #define BAM_CNFG_BITS			0x0007C
 #define BAM_IRQ_STTS			0x00014
+#define BAM_IRQ_CLR			0x00018
+
+/* BAM trust/security registers (NDP 4K) */
+#define BAM_TRUST_REG			0x02000
+#define BAM_P_TRUST_REG(n)		(0x02020 + (n) * 0x4)
 
 /* BAM_CTRL bits */
 #define BAM_SW_RST			BIT(0)
@@ -113,6 +121,13 @@ struct bam_dmux_hdr {
 #define BAM_P_DESC_FIFO_ADDR(n)		(0x1381C + (n) * 0x1000)
 #define BAM_P_FIFO_SIZES(n)		(0x13820 + (n) * 0x1000)
 #define BAM_P_EVNT_GEN_TRSHLD(n)	(0x13828 + (n) * 0x1000)
+
+/* BAM per-pipe context registers (read-only, HW state) */
+#define BAM_P_AU_PSM_CNTXT_1(n)		(0x13804 + (n) * 0x1000)
+#define BAM_P_PSM_CNTXT_2(n)		(0x13808 + (n) * 0x1000)
+#define BAM_P_PRDCR_SDBND(n)		(0x13024 + (n) * 0x1000)
+#define BAM_P_CNSMR_SDBND(n)		(0x13028 + (n) * 0x1000)
+#define BAM_P_RETR_CNTXT(n)		(0x13834 + (n) * 0x1000)
 
 /* BAM_P_CTRL bits */
 #define P_EN				BIT(1)
@@ -277,6 +292,16 @@ static void bam_dmux_bam_init(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE),
 		 bam_readl(dmux, BAM_REVISION),
 		 bam_readl(dmux, BAM_NUM_PIPES));
+
+	/* Trust/security diagnostics — critical for EE ownership debugging */
+	dev_info(dmux->dev, "bam_init: TRUST_REG=0x%08x "
+		 "P_TRUST[4]=0x%08x P_TRUST[5]=0x%08x "
+		 "IRQ_SRCS=0x%08x PIPE_ATTR=0x%08x\n",
+		 bam_readl(dmux, BAM_TRUST_REG),
+		 bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_TX_PIPE)),
+		 bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_RX_PIPE)),
+		 bam_readl(dmux, BAM_IRQ_SRCS_EE),
+		 bam_readl(dmux, BAM_PIPE_ATTR_EE));
 }
 
 /* ===== Pipe init (matches downstream sps_connect) ===== */
@@ -1044,7 +1069,35 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 			 bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE)),
 			 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(BAM_DMUX_RX_PIPE)),
 			 bam_readl(dmux, BAM_P_FIFO_SIZES(BAM_DMUX_RX_PIPE)));
+
+		/* Extended trust/security + pipe context diagnostics */
+		dev_info(dmux->dev,
+			 "poll[%u]: TRUST=0x%x P_TR[4]=0x%x P_TR[5]=0x%x "
+			 "SRCS=0x%x PIPE_ATTR=0x%x "
+			 "P5_RETR=0x%x P5_PSM1=0x%x P5_PSM2=0x%x "
+			 "P5_PRDCR=0x%x P5_CNSMR=0x%x\n",
+			 poll_count,
+			 bam_readl(dmux, BAM_TRUST_REG),
+			 bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_TX_PIPE)),
+			 bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_IRQ_SRCS_EE),
+			 bam_readl(dmux, BAM_PIPE_ATTR_EE),
+			 bam_readl(dmux, BAM_P_RETR_CNTXT(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_AU_PSM_CNTXT_1(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_PSM_CNTXT_2(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_PRDCR_SDBND(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_CNSMR_SDBND(BAM_DMUX_RX_PIPE)));
 	}
+
+	/*
+	 * Clear P_IRQ_STTS for both pipes every poll cycle.
+	 * Downstream SPS ISR clears these; we never did until now.
+	 * This might unblock the BAM if it stalls on pending IRQs.
+	 */
+	bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_RX_PIPE), 0xFF);
+	bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_TX_PIPE), 0xFF);
+	/* Also clear global BAM IRQ status */
+	bam_writel(dmux, BAM_IRQ_CLR, 0xFF);
 	poll_count++;
 
 	mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
