@@ -743,51 +743,30 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state && !dmux->pc_state) {
-		/* Modem asserted A2_POWER_CONTROL — BAM is initialized */
 		/*
-		 * Always call power_on — even if dmux->rx was pre-allocated
-		 * by boot_work (for BAM_EN timing).  power_on() will:
-		 * - Skip dma_request_chan("rx") if dmux->rx already set
-		 * - Do dmaengine_slave_config on the existing RX channel
-		 * - Allocate TX channel (if !dmux->tx)
-		 * - Submit RX descriptors
+		 * Modem asserted A2_POWER_CONTROL (responded to our bit 1).
+		 * boot_work already configured pipes + submitted descriptors.
+		 * If boot_work didn't finish (shouldn't happen), do full init.
 		 */
-		dev_info(dmux->dev, "pc_irq: initializing BAM + pipes\n");
-		if (!bam_dmux_power_on(dmux)) {
-			dev_err(dmux->dev, "pc_irq: power_on failed\n");
-			bam_dmux_power_off(dmux);
-			goto out;
+		if (!dmux->tx) {
+			dev_info(dmux->dev, "pc_irq: full init (boot_work incomplete)\n");
+			if (!bam_dmux_power_on(dmux)) {
+				dev_err(dmux->dev, "pc_irq: power_on failed\n");
+				bam_dmux_power_off(dmux);
+				goto out;
+			}
+			bam_dmux_pc_ack(dmux);
+			dma_async_issue_pending(dmux->rx);
+			mod_timer(&dmux->rx_poll_timer,
+				  jiffies + msecs_to_jiffies(1));
+			bam_dmux_pc_vote(dmux, true);
+		} else {
+			dev_info(dmux->dev, "pc_irq: pipes ready (boot_work)\n");
 		}
 
-		/*
-		 * Match downstream bam_init() order exactly:
-		 *   1. toggle_apps_ack()  — ACK first (APPS bit 1 is clear,
-		 *      matching downstream where bit 1 is never set during init)
-		 *   2. queue_rx()         — descriptors + doorbell AFTER ACK
-		 *
-		 * The modem's a2_apps_smsm_ack_callback fires when it sees
-		 * the ACK toggle.  APPS bit 1 will be set later as ul_wakeup
-		 * right before CMD_OPEN is transmitted.
-		 */
-		bam_dmux_pc_ack(dmux);
-		dma_async_issue_pending(dmux->rx);
 		dmux->pc_state = new_state;
-		mod_timer(&dmux->rx_poll_timer,
-			  jiffies + msecs_to_jiffies(1));
-		dev_info(dmux->dev, "pc_irq: ACK + doorbell + timer done\n");
 
-		/*
-		 * Reset pm_runtime to ACTIVE.  May block because
-		 * dma_request_chan() (called above) creates device links
-		 * whose pm_runtime barrier must complete.
-		 *
-		 * Safe because:
-		 * - ACK already sent (modem won't timeout)
-		 * - RX descriptors posted + doorbell rung (data can flow)
-		 * - Timer running (completions polled during block)
-		 * - APPS bit 1 NOT set yet via pc_vote (runtime_suspend's
-		 *   pc_vote(false) is a no-op since boot_done is false)
-		 */
+		/* Reset pm_runtime to ACTIVE */
 		pm_runtime_disable(dmux->dev);
 		pm_runtime_set_active(dmux->dev);
 		pm_runtime_enable(dmux->dev);
@@ -796,14 +775,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 		dmux->boot_done = true;
 
-		/*
-		 * Send CMD_OPEN for ch 0.  Set APPS bit 1 right before
-		 * CMD_OPEN as ul_wakeup signal — this is the ONLY time
-		 * downstream sets bit 1 (power_vote(1) from ul_wakeup).
-		 * Balance pm_runtime for tx_done's put_autosuspend.
-		 */
-		bam_dmux_pc_vote(dmux, true);
-		dev_info(dmux->dev, "pc_irq: APPS bit 1 set (ul_wakeup for CMD_OPEN)\n");
+		/* Send CMD_OPEN for ch 0 */
 		{
 			struct sk_buff *cmd_skb;
 			struct bam_dmux_hdr *hdr;
@@ -955,22 +927,21 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
  *
  * Runs ~1s after modem SMDINIT (SMSM bit 0).
  *
- * CRITICAL ORDERING: The modem's A2 DMA subsystem uses satellite mode
- * (SPS_BAM_MGR_DEVICE_REMOTE) — when it calls bam_check(), it expects
- * BAM_EN=1.  If BAM_EN=0, bam_check() returns -ENODEV and the modem's
- * SPS registration fails.  The modem cannot configure its BAM pipes.
+ * CRITICAL ORDERING — do everything BEFORE setting APPS SMSM bit 1:
  *
- * The modem defers a2_bam_init() to its a2_apps_smsm_callback, which
- * fires when we set APPS SMSM bit 1.  Therefore we MUST set BAM_EN
- * BEFORE setting APPS bit 1.  We do this by requesting a DMA channel,
- * which triggers bam_alloc_chan() → bam_init_powered_remotely()
- * (SW_RST + BAM_EN).
+ *   1. SW_RST + BAM_EN    (dma_request_chan triggers bam_init_powered_remotely)
+ *   2. Configure pipe 4+5  (bam_dmux_power_on → prep descriptors → bam_chan_init_hw)
+ *   3. Submit RX descriptors + doorbell
+ *   4. Toggle ACK (APPS bit 11)
+ *   5. Set APPS bit 1       ← modem's A2 DMA wakes up HERE
  *
- * Pipe configuration (descriptors, doorbell) is still deferred to
- * pc_irq, after the modem has completed its A2 init and fired its
- * own SMSM bit 1.
+ * The modem's a2_apps_smsm_callback fires on APPS bit 1: it powers on
+ * A2 hardware and sets apps_bam_link_ready=true.  If BAM pipes are not
+ * yet configured when A2 powers on, the modem's A2 DMA finds empty
+ * pipes and data transfer never starts — the A2 DMA does NOT re-scan
+ * pipes later.
  *
- * Also pre-registers netdevs (rmnet0-7) since the Quectel OCPU firmware
+ * Also pre-registers netdevs (wwan0-7) since the Quectel OCPU firmware
  * never sends CMD_OPEN packets.
  */
 static void bam_dmux_boot_work_fn(struct work_struct *work)
@@ -981,43 +952,42 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	if (dmux->pc_state)
 		return;
 
-	dev_info(dmux->dev, "boot_work: initializing BAM + setting APPS bit 1\n");
+	dev_info(dmux->dev, "boot_work: initializing BAM\n");
 
-	/*
-	 * Request an RX DMA channel to trigger BAM global init.
-	 * bam_alloc_chan() calls bam_init_powered_remotely() on the first
-	 * channel allocation, which does SW_RST + BAM_EN.  This ensures
-	 * BAM_EN=1 before the modem's bam_check() runs.
-	 *
-	 * We keep the channel allocated (set dmux->rx) because releasing
-	 * it would decrement active_channels to 0, triggering another
-	 * SW_RST that clears BAM_EN.  pc_irq's bam_dmux_power_on() will
-	 * find dmux->rx already set and continue from there.
-	 */
+	/* Step 1: SW_RST + BAM_EN via first DMA channel allocation */
 	ch = dma_request_chan(dmux->dev, "rx");
 	if (IS_ERR(ch)) {
-		dev_err(dmux->dev, "boot_work: RX DMA channel request failed: %pe\n", ch);
-		/* Retry — BAM DMA controller might not be ready yet */
+		dev_err(dmux->dev, "boot_work: RX DMA request failed: %pe\n", ch);
 		schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(500));
 		return;
 	}
 	dmux->rx = ch;
-	dev_info(dmux->dev, "boot_work: BAM initialized (BAM_EN set)\n");
+	dev_info(dmux->dev, "boot_work: BAM_EN set\n");
+
+	/* Step 2: Configure pipes + submit RX descriptors */
+	if (!bam_dmux_power_on(dmux)) {
+		dev_err(dmux->dev, "boot_work: power_on failed\n");
+		bam_dmux_power_off(dmux);
+		return;
+	}
+	dev_info(dmux->dev, "boot_work: pipes configured + RX descs submitted\n");
+
+	/* Step 3: Toggle ACK (APPS bit 11) */
+	bam_dmux_pc_ack(dmux);
+
+	/* Step 4: Write RX doorbell */
+	dma_async_issue_pending(dmux->rx);
+
+	/* Step 5: Start poll timer (BAM IRQ blocked by TZ) */
+	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
 
 	/*
-	 * Do NOT set APPS SMSM bit 1 here.  In downstream, APPS never
-	 * sets bit 1 during init — it's only set by ul_wakeup() when
-	 * the first UL data/command needs to be sent.
-	 *
-	 * The modem's A2 DMA subsystem initializes on its own schedule
-	 * (triggered by the modem's internal boot sequence after MPSS
-	 * authentication completes).  It will set MODEM SMSM bit 1 when
-	 * ready, firing our pc_irq.
-	 *
-	 * BAM_EN is already set (via dma_request_chan above), so the
-	 * modem's bam_check() will succeed when it runs.
+	 * Step 6: Set APPS bit 1 LAST.
+	 * Everything is ready — pipes configured, descriptors posted,
+	 * doorbell written, ACK toggled.  Now wake the modem's A2 DMA.
 	 */
-	dev_info(dmux->dev, "boot_work: waiting for modem bit 1 (APPS bit 1 NOT set)\n");
+	bam_dmux_pc_vote(dmux, true);
+	dev_info(dmux->dev, "boot_work: APPS bit 1 set, waiting for modem\n");
 
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);

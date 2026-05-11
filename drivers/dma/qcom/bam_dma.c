@@ -560,6 +560,20 @@ static void bam_init_powered_remotely(struct bam_device *bdev)
 		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_REVISION)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_NUM_PIPES)));
+
+	/* Dump trust/security registers and all pipe states */
+	{
+		int p;
+
+		dev_info(bdev->dev, "BAM TRUST_REG(0x2000)=0x%08x\n",
+			 readl_relaxed(bdev->regs + 0x2000));
+		for (p = 0; p < 6; p++)
+			dev_info(bdev->dev,
+				 "  pipe %d: P_TRUST(0x%x)=0x%08x P_CTRL=0x%08x\n",
+				 p, 0x2020 + 4 * p,
+				 readl_relaxed(bdev->regs + 0x2020 + 4 * p),
+				 readl_relaxed(bam_addr(bdev, p, BAM_P_CTRL)));
+	}
 }
 
 /**
@@ -741,7 +755,8 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 			"P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
 			"P_EVNT_GEN_TRSHLD=0x%x P_HALT=0x%x "
 			"P_IRQ_EN=0x%x P_IRQ_STTS=0x%x "
-			"IRQ_SRCS_MSK_EE=0x%x\n",
+			"IRQ_SRCS_MSK_EE=0x%x "
+			"P_TRUST(0x%x)=0x%x\n",
 			bchan->id, dir,
 			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
 			readl_relaxed(bam_addr(bdev, bchan->id,
@@ -761,7 +776,9 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 			readl_relaxed(bam_addr(bdev, bchan->id,
 					    BAM_P_IRQ_STTS)),
 			readl_relaxed(bam_addr(bdev, 0,
-					    BAM_IRQ_SRCS_MSK_EE)));
+					    BAM_IRQ_SRCS_MSK_EE)),
+			0x2020 + 4 * bchan->id,
+			readl_relaxed(bdev->regs + 0x2020 + 4 * bchan->id));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
