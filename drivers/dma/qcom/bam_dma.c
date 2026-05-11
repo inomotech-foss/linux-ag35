@@ -486,19 +486,26 @@ static void bam_reset(struct bam_device *bdev)
 }
 
 /**
- * bam_init_powered_remotely - Enable a powered-remotely BAM without SW_RST
+ * bam_init_powered_remotely - Full BAM init for powered-remotely BAMs
  * @bdev: bam device
  *
- * For powered-remotely BAMs (e.g. BAM_DMUX on MDM9607), APPS must set
- * BAM_EN before the modem configures its pipes.  The modem runs
- * bam_check() (satellite-mode path) which expects BAM_EN=1.
+ * For powered-remotely BAMs (e.g. BAM_DMUX on MDM9607), APPS manages
+ * the BAM locally.  The downstream MDM9607 kernel (3.18) does NOT use
+ * satellite mode for the A2 BAM — it registers with SPS_BAM_MGR_LOCAL
+ * (not SPS_BAM_MGR_DEVICE_REMOTE) and calls bam_init() which performs
+ * a full SW_RST + BAM_EN sequence.
  *
- * We intentionally skip SW_RST here.  SW_RST is destructive — it wipes
- * all pipe configuration.  At probe time the BAM is already in its
- * power-on reset state so SW_RST is redundant.  Skipping it also makes
- * the init order-independent: if this function were ever called after
- * the modem has configured its pipes, SW_RST would silently destroy
- * that configuration with no way to recover.
+ * SW_RST is critical: TrustZone and the bootloader may leave residual
+ * BAM configuration (e.g. BAM_CTRL=0x00020000 on MDM9607) that
+ * interferes with pipe operation.  Without SW_RST, the BAM's internal
+ * data path for producer pipes (modem→APPS) may not function correctly,
+ * causing P_SW_OFSTS to stay at 0 even with properly configured pipes
+ * and submitted descriptors.
+ *
+ * The modem's A2 DMA engine connects to BAM pipes via internal hardware
+ * bus — it is NOT affected by SW_RST on the BAM.  The modem's pipe
+ * connection is re-established when the modem receives the APPS SMSM
+ * ACK after our pipe configuration completes.
  */
 static void bam_init_powered_remotely(struct bam_device *bdev)
 {
@@ -507,12 +514,24 @@ static void bam_init_powered_remotely(struct bam_device *bdev)
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
 	dev_info(bdev->dev, "BAM init (powered-remotely): BAM_CTRL=0x%08x\n", val);
 
-	/* Enable BAM without resetting — preserves any existing pipe config */
+	/*
+	 * SW_RST: reset BAM to clean state.
+	 *
+	 * Matches downstream MDM9607 bam_init() which always does SW_RST
+	 * for locally-managed BAMs.  This clears any TrustZone/bootloader
+	 * residual state and resets all pipe internal state machines.
+	 */
+	val |= BAM_SW_RST;
+	writel(val, bam_addr(bdev, 0, BAM_CTRL));
+	val &= ~BAM_SW_RST;
+	writel(val, bam_addr(bdev, 0, BAM_CTRL));
+
+	/* make sure previous stores are visible before enabling BAM */
+	wmb();
+
+	/* Enable BAM */
 	val |= BAM_EN;
 	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-
-	/* Ensure BAM_EN is visible before subsequent register writes */
-	wmb();
 
 	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD */
 	writel_relaxed(DEFAULT_CNT_THRSHLD,
@@ -528,10 +547,13 @@ static void bam_init_powered_remotely(struct bam_device *bdev)
 	/* unmask global bam interrupt */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-	dev_info(bdev->dev, "BAM configured: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+	dev_info(bdev->dev, "BAM configured: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x "
+		 "REVISION=0x%08x NUM_PIPES=0x%08x\n",
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
 		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
-		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_REVISION)),
+		 readl_relaxed(bam_addr(bdev, 0, BAM_NUM_PIPES)));
 }
 
 /**
@@ -711,7 +733,9 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 			"pipe %u init: dir=%d P_CTRL=0x%x "
 			"P_DESC_FIFO_ADDR=0x%x P_FIFO_SIZES=0x%x "
 			"P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
-			"P_EVNT_GEN_TRSHLD=0x%x\n",
+			"P_EVNT_GEN_TRSHLD=0x%x P_HALT=0x%x "
+			"P_IRQ_EN=0x%x P_IRQ_STTS=0x%x "
+			"IRQ_SRCS_MSK_EE=0x%x\n",
 			bchan->id, dir,
 			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
 			readl_relaxed(bam_addr(bdev, bchan->id,
@@ -723,7 +747,15 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 			readl_relaxed(bam_addr(bdev, bchan->id,
 					    BAM_P_SW_OFSTS)),
 			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_EVNT_GEN_TRSHLD)));
+					    BAM_P_EVNT_GEN_TRSHLD)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_HALT)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_IRQ_EN)),
+			readl_relaxed(bam_addr(bdev, bchan->id,
+					    BAM_P_IRQ_STTS)),
+			readl_relaxed(bam_addr(bdev, 0,
+					    BAM_IRQ_SRCS_MSK_EE)));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
