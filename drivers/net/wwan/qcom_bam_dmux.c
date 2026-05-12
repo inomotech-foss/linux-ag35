@@ -1200,18 +1200,15 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		dmux->pc_state = new_state;
 
 		/*
-		 * Clear APPS bit 1 (A2_POWER_CONTROL) after hw_init.
+		 * Keep APPS bit 1 SET. On OCPU firmware, clearing APPS
+		 * bit 1 after hw_init causes the modem to immediately
+		 * power down A2. The modem requires APPS bit 1 to stay
+		 * asserted to keep the A2 data path alive.
 		 *
-		 * Downstream NEVER sets APPS bit 1 during initial link
-		 * setup. It's only used for uplink wakeup (power_vote).
-		 * We set it in boot_work to trigger modem A2 power-on,
-		 * but now that bam_init + ACK is done, clear it to match
-		 * the downstream state. The modem distinguishes:
-		 *   - APPS bit 1 SET + ACK = uplink wakeup (wait for data)
-		 *   - APPS bit 1 NOT SET + ACK = initial link (send CMD_OPEN)
+		 * In downstream, APPS bit 1 is the "A2_POWER_CONTROL"
+		 * vote — it means "I need A2 uplink". Clearing it tells
+		 * the modem "I'm done, you can power collapse A2."
 		 */
-		bam_dmux_pc_vote(dmux, false);
-		dev_info(dmux->dev, "pc_irq: cleared APPS bit 1\n");
 
 		/* Start polling */
 		mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
