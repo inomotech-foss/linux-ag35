@@ -658,16 +658,12 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 	};
 	int i;
 
-	if (!dmux->rx) {
-		dmux->rx = dma_request_chan(dev, "rx");
-		if (IS_ERR(dmux->rx)) {
-			dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
-			dmux->rx = NULL;
-			return false;
-		}
-	}
-	dmaengine_slave_config(dmux->rx, &dma_rx_conf);
-
+	/*
+	 * Request TX channel FIRST, then RX — matching old 3.18 kernel's
+	 * bam_init() which does sps_connect(TX pipe 4) before
+	 * sps_connect(RX pipe 5).  The first dma_request_chan() triggers
+	 * bam_alloc_chan() → bam_init_powered_remotely() (SW_RST + BAM_EN).
+	 */
 	if (!dmux->tx) {
 		dmux->tx = dma_request_chan(dev, "tx");
 		if (IS_ERR(dmux->tx)) {
@@ -677,6 +673,16 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 			return false;
 		}
 	}
+
+	if (!dmux->rx) {
+		dmux->rx = dma_request_chan(dev, "rx");
+		if (IS_ERR(dmux->rx)) {
+			dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
+			dmux->rx = NULL;
+			return false;
+		}
+	}
+	dmaengine_slave_config(dmux->rx, &dma_rx_conf);
 
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (!bam_dmux_skb_dma_queue_rx(&dmux->rx_skbs[i], GFP_KERNEL))
@@ -902,10 +908,20 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 	 * which does SW_RST when active_channels drops to 0, clearing
 	 * BAM_EN.  The modem's bam_check() requires BAM_EN=1.
 	 *
-	 * Same pattern as boot_work: allocate RX channel to trigger
-	 * bam_alloc_chan() → bam_init_powered_remotely() (SW_RST +
-	 * BAM_EN).  Keep it allocated so BAM_EN persists.
+	 * Allocate TX channel first (matching old kernel's
+	 * reconnect_to_bam: TX pipe 4 before RX pipe 5).
+	 * The first dma_request_chan() triggers bam_alloc_chan() →
+	 * bam_init_powered_remotely() (SW_RST + BAM_EN).
 	 */
+	if (!dmux->tx) {
+		dmux->tx = dma_request_chan(dev, "tx");
+		if (IS_ERR(dmux->tx)) {
+			dev_err(dev, "runtime resume: TX DMA request failed: %pe\n",
+				dmux->tx);
+			dmux->tx = NULL;
+			return -ENXIO;
+		}
+	}
 	if (!dmux->rx) {
 		dmux->rx = dma_request_chan(dev, "rx");
 		if (IS_ERR(dmux->rx)) {

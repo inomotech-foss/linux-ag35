@@ -676,21 +676,16 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	/* Set event threshold to 0x10 to match downstream SPS configuration */
 	writel(0x10, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
 
-	if (bdev->polling) {
-		/*
-		 * Downstream SPS sets P_IRQ_EN to the ACTUAL mask even
-		 * for polling pipes (step 15a in bam_pipe_set_irq),
-		 * then clears IRQ_SRCS_MSK_EE to prevent interrupt
-		 * delivery.  Match this exactly — the BAM hardware
-		 * may behave differently when P_IRQ_EN=0 vs non-zero.
-		 */
-		writel(P_DEFAULT_IRQS_EN,
-				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
-	} else {
-		/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
-		writel(P_DEFAULT_IRQS_EN,
-				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
-	}
+	/*
+	 * Match downstream SPS two-phase P_IRQ_EN init:
+	 * Phase 1 (here): P_IRQ_EN = 0 (all pipe IRQs disabled)
+	 * Phase 2 (after P_EN): P_IRQ_EN = real mask
+	 *
+	 * The downstream bam_pipe_init() writes P_IRQ_EN = 0 because
+	 * hw_params.pipe_irq_mask is zeroed.  The real mask is set
+	 * later by sps_bam_pipe_set_params() → bam_pipe_set_irq().
+	 */
+	writel(0, bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
 
 	/*
 	 * IRQ_SRCS_MSK_EE handling: match the downstream SPS driver.
@@ -755,6 +750,27 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 * barrier ensures completion.
 	 */
 	val = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
+
+	/*
+	 * Phase 2 of P_IRQ_EN init: set the real interrupt mask AFTER
+	 * P_EN is set and read back.  This matches downstream SPS which
+	 * calls sps_bam_pipe_set_params() → bam_pipe_set_irq() after
+	 * bam_pipe_init() has already set P_EN=1.
+	 *
+	 * For powered-remotely BAMs (bam-dmux): use P_TRNSFR_END_EN
+	 * (0x20) only, matching old kernel's SPS_O_EOT → P_IRQ_EN=0x20.
+	 * The upstream default adds P_PRCSD_DESC_EN and P_ERR_EN which
+	 * the old kernel never set for bam-dmux pipes.
+	 */
+	if (bdev->powered_remotely)
+		writel(P_TRNSFR_END_EN,
+				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	else if (bdev->polling)
+		writel(P_DEFAULT_IRQS_EN,
+				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	else
+		writel(P_DEFAULT_IRQS_EN,
+				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
 
 	bchan->initialized = 1;
 
