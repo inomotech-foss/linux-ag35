@@ -270,61 +270,50 @@ static void bam_dmux_pc_ack(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * BAM Hardware Init — matching downstream SPS bam_init() exactly
+ * BAM Hardware Init — NO SW_RST (modem owns BAM)
  *
- * Downstream 3.18 kernel (satellite_mode=0) does full bam_init():
- *   1. SW_RST (set then clear)
- *   2. BAM_EN
- *   3. DESC_CNT_TRSHLD
- *   4. CNFG_BITS
- *   5. BAM_IRQ_EN  (0x16 = TIMER|ERROR|HRESP_ERR)
- *   6. IRQ_SRCS_MSK_EE(0)  (BAM_IRQ_MSK, set per-pipe in pipe init)
+ * The modem firmware initializes the BAM during a2_bam_init() at boot.
+ * It configures pipe 5 (modem TX) once and never re-initializes.
+ * SW_RST from APPS side wipes the modem's pipe config, breaking pipe 5.
  *
- * Verified against working 3.18 kernel register dump:
+ * The working 3.18 kernel's register dump shows:
+ *   BAM_CTRL=0x00020002  (bit 17 + BAM_EN — set by modem)
  *   BAM_IRQ_EN=0x16  IRQ_SRCS_MSK_EE(0)=0x80000030
+ *
+ * We only set BAM_EN (in case modem hasn't yet), IRQ registers, and
+ * DESC_CNT_TRSHLD.  Per-pipe IRQ bits are added in bam_pipe_hw_init().
  * ────────────────────────────────────────────────────────────────────────── */
 
 static void bam_hw_init(struct bam_dmux *dmux)
 {
 	u32 val;
 
-	dev_info(dmux->dev, "bam_hw_init: PRE-RESET BAM_CTRL=0x%08x\n",
-		 bam_readl(dmux, BAM_CTRL));
-
-	/* Step 1: Software reset */
 	val = bam_readl(dmux, BAM_CTRL);
-	val |= BAM_SW_RST;
-	bam_writel(dmux, BAM_CTRL, val);
+	dev_info(dmux->dev, "bam_hw_init: BAM_CTRL=0x%08x\n", val);
 
-	/* Clear reset */
-	val &= ~BAM_SW_RST;
-	bam_writel(dmux, BAM_CTRL, val);
-	wmb();
+	/* Ensure BAM is enabled (don't reset — modem owns BAM state) */
+	if (!(val & BAM_EN)) {
+		val |= BAM_EN;
+		bam_writel(dmux, BAM_CTRL, val);
+	}
 
-	/* Step 2: Enable BAM */
-	val |= BAM_EN;
-	bam_writel(dmux, BAM_CTRL, val);
-
-	/* Step 3: Descriptor count threshold (matching working 3.18: 0x1000) */
+	/* Descriptor count threshold (matching working 3.18: 0x1000) */
 	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, 0x1000);
 
-	/* Step 4: Config bits */
-	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
-
-	/* Step 5: BAM-level IRQ enable (matching working 3.18: 0x16) */
+	/* BAM-level IRQ enable (matching working 3.18: 0x16) */
 	bam_writel(dmux, BAM_IRQ_EN,
 		   BAM_IRQ_TIMER_EN | BAM_IRQ_ERROR_EN | BAM_IRQ_HRESP_ERR_EN);
 
-	/* Step 6: Global IRQ mask for EE 0 (pipe bits added in pipe_init) */
+	/* Global IRQ mask for EE 0 (pipe bits added in pipe_init) */
 	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
 
 	dev_info(dmux->dev,
-		 "bam_hw_init: POST BAM_CTRL=0x%08x CNFG_BITS=0x%08x "
-		 "IRQ_EN=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+		 "bam_hw_init: POST BAM_CTRL=0x%08x IRQ_EN=0x%08x "
+		 "IRQ_SRCS_MSK=0x%08x DESC_CNT=0x%08x\n",
 		 bam_readl(dmux, BAM_CTRL),
-		 bam_readl(dmux, BAM_CNFG_BITS),
 		 bam_readl(dmux, BAM_IRQ_EN),
-		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
+		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)),
+		 bam_readl(dmux, BAM_DESC_CNT_TRSHLD));
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -1059,7 +1048,7 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 {
 	int i, ret;
 
-	/* Step 1: Full BAM hardware init (SW_RST + BAM_EN + IRQ) */
+	/* Step 1: BAM hardware init (BAM_EN + IRQ, no SW_RST) */
 	bam_hw_init(dmux);
 
 	/* Step 2: Initialize TX pipe (pipe 4, consumer) */
@@ -1143,9 +1132,10 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
  * Boot sequence:
  *   1. remote-ready IRQ fires (modem set SMDINIT)
  *   2. boot_work runs after 1s delay:
- *      a. BAM init (SW_RST + BAM_EN + pipe config + IRQ setup)
- *      b. Queue RX descriptors + ring doorbell
- *      c. Set APPS bit 1 (signal modem)
+ *      a. BAM init (BAM_EN + IRQ, NO SW_RST — modem owns BAM)
+ *      b. Pipe init (P_RST + config) + queue RX descriptors
+ *      c. Ring RX doorbell
+ *      d. Set APPS bit 1 (signal modem)
  *   3. Modem responds: sets MODEM bit 1
  *   4. pc_irq fires:
  *      a. Toggle ACK (modem sends CMD_OPEN after receiving this)
@@ -1279,8 +1269,8 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 
 	/*
 	 * Downstream sequence (from bam_init() in 3.18 bam_dmux.c):
-	 *   1. Full BAM init (SW_RST + BAM_EN + pipes + IRQ)
-	 *   2. Toggle ACK
+	 *   1. BAM init (BAM_EN + IRQ setup, NO SW_RST — modem owns BAM)
+	 *   2. Pipe init (P_RST + config)
 	 *   3. Queue RX buffers + ring doorbells
 	 *   4. Set APPS bit 1 LAST (after BAM is fully ready)
 	 *
