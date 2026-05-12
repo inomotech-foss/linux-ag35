@@ -730,10 +730,8 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	bool new_state;
 
 	/*
-	 * Read the actual modem state instead of toggling.  Boot_work may
-	 * have set pc_state=true before pc_irq fires, which would break
-	 * the toggle-based logic (it would interpret the first real modem
-	 * bit-1 assertion as "power down").
+	 * Read the actual modem state instead of toggling.
+	 * Use line level to detect modem's current bit 1 state.
 	 */
 	irq_get_irqchip_state(dmux->pc_irq, IRQCHIP_STATE_LINE_LEVEL, &new_state);
 
@@ -744,12 +742,15 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state && !dmux->pc_state) {
 		/*
-		 * Modem asserted A2_POWER_CONTROL (responded to our bit 1).
-		 * Pipe configuration is deferred to here — after modem set
-		 * bit 1 — to match the old 3.18 kernel's sps_connect()
-		 * sequence.  BAM_EN was set at probe time (well before
-		 * modem boot), so the modem should NOT have done a BAM-wide
-		 * SW_RST.  Only per-pipe P_RST + config happens here.
+		 * Modem spontaneously asserted A2_POWER_CONTROL (bit 1).
+		 * This matches the old 3.18 kernel flow where the modem
+		 * sets bit 1 first, and APPS reacts with BAM init + pipe
+		 * config + ACK + APPS bit 1 (in that order).
+		 *
+		 * DMA channel allocation and BAM init (SW_RST + BAM_EN)
+		 * happen here via dma_request_chan() inside power_on().
+		 * The modem has already set bit 1, confirming the BAM
+		 * hardware is powered and accessible.
 		 */
 		if (!dmux->tx) {
 			dev_info(dmux->dev, "pc_irq: configuring pipes\n");
@@ -758,11 +759,21 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 				bam_dmux_power_off(dmux);
 				goto out;
 			}
+			/*
+			 * Match old 3.18 kernel bam_init() sequence:
+			 *   1. BAM register + pipe config (done in power_on)
+			 *   2. toggle_apps_ack (ACK = bit 11)
+			 *   3. queue_rx (issue_pending = doorbell)
+			 *   4. set APPS bit 1 (LAST step)
+			 * The modem expects ACK before APPS bit 1.
+			 */
 			bam_dmux_pc_ack(dmux);
 			dma_async_issue_pending(dmux->rx);
 			mod_timer(&dmux->rx_poll_timer,
 				  jiffies + msecs_to_jiffies(1));
 			bam_dmux_pc_vote(dmux, true);
+			dev_info(dmux->dev,
+				 "pc_irq: ACK sent, APPS bit 1 set\n");
 		} else {
 			dev_info(dmux->dev, "pc_irq: pipes ready (boot_work)\n");
 		}
@@ -926,18 +937,20 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 }
 
 /**
- * bam_dmux_boot_work_fn() - set APPS SMSM bit 1 and register netdevs.
+ * bam_dmux_boot_work_fn() - register netdevs after modem SMDINIT.
  *
  * Runs ~1s after modem SMDINIT (SMSM bit 0).
  *
  * In the old 3.18 kernel, the modem spontaneously sets its SMSM bit 1
  * (A2_POWER_CONTROL) after boot, and APPS reacts by doing BAM init +
- * pipe config in bam_dmux_smsm_cb → bam_init().  APPS never sets its
- * own bit 1 during initial boot.
+ * pipe config in bam_dmux_smsm_cb → bam_init().  APPS sets its own
+ * bit 1 at the END of bam_init(), AFTER pipes are configured and ACK
+ * is toggled.  APPS never sets bit 1 BEFORE the modem does.
  *
- * However, on Quectel OCPU firmware, we set APPS bit 1 here to ensure
- * the modem's A2 DMA powers up.  The actual BAM init + pipe config is
- * deferred to pc_irq (when modem responds with its own bit 1).
+ * We match this: boot_work only registers netdevs.  APPS bit 1 is
+ * set in pc_irq after pipe config + ACK, matching the old kernel's
+ * bam_init() sequence.  The modem sets its bit 1 spontaneously
+ * (~5-6s after firmware load), triggering pc_irq.
  *
  * IMPORTANT: Do NOT call dma_request_chan() here or at probe time.
  * The BAM hardware at 0x04044000 is powered by the modem subsystem.
@@ -957,12 +970,16 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Set APPS bit 1 — tells the modem to power up A2 DMA.
-	 * The modem will respond by setting its own bit 1, which
-	 * triggers pc_irq where we do BAM init + pipe config.
+	 * Do NOT set APPS bit 1 here.  The old 3.18 kernel never sets
+	 * APPS bit 1 before the modem sets its own bit 1.  Setting it
+	 * early causes the modem to enter a different A2 DMA code path
+	 * ("reconnect" vs "cold boot"), which may prevent the modem
+	 * from properly initializing its producer pipe.
+	 *
+	 * APPS bit 1 is set in pc_irq after pipe config + ACK,
+	 * matching the old kernel's bam_init() sequence.
 	 */
-	bam_dmux_pc_vote(dmux, true);
-	dev_info(dmux->dev, "boot_work: APPS bit 1 set, waiting for modem\n");
+	dev_info(dmux->dev, "boot_work: waiting for modem to set bit 1\n");
 
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
