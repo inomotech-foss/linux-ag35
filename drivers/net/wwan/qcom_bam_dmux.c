@@ -310,12 +310,12 @@ static void bam_hw_init(struct bam_dmux *dmux)
 	/* Step 4: Config bits — all workarounds except BAM_FULL_PIPE */
 	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
 
-	/* Step 5: Enable error interrupts */
-	bam_writel(dmux, BAM_IRQ_EN,
-		   BAM_IRQ_TIMER_EN | BAM_IRQ_ERROR_EN | BAM_IRQ_HRESP_ERR_EN);
-
-	/* Step 6: Unmask global BAM interrupt for our EE */
-	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
+	/*
+	 * IRQ setup intentionally omitted — we poll P_SW_OFSTS via timer.
+	 * The bam_dma.c driver may still be loaded and owns the BAM IRQ line;
+	 * enabling BAM interrupts here would route them to bam_dma.c's handler
+	 * and crash (NULL deref on empty desc_list).
+	 */
 
 	dev_info(dmux->dev,
 		 "bam_hw_init: POST BAM_CTRL=0x%08x CNFG_BITS=0x%08x\n",
@@ -366,15 +366,7 @@ static int bam_pipe_hw_init(struct bam_dmux *dmux, struct bam_pipe *pipe,
 	bam_writel_sync(dmux, BAM_P_RST(pipe_index), 1);
 	bam_writel_sync(dmux, BAM_P_RST(pipe_index), 0);
 
-	/* Step 2: Enable pipe IRQ at BAM level */
-	val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE));
-	val |= BIT(pipe_index);
-	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), val);
-
-	/* Step 3: Pipe IRQ enable — EOT only (matches SPS_O_EOT) */
-	bam_writel(dmux, BAM_P_IRQ_EN(pipe_index), P_TRNSFR_END_EN);
-
-	/* Step 4: Direction + system mode (NOT yet P_EN) */
+	/* Step 2: Direction + system mode (NOT yet P_EN) */
 	val = P_SYS_MODE;
 	if (producer)
 		val |= P_DIRECTION;
