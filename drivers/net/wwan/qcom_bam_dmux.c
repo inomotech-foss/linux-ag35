@@ -748,10 +748,10 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state && !dmux->pc_state) {
 		/*
-		 * Modem spontaneously asserted A2_POWER_CONTROL (bit 1).
-		 * This matches the old 3.18 kernel flow where the modem
-		 * sets bit 1 first, and APPS reacts with BAM init + pipe
-		 * config + ACK + APPS bit 1 (in that order).
+		 * Modem asserted A2_POWER_CONTROL (bit 1) — either
+		 * spontaneously during boot, or in response to us
+		 * setting APPS bit 1 in boot_work.  Either way, proceed
+		 * with BAM init + pipe config + ACK.
 		 *
 		 * DMA channel allocation and BAM init (SW_RST + BAM_EN)
 		 * happen here via dma_request_chan() inside power_on().
@@ -953,20 +953,24 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 }
 
 /**
- * bam_dmux_boot_work_fn() - register netdevs after modem SMDINIT.
+ * bam_dmux_boot_work_fn() - register netdevs and trigger A2 init.
  *
  * Runs ~1s after modem SMDINIT (SMSM bit 0).
  *
- * In the old 3.18 kernel, the modem spontaneously sets its SMSM bit 1
- * (A2_POWER_CONTROL) after boot, and APPS reacts by doing BAM init +
- * pipe config in bam_dmux_smsm_cb → bam_init().  APPS sets its own
- * bit 1 at the END of bam_init(), AFTER pipes are configured and ACK
- * is toggled.  APPS never sets bit 1 BEFORE the modem does.
+ * The modem's A2 subsystem depends on seeing APPS set
+ * SMSM_A2_POWER_CONTROL (bit 1) in SMSM_APPS_STATE.  In the old 3.18
+ * kernel, the modem set its own bit 1 spontaneously during RCINIT boot.
+ * However, our SMSM driver pre-sets INIT|SMDINIT|RPCINIT|PROC_AWAKE in
+ * APPS state at probe time (before the modem boots).  When the modem
+ * initializes its SMSM, it caches the APPS state as 0x1029.  Later,
+ * when we kick the modem back, it computes changed = 0x1029 ^ 0x1029 = 0
+ * and dispatches no callbacks.  If any modem service needed an SMSM
+ * transition callback to gate A2 init, the modem would be stuck.
  *
- * We match this: boot_work only registers netdevs.  APPS bit 1 is
- * set in pc_irq after pipe config + ACK, matching the old kernel's
- * bam_init() sequence.  The modem sets its bit 1 spontaneously
- * (~5-6s after firmware load), triggering pc_irq.
+ * The fix: explicitly set APPS bit 1 here to trigger the modem's
+ * a2_apps_smsm_callback, which votes A2 on, sets modem's bit 1,
+ * and toggles ACK.  Our pc_irq fires on the modem's bit 1 transition
+ * and does the full pipe init + ACK sequence.
  *
  * IMPORTANT: Do NOT call dma_request_chan() here or at probe time.
  * The BAM hardware at 0x04044000 is powered by the modem subsystem.
@@ -985,20 +989,16 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	if (dmux->pc_state)
 		return;
 
-	/*
-	 * Do NOT set APPS bit 1 here.  The old 3.18 kernel never sets
-	 * APPS bit 1 before the modem sets its own bit 1.  Setting it
-	 * early causes the modem to enter a different A2 DMA code path
-	 * ("reconnect" vs "cold boot"), which may prevent the modem
-	 * from properly initializing its producer pipe.
-	 *
-	 * APPS bit 1 is set in pc_irq after pipe config + ACK,
-	 * matching the old kernel's bam_init() sequence.
-	 */
-	dev_info(dmux->dev, "boot_work: waiting for modem to set bit 1\n");
-
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
+
+	/*
+	 * Request A2 power from the modem by setting APPS bit 1.
+	 * The modem's a2_apps_smsm_callback will respond by setting
+	 * modem bit 1, which triggers our pc_irq → full BAM init.
+	 */
+	dev_info(dmux->dev, "boot_work: requesting A2 power (setting APPS bit 1)\n");
+	bam_dmux_pc_vote(dmux, true);
 }
 
 /**
