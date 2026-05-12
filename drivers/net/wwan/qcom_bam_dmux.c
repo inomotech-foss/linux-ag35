@@ -1180,46 +1180,52 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	irq_get_irqchip_state(dmux->pc_irq, IRQCHIP_STATE_LINE_LEVEL,
 			      &new_state);
 
-	dev_info(dmux->dev, "pc_irq: modem_bit1=%d pc_state=%d\n",
-		 new_state, dmux->pc_state);
+	dev_info(dmux->dev, "pc_irq: modem_bit1=%d pc_state=%d bam_init=%d\n",
+		 new_state, dmux->pc_state, dmux->bam_initialized);
 
 	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state && !dmux->pc_state) {
 		/*
-		 * Modem asserted A2_POWER_CONTROL.
-		 * Downstream bam_dmux_smsm_cb does bam_init() HERE
-		 * (after modem bit 1).  Match exactly.
+		 * Modem asserted A2_POWER_CONTROL (responded to our bit 1).
+		 *
+		 * OLD DRIVER APPROACH: boot_work already configured BAM
+		 * pipes + submitted RX descriptors + toggled ACK + issued
+		 * doorbell BEFORE setting APPS bit 1. So by the time
+		 * pc_irq fires, pipes are ready and we just need to start
+		 * polling and send CMD_OPEN.
+		 *
+		 * If boot_work didn't complete (shouldn't happen), do
+		 * full init here as fallback.
 		 */
-		if (!bam_dmux_hw_init(dmux)) {
-			dev_err(dmux->dev, "pc_irq: hw_init failed\n");
-			bam_dmux_hw_deinit(dmux);
-			goto out;
+		if (!dmux->bam_initialized) {
+			dev_info(dmux->dev,
+				 "pc_irq: full init (boot_work incomplete)\n");
+			if (!bam_dmux_hw_init(dmux)) {
+				dev_err(dmux->dev, "pc_irq: hw_init failed\n");
+				bam_dmux_hw_deinit(dmux);
+				goto out;
+			}
+		} else {
+			dev_info(dmux->dev,
+				 "pc_irq: pipes ready (boot_work)\n");
 		}
 
 		dmux->pc_state = new_state;
 
-		/*
-		 * Keep APPS bit 1 SET. On OCPU firmware, clearing APPS
-		 * bit 1 after hw_init causes the modem to immediately
-		 * power down A2. The modem requires APPS bit 1 to stay
-		 * asserted to keep the A2 data path alive.
-		 *
-		 * In downstream, APPS bit 1 is the "A2_POWER_CONTROL"
-		 * vote — it means "I need A2 uplink". Clearing it tells
-		 * the modem "I'm done, you can power collapse A2."
-		 */
-
 		/* Start polling */
 		mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
 
-		/*
-		 * Don't send CMD_OPEN — match downstream flow:
-		 * Modem sends CMD_OPEN first after seeing our ACK toggle.
-		 * We process it and respond with CMD_OPEN back.
-		 */
-		dev_info(dmux->dev,
-			 "pc_irq: waiting for modem CMD_OPEN on RX pipe\n");
+		/* Send CMD_OPEN for ch 0 — OCPU firmware never sends it */
+		if (bam_dmux_send_cmd(dmux, BAM_DMUX_CMD_OPEN,
+				      BAM_DMUX_CH_DATA_0))
+			dev_err(dmux->dev, "pc_irq: CMD_OPEN ch=0 failed\n");
+		else
+			dev_info(dmux->dev, "pc_irq: CMD_OPEN ch=0 sent\n");
+
+		/* Pre-register all netdevs (OCPU firmware never sends CMD_OPEN) */
+		bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
+		schedule_work(&dmux->register_netdev_work);
 
 	} else if (!new_state && dmux->pc_state) {
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
@@ -1240,6 +1246,27 @@ static irqreturn_t bam_dmux_pc_ack_irq(int irq, void *data)
 
 /* ===== Boot sequence ===== */
 
+/*
+ * bam_dmux_boot_work_fn - initialize BAM, set APPS bit 1, register netdevs.
+ *
+ * CRITICAL ORDERING — do everything BEFORE setting APPS SMSM bit 1:
+ *
+ *   1. SW_RST + BAM_EN + CNFG_BITS     (bam_dmux_bam_init)
+ *   2. Configure pipe 4+5               (bam_dmux_pipe_init)
+ *   3. Enable pipe IRQs                 (P_IRQ_EN)
+ *   4. Toggle ACK (APPS bit 11)
+ *   5. Submit RX descriptors + doorbell
+ *   6. Start poll timer
+ *   7. Set APPS bit 1                   ← modem's A2 DMA wakes up HERE
+ *   8. Pre-register netdevs
+ *
+ * The modem's a2_apps_smsm_callback fires on APPS bit 1: it powers on
+ * A2 hardware.  If BAM pipes are not yet configured when A2 powers on,
+ * the modem's A2 DMA finds empty pipes and data transfer never starts.
+ *
+ * Also pre-registers netdevs (wwan0-7) since the Quectel OCPU firmware
+ * never sends CMD_OPEN packets.
+ */
 static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
@@ -1248,21 +1275,29 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	if (dmux->pc_state)
 		return;
 
+	dev_info(dmux->dev, "boot_work: initializing BAM before APPS bit 1\n");
+
+	/* Steps 1-6: Full BAM + pipe init + ACK + RX buffers */
+	if (!bam_dmux_hw_init(dmux)) {
+		dev_err(dmux->dev, "boot_work: hw_init failed\n");
+		bam_dmux_hw_deinit(dmux);
+		return;
+	}
+
+	/* Start poll timer */
+	mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
+
 	/*
-	 * Downstream: modem auto-sets bit 1 without APPS requesting it.
-	 * On OCPU firmware, the modem waits for APPS to request A2 power
-	 * by setting APPS bit 1. We set it here; BAM init happens in
-	 * pc_irq after modem responds. We clear APPS bit 1 AFTER hw_init
-	 * to match the downstream state (APPS bit 1 NOT set during initial
-	 * link setup — it's only used for uplink wakeup).
+	 * Step 7: Set APPS bit 1 LAST.
+	 * Everything is ready — pipes configured, descriptors posted,
+	 * doorbell written, ACK toggled.  Now wake the modem's A2 DMA.
 	 */
-	dev_info(dmux->dev,
-		 "boot_work: set APPS bit 1 (BAM init deferred to pc_irq)\n");
-
 	bam_dmux_pc_vote(dmux, true);
+	dev_info(dmux->dev, "boot_work: APPS bit 1 set, waiting for modem\n");
 
-	dev_info(dmux->dev,
-		 "boot_work: APPS bit 1 set, waiting for modem pc_irq\n");
+	/* Step 8: Pre-register all netdevs (OCPU firmware never sends CMD_OPEN) */
+	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
+	schedule_work(&dmux->register_netdev_work);
 }
 
 static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
