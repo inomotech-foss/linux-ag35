@@ -515,23 +515,33 @@ static void bam_init_powered_remotely(struct bam_device *bdev)
 	dev_info(bdev->dev, "BAM init (powered-remotely): BAM_CTRL=0x%08x\n", val);
 
 	/*
-	 * SW_RST: reset BAM to clean state.
+	 * Do NOT do SW_RST for powered-remotely BAMs.
 	 *
-	 * Matches downstream MDM9607 bam_init() which always does SW_RST
-	 * for locally-managed BAMs.  This clears any TrustZone/bootloader
-	 * residual state and resets all pipe internal state machines.
+	 * The modem is the BAM primary controller and has already
+	 * initialized the BAM and pipes during its boot sequence
+	 * (a2_subsystem_boot → a2_bam_init → bamcore_pipe_init).
+	 *
+	 * In the upstream kernel's SMSM flow, the modem sets
+	 * apps_bam_link_ready=true BEFORE we get the pc_irq and
+	 * run this init code.  If we do SW_RST here, we destroy
+	 * the modem's pipe configuration.  The modem has no reason
+	 * to re-initialize because from its perspective the link is
+	 * already up.  Result: modem's producer pipe 5 never works.
+	 *
+	 * The old 3.18 kernel also does SW_RST (via bam_init() with
+	 * satellite_mode=false), but there the timing is different:
+	 * the modem sets bit 1 first, APPS does SW_RST+ACK, THEN
+	 * modem sets apps_bam_link_ready.  The modem initializes its
+	 * pipes after APPS's SW_RST, so they survive.
+	 *
+	 * Instead, just verify BAM_EN is set (matching downstream
+	 * bam_check() for satellite BAMs) and configure global regs.
 	 */
-	val |= BAM_SW_RST;
-	writel(val, bam_addr(bdev, 0, BAM_CTRL));
-	val &= ~BAM_SW_RST;
-	writel(val, bam_addr(bdev, 0, BAM_CTRL));
-
-	/* make sure previous stores are visible before enabling BAM */
-	wmb();
-
-	/* Enable BAM */
-	val |= BAM_EN;
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	if (!(val & BAM_EN)) {
+		dev_info(bdev->dev, "BAM_EN not set, setting it\n");
+		val |= BAM_EN;
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+	}
 
 	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD */
 	writel_relaxed(DEFAULT_CNT_THRSHLD,
@@ -655,8 +665,23 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 				bchan->id);
 	}
 
-	/* Reset the channel to clear internal state of the FIFO */
-	bam_reset_channel(bchan);
+	/*
+	 * Reset the channel to clear internal state of the FIFO.
+	 *
+	 * Skip P_RST for powered-remotely BAMs: the modem (BAM primary
+	 * controller) has already configured the pipe.  P_RST destroys
+	 * the modem's pipe state machine and descriptor tracking.  The
+	 * modem doesn't re-initialize after our reset because it already
+	 * set apps_bam_link_ready=true before we run this code.
+	 *
+	 * The old 3.18 kernel's bam_pipe_init() does P_RST, but there
+	 * the modem initializes its pipes AFTER APPS's P_RST (different
+	 * SMSM callback ordering).
+	 */
+	if (!bdev->powered_remotely)
+		bam_reset_channel(bchan);
+	else
+		bchan->initialized = 0;
 
 	/*
 	 * write out 8 byte aligned address.  We have enough space for this
