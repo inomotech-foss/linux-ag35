@@ -87,6 +87,7 @@ struct bam_dmux {
 	struct delayed_work boot_work;
 	struct timer_list rx_poll_timer;
 	bool boot_done; /* true after first successful pc_irq handshake */
+	bool cmd_open_queued; /* CMD_OPEN prepped in power_on, awaiting issue */
 
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
 	struct work_struct register_netdev_work;
@@ -656,6 +657,9 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 		.direction = DMA_DEV_TO_MEM,
 		.src_maxburst = BAM_DMUX_BUFFER_SIZE,
 	};
+	struct sk_buff *cmd_skb;
+	struct bam_dmux_hdr *hdr;
+	struct bam_dmux_skb_dma *skb_dma;
 	int i;
 
 	/*
@@ -684,6 +688,53 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 	}
 	dmaengine_slave_config(dmux->rx, &dma_rx_conf);
 
+	/*
+	 * Prep CMD_OPEN on TX BEFORE queuing any RX descriptors.
+	 *
+	 * The first dmaengine_prep_slave_single() on a channel triggers
+	 * bam_chan_init_hw() for that pipe, plus bam_init_peer_pipes()
+	 * for all other allocated pipes.  By prepping TX first, we get:
+	 *
+	 *   1. pipe 4 (TX) init via prep_slave_single(TX)
+	 *   2. pipe 5 (RX) init via bam_init_peer_pipes()
+	 *
+	 * This matches the old 3.18 kernel which does:
+	 *   1. sps_connect(TX pipe 4) → bam_pipe_init(pipe 4)
+	 *   2. sps_connect(RX pipe 5) → bam_pipe_init(pipe 5)
+	 *
+	 * The descriptor is submitted but NOT issued (no doorbell).
+	 * The doorbell is rung later in pc_irq after the ACK toggle.
+	 */
+	cmd_skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
+	if (!cmd_skb)
+		return false;
+
+	hdr = skb_put_zero(cmd_skb, sizeof(*hdr));
+	hdr->magic = BAM_DMUX_HDR_MAGIC;
+	hdr->cmd = BAM_DMUX_CMD_OPEN;
+	hdr->ch = BAM_DMUX_CH_DATA_0;
+
+	skb_dma = bam_dmux_tx_queue(dmux, cmd_skb);
+	if (!skb_dma) {
+		dev_kfree_skb(cmd_skb);
+		return false;
+	}
+
+	if (!bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE)) {
+		dev_kfree_skb(cmd_skb);
+		skb_dma->skb = NULL;
+		return false;
+	}
+
+	if (!bam_dmux_skb_dma_submit_tx(skb_dma)) {
+		bam_dmux_tx_done(skb_dma);
+		return false;
+	}
+
+	/* Track that CMD_OPEN is queued, will be issued in pc_irq */
+	dmux->cmd_open_queued = true;
+
+	/* Now queue RX descriptors (pipe 5 already initialized) */
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (!bam_dmux_skb_dma_queue_rx(&dmux->rx_skbs[i], GFP_KERNEL))
 			return false;
@@ -728,6 +779,8 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 	}
 
 	bam_dmux_free_skbs(dmux->rx_skbs, DMA_FROM_DEVICE);
+	bam_dmux_free_skbs(dmux->tx_skbs, DMA_TO_DEVICE);
+	dmux->cmd_open_queued = false;
 }
 
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
@@ -770,11 +823,18 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			 *   1. BAM register + pipe config (done in power_on)
 			 *   2. toggle_apps_ack (ACK = bit 11)
 			 *   3. queue_rx (issue_pending = doorbell)
-			 *   4. set APPS bit 1 (LAST step)
-			 * The modem expects ACK before APPS bit 1.
+			 *   4. CMD_OPEN (issue_pending(TX) = doorbell)
+			 * The modem expects ACK before data flow.
 			 */
 			bam_dmux_pc_ack(dmux);
 			dma_async_issue_pending(dmux->rx);
+			if (dmux->cmd_open_queued) {
+				pm_runtime_get_noresume(dmux->dev);
+				dma_async_issue_pending(dmux->tx);
+				dmux->cmd_open_queued = false;
+				dev_info(dmux->dev,
+					 "pc_irq: CMD_OPEN ch=0 sent\n");
+			}
 			mod_timer(&dmux->rx_poll_timer,
 				  jiffies + msecs_to_jiffies(1));
 			bam_dmux_pc_vote(dmux, true);
@@ -795,38 +855,6 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 		dmux->boot_done = true;
 
-		/* Send CMD_OPEN for ch 0 */
-		{
-			struct sk_buff *cmd_skb;
-			struct bam_dmux_hdr *hdr;
-			struct bam_dmux_skb_dma *skb_dma;
-
-			cmd_skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
-			if (cmd_skb) {
-				hdr = skb_put_zero(cmd_skb, sizeof(*hdr));
-				hdr->magic = BAM_DMUX_HDR_MAGIC;
-				hdr->cmd = BAM_DMUX_CMD_OPEN;
-				hdr->ch = BAM_DMUX_CH_DATA_0;
-
-				skb_dma = bam_dmux_tx_queue(dmux, cmd_skb);
-				if (skb_dma &&
-				    bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE) &&
-				    bam_dmux_skb_dma_submit_tx(skb_dma)) {
-					pm_runtime_get_noresume(dmux->dev);
-					dma_async_issue_pending(dmux->tx);
-					dev_info(dmux->dev,
-						 "pc_irq: CMD_OPEN ch=0 sent\n");
-				} else {
-					if (skb_dma) {
-						pm_runtime_get_noresume(dmux->dev);
-						bam_dmux_tx_done(skb_dma);
-					}
-					dev_kfree_skb(cmd_skb);
-					dev_err(dmux->dev,
-						"pc_irq: CMD_OPEN ch=0 FAILED\n");
-				}
-			}
-		}
 	} else if (new_state && dmux->pc_state) {
 		/* Already up (shouldn't happen with current flow) */
 		dma_async_issue_pending(dmux->rx);
