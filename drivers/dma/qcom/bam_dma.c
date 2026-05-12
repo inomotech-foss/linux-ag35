@@ -630,11 +630,15 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 * The modem may have already configured the pipe between SMDINIT
 	 * and our init.  Our P_RST would destroy the modem's setup.
 	 */
-	if (bdev->powered_remotely)
+	if (bdev->powered_remotely) {
+		u32 bam_ctrl = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
+
 		dev_info(bdev->dev,
-			"pipe %u PRE-RESET: P_CTRL=0x%x P_DESC_FIFO_ADDR=0x%x "
+			"pipe %u PRE-RESET: BAM_CTRL=0x%x P_CTRL=0x%x "
+			"P_DESC_FIFO_ADDR=0x%x "
 			"P_FIFO_SIZES=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x\n",
 			bchan->id,
+			bam_ctrl,
 			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
 			readl_relaxed(bam_addr(bdev, bchan->id,
 					    BAM_P_DESC_FIFO_ADDR)),
@@ -644,6 +648,12 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 					    BAM_P_EVNT_REG)),
 			readl_relaxed(bam_addr(bdev, bchan->id,
 					    BAM_P_SW_OFSTS)));
+
+		if (!(bam_ctrl & BAM_EN))
+			dev_warn(bdev->dev,
+				"pipe %u: BAM_EN not set! Modem may have done SW_RST.\n",
+				bchan->id);
+	}
 
 	/* Reset the channel to clear internal state of the FIFO */
 	bam_reset_channel(bchan);
