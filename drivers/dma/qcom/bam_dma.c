@@ -855,6 +855,14 @@ static void bam_init_peer_pipes(struct bam_device *bdev)
 
 		scoped_guard(spinlock_irqsave, &peer->vc.lock)
 			bam_chan_init_hw(peer, dir, false);
+
+		/*
+		 * Mark direction as known to prevent a spurious re-init
+		 * via needs_dir_fix in bam_prep_slave_sg().  For consumer
+		 * pipes (DMA_MEM_TO_DEV), the default direction is correct.
+		 */
+		peer->last_dir = dir;
+		peer->dir_known = true;
 	}
 }
 
@@ -992,14 +1000,17 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 
 	/*
 	 * Track init state before updating direction.  A pipe that was
-	 * force-initialized by bam_init_peer_pipes() has initialized=1
-	 * but dir_known=false.  Such pipes need their P_DIRECTION bit
-	 * updated when they're actually prepped with the real direction.
+	 * force-initialized by bam_init_peer_pipes() needs re-init if
+	 * the prep direction differs from the force-init direction.
+	 * This prevents a spurious P_RST when the direction matches
+	 * (e.g. pipe 4 TX force-init with DMA_MEM_TO_DEV, then prepped
+	 * with DMA_MEM_TO_DEV for CMD_OPEN — no re-init needed).
 	 */
 	{
 		bool needs_init = !bchan->initialized;
 		bool needs_dir_fix = bchan->initialized &&
-				     !bchan->dir_known;
+				     (!bchan->dir_known ||
+				      bchan->last_dir != direction);
 
 		bchan->last_dir = direction;
 		bchan->dir_known = true;
@@ -1021,11 +1032,10 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 			bam_init_peer_pipes(bdev);
 		} else if (needs_dir_fix) {
 			/*
-			 * Pipe was force-initialized with default direction
-			 * (consumer).  The correct direction is now known.
-			 * Do a full P_RST + re-init rather than modifying
-			 * P_DIRECTION on a live (P_EN=1) pipe, which may
-			 * corrupt BAM internal pipe state.
+			 * Pipe was force-initialized with a direction that
+			 * differs from the actual prep direction, OR was
+			 * never prepped (dir_known=false).  Do a full
+			 * P_RST + re-init to update P_DIRECTION.
 			 */
 			dev_dbg(bdev->dev,
 				"pipe %u: dir fix via re-init (dir=%d)\n",
