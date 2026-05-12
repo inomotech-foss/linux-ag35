@@ -270,57 +270,26 @@ static void bam_dmux_pc_ack(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * BAM Hardware Init — matching downstream SPS bam_init() exactly
+ * BAM Hardware — managed remotely by modem firmware
  *
- * Sequence:
- *   1. SW_RST (set then clear) — resets all BAM state
- *   2. BAM_EN — enables the BAM
- *   3. DESC_CNT_TRSHLD — descriptor count threshold
- *   4. CNFG_BITS — hardware workaround bits
- *   5. IRQ_EN — enable error interrupts
- *   6. IRQ_SRCS_MSK_EE — unmask global BAM interrupt
+ * The downstream AG35 kernel uses SPS_BAM_MGR_DEVICE_REMOTE which skips
+ * bam_init() entirely (no SW_RST, no BAM_EN, no CNFG_BITS).  The modem
+ * firmware owns the BAM and already initialized it before setting SMSM
+ * bit 1.  Doing SW_RST here would destroy the modem's BAM configuration,
+ * preventing it from writing to pipe 5.
+ *
+ * We only log the current BAM state for diagnostics.
  * ────────────────────────────────────────────────────────────────────────── */
 
-static void bam_hw_init(struct bam_dmux *dmux)
+static void bam_hw_log_state(struct bam_dmux *dmux)
 {
-	u32 val;
-
-	dev_info(dmux->dev, "bam_hw_init: PRE-RESET BAM_CTRL=0x%08x\n",
-		 bam_readl(dmux, BAM_CTRL));
-
-	/* Step 1: Software reset */
-	val = bam_readl(dmux, BAM_CTRL);
-	val |= BAM_SW_RST;
-	bam_writel(dmux, BAM_CTRL, val);
-
-	/* Clear reset (no delay needed per downstream) */
-	val &= ~BAM_SW_RST;
-	bam_writel(dmux, BAM_CTRL, val);
-
-	/* Ensure reset completes before enabling */
-	wmb();
-
-	/* Step 2: Enable BAM */
-	val |= BAM_EN;
-	bam_writel(dmux, BAM_CTRL, val);
-
-	/* Step 3: Descriptor count threshold (downstream uses 4) */
-	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
-
-	/* Step 4: Config bits — all workarounds except BAM_FULL_PIPE */
-	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
-
-	/*
-	 * IRQ setup intentionally omitted — we poll P_SW_OFSTS via timer.
-	 * The bam_dma.c driver may still be loaded and owns the BAM IRQ line;
-	 * enabling BAM interrupts here would route them to bam_dma.c's handler
-	 * and crash (NULL deref on empty desc_list).
-	 */
-
 	dev_info(dmux->dev,
-		 "bam_hw_init: POST BAM_CTRL=0x%08x CNFG_BITS=0x%08x\n",
+		 "bam_state: BAM_CTRL=0x%08x CNFG_BITS=0x%08x "
+		 "NUM_PIPES=0x%08x REVISION=0x%08x\n",
 		 bam_readl(dmux, BAM_CTRL),
-		 bam_readl(dmux, BAM_CNFG_BITS));
+		 bam_readl(dmux, BAM_CNFG_BITS),
+		 bam_readl(dmux, BAM_NUM_PIPES),
+		 bam_readl(dmux, BAM_REVISION));
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -1050,8 +1019,8 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 	struct sk_buff *cmd_skb;
 	int i, ret;
 
-	/* Step 1: Initialize BAM hardware (SW_RST + BAM_EN) */
-	bam_hw_init(dmux);
+	/* Step 1: Log BAM state (modem owns BAM — no SW_RST) */
+	bam_hw_log_state(dmux);
 
 	/* Step 2: Initialize TX pipe (pipe 4, consumer) — first */
 	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe, BAM_DMUX_TX_PIPE, false);
