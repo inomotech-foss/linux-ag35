@@ -1140,17 +1140,20 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 /* ──────────────────────────────────────────────────────────────────────────
  * SMSM IRQ Handlers + Boot Sequence
  *
- * Boot sequence (matching downstream 3.18 kernel):
+ * Boot sequence:
  *   1. remote-ready IRQ fires (modem set SMDINIT)
  *   2. boot_work runs after 1s delay:
  *      a. BAM init (SW_RST + BAM_EN + pipe config + IRQ setup)
- *      b. Toggle ACK
- *      c. Queue RX descriptors + ring doorbell
- *      d. Set APPS bit 1 (LAST — after everything is ready)
- *   3. Modem responds: sets MODEM bit 1, sends CMD_OPEN on pipe 5
- *   4. pc_irq fires — acknowledge state change
- *   5. Poll timer detects CMD_OPEN on pipe 5, opens channels
- *   6. ndo_open sends CMD_OPEN back to modem
+ *      b. Queue RX descriptors + ring doorbell
+ *      c. Set APPS bit 1 (signal modem)
+ *   3. Modem responds: sets MODEM bit 1
+ *   4. pc_irq fires:
+ *      a. Toggle ACK (modem sends CMD_OPEN after receiving this)
+ *      b. Re-ring RX doorbell
+ *      c. Start poll timer
+ *   5. Modem receives ACK → sends CMD_OPEN on pipe 5
+ *   6. Poll timer detects CMD_OPEN, opens channels
+ *   7. ndo_open sends CMD_OPEN back to modem
  * ────────────────────────────────────────────────────────────────────────── */
 
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
@@ -1170,13 +1173,20 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		/*
 		 * Modem set A2_POWER_CONTROL (bit 1).
 		 * BAM should already be initialized by boot_work.
-		 * Just acknowledge the state change.
+		 * ACK the modem — it sends CMD_OPEN after receiving this.
 		 */
 		dev_info(dmux->dev, "pc_irq: modem powered up\n");
 
+		bam_dmux_pc_ack(dmux);
+		dev_info(dmux->dev, "pc_irq: ACK toggled\n");
+
 		if (dmux->pipes_active) {
-			/* Re-ring RX doorbell in case modem needs it */
+			/* Re-ring RX doorbell */
 			bam_pipe_doorbell(dmux, &dmux->rx_pipe);
+
+			/* Start polling if not already running */
+			mod_timer(&dmux->rx_poll_timer,
+				  jiffies + msecs_to_jiffies(1));
 		} else {
 			dev_warn(dmux->dev,
 				 "pc_irq: pipes not active yet!\n");
@@ -1285,21 +1295,18 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 	}
 
-	/* Toggle ACK (tells modem APPS is ready) */
-	bam_dmux_pc_ack(dmux);
-	dev_info(dmux->dev, "boot_work: ACK toggled\n");
-
 	/* Ring RX doorbell (modem needs to see available buffers) */
 	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 	dev_info(dmux->dev, "boot_work: RX doorbell rung\n");
 
-	/* Start polling */
-	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
-
 	/*
-	 * NOW signal the modem.  Everything is ready for its response.
+	 * Signal the modem.  BAM + pipes are ready for its response.
 	 * The modem will set MODEM bit 1 → pc_irq fires.
-	 * The modem should also send CMD_OPEN on pipe 5.
+	 * pc_irq toggles ACK → modem sends CMD_OPEN on pipe 5.
+	 *
+	 * Do NOT toggle ACK here — ACK must be in response to the
+	 * modem's state change.  Premature ACK desynchronizes the
+	 * toggle protocol and prevents modem from sending CMD_OPEN.
 	 */
 	dev_info(dmux->dev,
 		 "boot_work: requesting A2 power (setting APPS bit 1)\n");
