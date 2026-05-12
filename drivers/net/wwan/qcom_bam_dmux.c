@@ -1,51 +1,37 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Qualcomm BAM-DMUX WWAN network driver — direct BAM register access
- *
- * Port of the downstream msm_bam_dmux.c driver to upstream Linux.
- * Bypasses the DMA engine framework and talks to the BAM hardware
- * directly, matching the downstream SPS (Smart Peripheral System)
- * register-level operations 1:1.
- *
- * This is necessary on MDM9607 with Quectel OCPU firmware because:
- * 1. The modem does a BAM SW_RST after APPS sets SMSM bit 1,
- *    wiping all pipe configuration. APPS must re-init pipes AFTER
- *    the modem responds.
- * 2. TrustZone blocks the BAM interrupt, requiring polling.
- * 3. The DMA engine abstraction doesn't support the modem-resets-BAM
- *    lifecycle.
- *
- * Copyright (c) 2020, Stephan Gerhold <stephan@gerhold.net> (original upstream)
- * Copyright (c) 2011-2016, The Linux Foundation (downstream msm_bam_dmux)
- * Modified for direct BAM access, 2025.
+ * Qualcomm BAM-DMUX WWAN network driver
+ * Copyright (c) 2020, Stephan Gerhold <stephan@gerhold.net>
  */
 
+#include <linux/atomic.h>
 #include <linux/bitops.h>
 #include <linux/completion.h>
 #include <linux/dma-mapping.h>
+#include <linux/dmaengine.h>
 #include <linux/if_arp.h>
 #include <linux/interrupt.h>
-#include <linux/io.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
-#include <linux/of_address.h>
-#include <linux/of_irq.h>
 #include <linux/platform_device.h>
-#include <linux/skbuff.h>
-#include <linux/slab.h>
+#include <linux/pm_runtime.h>
 #include <linux/soc/qcom/smem_state.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
+#include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <net/pkt_sched.h>
 
-/* ===== Protocol constants ===== */
 #define BAM_DMUX_BUFFER_SIZE		SZ_2K
 #define BAM_DMUX_HDR_SIZE		sizeof(struct bam_dmux_hdr)
 #define BAM_DMUX_MAX_DATA_SIZE		(BAM_DMUX_BUFFER_SIZE - BAM_DMUX_HDR_SIZE)
 #define BAM_DMUX_NUM_SKB		32
+
 #define BAM_DMUX_HDR_MAGIC		0x33fc
+
+#define BAM_DMUX_AUTOSUSPEND_DELAY	1000
+#define BAM_DMUX_REMOTE_TIMEOUT		msecs_to_jiffies(2000)
 
 enum {
 	BAM_DMUX_CMD_DATA,
@@ -66,160 +52,44 @@ enum {
 };
 
 struct bam_dmux_hdr {
-	__le16 magic;
+	u16 magic;
 	u8 signal;
 	u8 cmd;
 	u8 pad;
 	u8 ch;
-	__le16 len;
+	u16 len;
 };
 
-/* ===== BAM hardware register definitions (v1.7.0 / NDP 4K) ===== */
-
-/* Descriptor FIFO: 2KB = 256 slots of 8 bytes each */
-#define BAM_DESC_FIFO_SIZE		SZ_2K
-#define BAM_DESC_SIZE			8
-#define BAM_NUM_DESC			(BAM_DESC_FIFO_SIZE / BAM_DESC_SIZE)
-
-/* BAM global registers */
-#define BAM_CTRL			0x00000
-#define BAM_REVISION			0x01000
-#define BAM_NUM_PIPES			0x01008
-#define BAM_DESC_CNT_TRSHLD		0x00008
-#define BAM_IRQ_SRCS_EE			0x03000	/* EE0: pending IRQ sources */
-#define BAM_IRQ_SRCS_MSK_EE		0x03004	/* EE0: IRQ source mask */
-#define BAM_IRQ_SRCS_UNMASKED_EE	0x03008	/* EE0 */
-#define BAM_PIPE_ATTR_EE		0x0300C	/* EE0: pipe attributes */
-#define BAM_IRQ_EN			0x0001C
-#define BAM_CNFG_BITS			0x0007C
-#define BAM_IRQ_STTS			0x00014
-#define BAM_IRQ_CLR			0x00018
-
-/* BAM trust/security registers (NDP 4K) */
-#define BAM_TRUST_REG			0x02000
-#define BAM_P_TRUST_REG(n)		(0x02020 + (n) * 0x4)
-
-/* BAM_CTRL bits */
-#define BAM_SW_RST			BIT(0)
-#define BAM_EN				BIT(1)
-
-/* BAM_IRQ_EN bits */
-#define BAM_TIMER_EN			BIT(4)
-#define BAM_ERROR_EN			BIT(2)
-#define BAM_HRESP_ERR_EN		BIT(1)
-
-/* BAM per-pipe registers (pipe N at base + 0x13000 + N*0x1000) */
-#define BAM_P_CTRL(n)			(0x13000 + (n) * 0x1000)
-#define BAM_P_RST(n)			(0x13004 + (n) * 0x1000)
-#define BAM_P_HALT(n)			(0x13008 + (n) * 0x1000)
-#define BAM_P_IRQ_STTS(n)		(0x13010 + (n) * 0x1000)
-#define BAM_P_IRQ_CLR(n)		(0x13014 + (n) * 0x1000)
-#define BAM_P_IRQ_EN(n)			(0x13018 + (n) * 0x1000)
-
-/* BAM per-pipe event registers */
-#define BAM_P_SW_OFSTS(n)		(0x13800 + (n) * 0x1000)
-#define BAM_P_EVNT_REG(n)		(0x13818 + (n) * 0x1000)
-#define BAM_P_DESC_FIFO_ADDR(n)		(0x1381C + (n) * 0x1000)
-#define BAM_P_FIFO_SIZES(n)		(0x13820 + (n) * 0x1000)
-#define BAM_P_EVNT_GEN_TRSHLD(n)	(0x13828 + (n) * 0x1000)
-
-/* BAM per-pipe context registers (read-only, HW state) */
-#define BAM_P_AU_PSM_CNTXT_1(n)		(0x13804 + (n) * 0x1000)
-#define BAM_P_PSM_CNTXT_2(n)		(0x13808 + (n) * 0x1000)
-#define BAM_P_PRDCR_SDBND(n)		(0x13024 + (n) * 0x1000)
-#define BAM_P_CNSMR_SDBND(n)		(0x13028 + (n) * 0x1000)
-#define BAM_P_RETR_CNTXT(n)		(0x13834 + (n) * 0x1000)
-
-/* BAM_P_CTRL bits */
-#define P_EN				BIT(1)
-#define P_DIRECTION			BIT(3)
-#define P_SYS_MODE			BIT(5)
-
-/* BAM_P_SW_OFSTS: offset in lower 16 bits */
-#define P_SW_OFSTS_MASK			0xFFFF
-
-/* BAM_P_IRQ_EN bits */
-#define P_PRCSD_DESC_EN			BIT(0)
-#define P_ERR_EN			BIT(4)
-#define P_TRNSFR_END_EN			BIT(5)
-
-/* Descriptor flags */
-#define DESC_FLAG_INT			cpu_to_le16(BIT(15))
-#define DESC_FLAG_EOT			cpu_to_le16(BIT(14))
-
-/* Pipe numbers (hardcoded in BAM DMUX protocol) */
-#define BAM_DMUX_TX_PIPE		4
-#define BAM_DMUX_RX_PIPE		5
-
-/* Downstream constants */
-#define A2_NUM_PIPES			6
-#define DEFAULT_CNT_THRSHLD		0x1000
-#define BAM_CNFG_BITS_DEFAULT		0xFFFFF7FF
-
-/* ===== Hardware descriptor (8 bytes, naturally aligned) ===== */
-struct bam_desc_hw {
-	__le32 addr;
-	__le16 size;
-	__le16 flags;
-} __packed;
-
-/* ===== Per-pipe state ===== */
-struct bam_dmux_pipe {
-	u32 pipe_num;
-
-	/* Descriptor FIFO (DMA coherent) */
-	struct bam_desc_hw *desc_fifo;
-	dma_addr_t desc_fifo_phys;
-
-	/*
-	 * Circular buffer indices (in descriptor units, not bytes).
-	 * head: next slot to read a completion from
-	 * tail: next slot to write a new descriptor to
-	 */
-	u16 head;
-	u16 tail;
-};
-
-/* ===== Per-buffer tracking ===== */
 struct bam_dmux_skb_dma {
+	struct bam_dmux *dmux;
 	struct sk_buff *skb;
 	dma_addr_t addr;
 };
 
-/* ===== Main device state ===== */
 struct bam_dmux {
 	struct device *dev;
-	void __iomem *bam_base;
 
-	/* SMSM */
 	int pc_irq;
-	int bam_irq;	/* GIC SPI 29 — BAM hardware interrupt */
 	bool pc_state, pc_ack_state;
 	struct qcom_smem_state *pc, *pc_ack;
 	u32 pc_mask, pc_ack_mask;
+	wait_queue_head_t pc_wait;
+	struct completion pc_ack_completion;
 
-	/* BAM pipes */
-	struct bam_dmux_pipe tx_pipe;
-	struct bam_dmux_pipe rx_pipe;
-
-	/* RX buffer pool */
+	struct dma_chan *rx, *tx;
 	struct bam_dmux_skb_dma rx_skbs[BAM_DMUX_NUM_SKB];
-
-	/* TX buffer pool */
 	struct bam_dmux_skb_dma tx_skbs[BAM_DMUX_NUM_SKB];
-	spinlock_t tx_lock;
-	unsigned int tx_next_skb;	/* next slot for TX submission */
+	spinlock_t tx_lock; /* Protect tx_skbs, tx_next_skb */
+	unsigned int tx_next_skb;
+	atomic_long_t tx_deferred_skb;
+	struct work_struct tx_wakeup_work;
 
-	/* Work/timers */
 	struct delayed_work boot_work;
-	struct timer_list poll_timer;
-	struct work_struct register_netdev_work;
+	struct timer_list rx_poll_timer;
+	bool boot_done; /* true after first successful pc_irq handshake */
 
-	/* State */
-	bool bam_initialized;
-
-	/* Netdevs */
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
+	struct work_struct register_netdev_work;
 	struct net_device *netdevs[BAM_DMUX_NUM_CH];
 };
 
@@ -228,237 +98,9 @@ struct bam_dmux_netdev {
 	u8 ch;
 };
 
-/* ===== BAM register access helpers ===== */
-
-static inline u32 bam_readl(struct bam_dmux *dmux, u32 offset)
-{
-	return readl_relaxed(dmux->bam_base + offset);
-}
-
-/*
- * Use writel() (ordered) for all BAM register writes.
- * Matches downstream iowrite32 semantics.
- */
-static inline void bam_writel(struct bam_dmux *dmux, u32 offset, u32 val)
-{
-	writel(val, dmux->bam_base + offset);
-}
-
-/* ===== BAM global init (matches downstream bam_init / sps_bam_reset) ===== */
-
-static void bam_dmux_bam_init(struct bam_dmux *dmux)
-{
-	u32 val;
-	u32 pre_trust, pre_p4_trust, pre_p5_trust, pre_pipe_attr;
-	u32 pre_p4_ctrl, pre_p5_ctrl;
-
-	val = bam_readl(dmux, BAM_CTRL);
-
-	/* Read ALL state BEFORE SW_RST to see what TZ/modem configured */
-	pre_trust = bam_readl(dmux, BAM_TRUST_REG);
-	pre_p4_trust = bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_TX_PIPE));
-	pre_p5_trust = bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_RX_PIPE));
-	pre_pipe_attr = bam_readl(dmux, BAM_PIPE_ATTR_EE);
-	pre_p4_ctrl = bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE));
-	pre_p5_ctrl = bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE));
-
-	dev_info(dmux->dev, "bam_init: PRE-RST BAM_CTRL=0x%08x "
-		 "TRUST=0x%x P_TR[4]=0x%x P_TR[5]=0x%x "
-		 "PIPE_ATTR=0x%x P4_CTRL=0x%x P5_CTRL=0x%x\n",
-		 val, pre_trust, pre_p4_trust, pre_p5_trust,
-		 pre_pipe_attr, pre_p4_ctrl, pre_p5_ctrl);
-
-	/*
-	 * SW_RST: downstream sps_register_bam_device does this.
-	 * Trust registers are all-zero before and after reset on
-	 * MDM9607. Re-enabled for 1:1 downstream match.
-	 */
-	bam_writel(dmux, BAM_CTRL, val | BAM_SW_RST);
-	bam_writel(dmux, BAM_CTRL, val & ~BAM_SW_RST);
-	wmb();
-
-	/* Enable BAM + LOCAL_CLK_GATING (match downstream RMW sequence) */
-	val = bam_readl(dmux, BAM_CTRL);
-	val |= BAM_EN;
-	val &= ~(3 << 17);	/* clear LOCAL_CLK_GATING field (bits 17:16) */
-	val |= (1 << 17);	/* set LOCAL_CLK_GATING = 1 */
-	val &= ~BIT(19);	/* clear CACHE_MISS_ERR_RESP_EN */
-	val &= ~BIT(20);	/* clear BAM_MESS_ONLY_CANCEL_WB */
-	bam_writel(dmux, BAM_CTRL, val);
-
-	/* Descriptor count threshold */
-	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, DEFAULT_CNT_THRSHLD);
-
-	/* Configuration bits (all workarounds enabled except BAM_FULL_PIPE) */
-	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
-
-	/* IRQ enable: error + timer */
-	bam_writel(dmux, BAM_IRQ_EN,
-		   BAM_TIMER_EN | BAM_ERROR_EN | BAM_HRESP_ERR_EN);
-
-	/* Unmask global BAM interrupt + pipe interrupts */
-	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE,
-		   BIT(31) | BIT(BAM_DMUX_TX_PIPE) | BIT(BAM_DMUX_RX_PIPE));
-
-	dev_info(dmux->dev, "bam_init: BAM_CTRL=0x%08x CNFG=0x%08x "
-		 "IRQ_MSK=0x%08x REV=0x%08x PIPES=0x%08x\n",
-		 bam_readl(dmux, BAM_CTRL),
-		 bam_readl(dmux, BAM_CNFG_BITS),
-		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE),
-		 bam_readl(dmux, BAM_REVISION),
-		 bam_readl(dmux, BAM_NUM_PIPES));
-
-	/* Trust/security diagnostics — critical for EE ownership debugging */
-	dev_info(dmux->dev, "bam_init: TRUST_REG=0x%08x "
-		 "P_TRUST[4]=0x%08x P_TRUST[5]=0x%08x "
-		 "IRQ_SRCS=0x%08x PIPE_ATTR=0x%08x\n",
-		 bam_readl(dmux, BAM_TRUST_REG),
-		 bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_TX_PIPE)),
-		 bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_RX_PIPE)),
-		 bam_readl(dmux, BAM_IRQ_SRCS_EE),
-		 bam_readl(dmux, BAM_PIPE_ATTR_EE));
-}
-
-/* ===== Pipe init (matches downstream sps_connect) ===== */
-
-static void bam_dmux_pipe_init(struct bam_dmux *dmux,
-			       struct bam_dmux_pipe *pipe,
-			       bool dir_producer)
-{
-	u32 p = pipe->pipe_num;
-	u32 val;
-
-	dev_info(dmux->dev, "pipe %u init: PRE-RESET P_CTRL=0x%x "
-		 "P_DESC=0x%x P_SIZES=0x%x P_EVNT=0x%x P_OFSTS=0x%x\n",
-		 p, bam_readl(dmux, BAM_P_CTRL(p)),
-		 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(p)),
-		 bam_readl(dmux, BAM_P_FIFO_SIZES(p)),
-		 bam_readl(dmux, BAM_P_EVNT_REG(p)),
-		 bam_readl(dmux, BAM_P_SW_OFSTS(p)));
-
-	/*
-	 * Downstream bam_pipe_init sequence (1:1 match):
-	 * 1. P_RST
-	 * 2. IRQ_SRCS_MSK_EE: set pipe bit
-	 * 3. P_IRQ_EN = 0 (disabled during init)
-	 * 4. P_CTRL: direction
-	 * 5. P_CTRL: sys_mode
-	 * 6. P_EVNT_GEN_TRSHLD
-	 * 7. P_DESC_FIFO_ADDR
-	 * 8. P_FIFO_SIZES
-	 * 9. P_CTRL: sys_strm = 0
-	 * 10. P_CTRL: lock_group = 0
-	 * 11. P_CTRL: P_EN = 1
-	 */
-
-	/* Step 1: Pipe reset */
-	bam_writel(dmux, BAM_P_RST(p), 1);
-	bam_writel(dmux, BAM_P_RST(p), 0);
-
-	/* Step 2: Enable pipe interrupt source at BAM level */
-	val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE);
-	val |= BIT(p);
-	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE, val);
-
-	/* Step 3: Disable pipe IRQ during init (downstream sets 0 here) */
-	bam_writel(dmux, BAM_P_IRQ_EN(p), 0);
-
-	/* Steps 4-5: Set direction and system mode via RMW */
-	val = bam_readl(dmux, BAM_P_CTRL(p));
-	if (dir_producer)
-		val |= P_DIRECTION;
-	else
-		val &= ~P_DIRECTION;
-	val |= P_SYS_MODE;
-	bam_writel(dmux, BAM_P_CTRL(p), val);
-
-	/* Step 6: Event threshold */
-	bam_writel(dmux, BAM_P_EVNT_GEN_TRSHLD(p), 0x10);
-
-	/* Step 7-8: Descriptor FIFO base + size */
-	bam_writel(dmux, BAM_P_DESC_FIFO_ADDR(p), pipe->desc_fifo_phys);
-	bam_writel(dmux, BAM_P_FIFO_SIZES(p), BAM_DESC_FIFO_SIZE);
-
-	/* Steps 9-10: sys_strm=0, lock_group=0 (already 0 after reset) */
-
-	/* Step 11: Enable pipe (RMW to preserve direction + mode) */
-	val = bam_readl(dmux, BAM_P_CTRL(p));
-	val |= P_EN;
-	bam_writel(dmux, BAM_P_CTRL(p), val);
-
-	/* Read back to confirm */
-	val = bam_readl(dmux, BAM_P_CTRL(p));
-
-	/* Reset FIFO pointers */
-	pipe->head = 0;
-	pipe->tail = 0;
-
-	dev_info(dmux->dev, "pipe %u init: POST P_CTRL=0x%x "
-		 "P_DESC=0x%x P_SIZES=0x%x P_HALT=0x%x "
-		 "P_IRQ_EN=0x%x IRQ_MSK=0x%08x\n",
-		 p, val,
-		 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(p)),
-		 bam_readl(dmux, BAM_P_FIFO_SIZES(p)),
-		 bam_readl(dmux, BAM_P_HALT(p)),
-		 bam_readl(dmux, BAM_P_IRQ_EN(p)),
-		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE));
-}
-
-/* ===== Descriptor FIFO operations ===== */
-
-static int bam_dmux_pipe_submit(struct bam_dmux *dmux,
-				struct bam_dmux_pipe *pipe,
-				dma_addr_t addr, u16 size, __le16 flags)
-{
-	u16 next = (pipe->tail + 1) % BAM_NUM_DESC;
-
-	if (next == pipe->head) {
-		dev_err(dmux->dev, "pipe %u: FIFO full\n", pipe->pipe_num);
-		return -ENOSPC;
-	}
-
-	pipe->desc_fifo[pipe->tail].addr = cpu_to_le32(addr);
-	pipe->desc_fifo[pipe->tail].size = cpu_to_le16(size);
-	pipe->desc_fifo[pipe->tail].flags = flags;
-
-	/* Ensure descriptor is written before advancing tail */
-	wmb();
-
-	pipe->tail = next;
-	return 0;
-}
-
-static void bam_dmux_pipe_doorbell(struct bam_dmux *dmux,
-				   struct bam_dmux_pipe *pipe)
-{
-	bam_writel(dmux, BAM_P_EVNT_REG(pipe->pipe_num),
-		   pipe->tail * BAM_DESC_SIZE);
-}
-
-static bool bam_dmux_pipe_get_completion(struct bam_dmux *dmux,
-					 struct bam_dmux_pipe *pipe,
-					 dma_addr_t *addr, u16 *size)
-{
-	u32 offset;
-	u16 hw_head;
-
-	offset = bam_readl(dmux, BAM_P_SW_OFSTS(pipe->pipe_num));
-	hw_head = (offset & P_SW_OFSTS_MASK) / BAM_DESC_SIZE;
-
-	if (hw_head == pipe->head)
-		return false;
-
-	*addr = le32_to_cpu(pipe->desc_fifo[pipe->head].addr);
-	*size = le16_to_cpu(pipe->desc_fifo[pipe->head].size);
-
-	pipe->head = (pipe->head + 1) % BAM_NUM_DESC;
-	return true;
-}
-
-/* ===== SMSM helpers ===== */
-
 static void bam_dmux_pc_vote(struct bam_dmux *dmux, bool enable)
 {
+	reinit_completion(&dmux->pc_ack_completion);
 	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask,
 				    enable ? dmux->pc_mask : 0);
 }
@@ -470,11 +112,33 @@ static void bam_dmux_pc_ack(struct bam_dmux *dmux)
 	dmux->pc_ack_state = !dmux->pc_ack_state;
 }
 
-/* ===== Network device operations ===== */
+static bool bam_dmux_skb_dma_map(struct bam_dmux_skb_dma *skb_dma,
+				 enum dma_data_direction dir)
+{
+	struct device *dev = skb_dma->dmux->dev;
+
+	skb_dma->addr = dma_map_single(dev, skb_dma->skb->data, skb_dma->skb->len, dir);
+	if (dma_mapping_error(dev, skb_dma->addr)) {
+		dev_err(dev, "Failed to DMA map buffer\n");
+		skb_dma->addr = 0;
+		return false;
+	}
+
+	return true;
+}
+
+static void bam_dmux_skb_dma_unmap(struct bam_dmux_skb_dma *skb_dma,
+				   enum dma_data_direction dir)
+{
+	dma_unmap_single(skb_dma->dmux->dev, skb_dma->addr, skb_dma->skb->len, dir);
+	skb_dma->addr = 0;
+}
 
 static void bam_dmux_tx_wake_queues(struct bam_dmux *dmux)
 {
 	int i;
+
+	dev_dbg(dmux->dev, "wake queues\n");
 
 	for (i = 0; i < BAM_DMUX_NUM_CH; ++i) {
 		struct net_device *netdev = dmux->netdevs[i];
@@ -488,6 +152,8 @@ static void bam_dmux_tx_stop_queues(struct bam_dmux *dmux)
 {
 	int i;
 
+	dev_dbg(dmux->dev, "stop queues\n");
+
 	for (i = 0; i < BAM_DMUX_NUM_CH; ++i) {
 		struct net_device *netdev = dmux->netdevs[i];
 
@@ -496,11 +162,61 @@ static void bam_dmux_tx_stop_queues(struct bam_dmux *dmux)
 	}
 }
 
-static int bam_dmux_tx_skb(struct bam_dmux *dmux, struct sk_buff *skb)
+static void bam_dmux_tx_done(struct bam_dmux_skb_dma *skb_dma)
+{
+	struct bam_dmux *dmux = skb_dma->dmux;
+	unsigned long flags;
+
+	pm_runtime_put_autosuspend(dmux->dev);
+
+	if (skb_dma->addr)
+		bam_dmux_skb_dma_unmap(skb_dma, DMA_TO_DEVICE);
+
+	spin_lock_irqsave(&dmux->tx_lock, flags);
+	skb_dma->skb = NULL;
+	if (skb_dma == &dmux->tx_skbs[dmux->tx_next_skb % BAM_DMUX_NUM_SKB])
+		bam_dmux_tx_wake_queues(dmux);
+	spin_unlock_irqrestore(&dmux->tx_lock, flags);
+}
+
+static void bam_dmux_tx_callback(void *data)
+{
+	struct bam_dmux_skb_dma *skb_dma = data;
+	struct sk_buff *skb = skb_dma->skb;
+
+	bam_dmux_tx_done(skb_dma);
+	dev_consume_skb_any(skb);
+}
+
+static bool bam_dmux_skb_dma_submit_tx(struct bam_dmux_skb_dma *skb_dma)
+{
+	struct bam_dmux *dmux = skb_dma->dmux;
+	struct dma_async_tx_descriptor *desc;
+
+	dev_info(dmux->dev, "tx_submit: dma=0x%pad len=%u data=%*ph\n",
+		 &skb_dma->addr, skb_dma->skb->len,
+		 min_t(unsigned int, skb_dma->skb->len, 16),
+		 skb_dma->skb->data);
+
+	desc = dmaengine_prep_slave_single(dmux->tx, skb_dma->addr,
+					   skb_dma->skb->len, DMA_MEM_TO_DEV,
+					   DMA_PREP_INTERRUPT);
+	if (!desc) {
+		dev_err(dmux->dev, "Failed to prepare TX DMA buffer\n");
+		return false;
+	}
+
+	desc->callback = bam_dmux_tx_callback;
+	desc->callback_param = skb_dma;
+	desc->cookie = dmaengine_submit(desc);
+	return true;
+}
+
+static struct bam_dmux_skb_dma *
+bam_dmux_tx_queue(struct bam_dmux *dmux, struct sk_buff *skb)
 {
 	struct bam_dmux_skb_dma *skb_dma;
 	unsigned long flags;
-	int ret;
 
 	spin_lock_irqsave(&dmux->tx_lock, flags);
 
@@ -508,69 +224,71 @@ static int bam_dmux_tx_skb(struct bam_dmux *dmux, struct sk_buff *skb)
 	if (skb_dma->skb) {
 		bam_dmux_tx_stop_queues(dmux);
 		spin_unlock_irqrestore(&dmux->tx_lock, flags);
-		return -EBUSY;
+		return NULL;
 	}
 	skb_dma->skb = skb;
-	skb_dma->addr = dma_map_single(dmux->dev, skb->data, skb->len,
-				       DMA_TO_DEVICE);
-	if (dma_mapping_error(dmux->dev, skb_dma->addr)) {
-		skb_dma->skb = NULL;
-		spin_unlock_irqrestore(&dmux->tx_lock, flags);
-		return -ENOMEM;
-	}
-
-	ret = bam_dmux_pipe_submit(dmux, &dmux->tx_pipe, skb_dma->addr,
-				   skb->len, DESC_FLAG_EOT);
-	if (ret) {
-		dma_unmap_single(dmux->dev, skb_dma->addr, skb->len,
-				 DMA_TO_DEVICE);
-		skb_dma->addr = 0;
-		skb_dma->skb = NULL;
-		spin_unlock_irqrestore(&dmux->tx_lock, flags);
-		return ret;
-	}
-	bam_dmux_pipe_doorbell(dmux, &dmux->tx_pipe);
 
 	dmux->tx_next_skb++;
 	if (dmux->tx_skbs[dmux->tx_next_skb % BAM_DMUX_NUM_SKB].skb)
 		bam_dmux_tx_stop_queues(dmux);
 
 	spin_unlock_irqrestore(&dmux->tx_lock, flags);
-	return 0;
+	return skb_dma;
 }
 
-static int bam_dmux_send_cmd(struct bam_dmux *dmux, u8 cmd, u8 ch)
+static int bam_dmux_send_cmd(struct bam_dmux_netdev *bndev, u8 cmd)
 {
+	struct bam_dmux *dmux = bndev->dmux;
+	struct bam_dmux_skb_dma *skb_dma;
 	struct bam_dmux_hdr *hdr;
 	struct sk_buff *skb;
 	int ret;
 
-	skb = alloc_skb(sizeof(*hdr), GFP_ATOMIC);
+	skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
 	if (!skb)
 		return -ENOMEM;
 
 	hdr = skb_put_zero(skb, sizeof(*hdr));
-	hdr->magic = cpu_to_le16(BAM_DMUX_HDR_MAGIC);
+	hdr->magic = BAM_DMUX_HDR_MAGIC;
 	hdr->cmd = cmd;
-	hdr->ch = ch;
+	hdr->ch = bndev->ch;
 
-	ret = bam_dmux_tx_skb(dmux, skb);
-	if (ret)
-		dev_kfree_skb(skb);
+	skb_dma = bam_dmux_tx_queue(dmux, skb);
+	if (!skb_dma) {
+		ret = -EAGAIN;
+		goto free_skb;
+	}
 
+	ret = pm_runtime_get_sync(dmux->dev);
+	if (ret < 0)
+		goto tx_fail;
+
+	if (!bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE)) {
+		ret = -ENOMEM;
+		goto tx_fail;
+	}
+
+	if (!bam_dmux_skb_dma_submit_tx(skb_dma)) {
+		ret = -EIO;
+		goto tx_fail;
+	}
+
+	dma_async_issue_pending(dmux->tx);
+	return 0;
+
+tx_fail:
+	bam_dmux_tx_done(skb_dma);
+free_skb:
+	dev_kfree_skb(skb);
 	return ret;
 }
 
 static int bam_dmux_netdev_open(struct net_device *netdev)
 {
 	struct bam_dmux_netdev *bndev = netdev_priv(netdev);
-	struct bam_dmux *dmux = bndev->dmux;
 	int ret;
 
-	if (!dmux->bam_initialized)
-		return -ENODEV;
-
-	ret = bam_dmux_send_cmd(dmux, BAM_DMUX_CMD_OPEN, bndev->ch);
+	ret = bam_dmux_send_cmd(bndev, BAM_DMUX_CMD_OPEN);
 	if (ret)
 		return ret;
 
@@ -581,11 +299,9 @@ static int bam_dmux_netdev_open(struct net_device *netdev)
 static int bam_dmux_netdev_stop(struct net_device *netdev)
 {
 	struct bam_dmux_netdev *bndev = netdev_priv(netdev);
-	struct bam_dmux *dmux = bndev->dmux;
 
 	netif_stop_queue(netdev);
-	if (dmux->bam_initialized)
-		bam_dmux_send_cmd(dmux, BAM_DMUX_CMD_CLOSE, bndev->ch);
+	bam_dmux_send_cmd(bndev, BAM_DMUX_CMD_CLOSE);
 	return 0;
 }
 
@@ -596,51 +312,101 @@ static unsigned int needed_room(unsigned int avail, unsigned int needed)
 	return needed - avail;
 }
 
-static netdev_tx_t bam_dmux_netdev_start_xmit(struct sk_buff *skb,
-					       struct net_device *netdev)
+static int bam_dmux_tx_prepare_skb(struct bam_dmux_netdev *bndev,
+				   struct sk_buff *skb)
 {
-	struct bam_dmux_netdev *bndev = netdev_priv(netdev);
-	struct bam_dmux *dmux = bndev->dmux;
-	unsigned int head, pad_len, tail;
+	unsigned int head = needed_room(skb_headroom(skb), BAM_DMUX_HDR_SIZE);
+	unsigned int pad = sizeof(u32) - skb->len % sizeof(u32);
+	unsigned int tail = needed_room(skb_tailroom(skb), pad);
 	struct bam_dmux_hdr *hdr;
 	int ret;
 
-	if (!dmux->bam_initialized) {
-		dev_kfree_skb_any(skb);
-		return NETDEV_TX_OK;
-	}
-
-	head = needed_room(skb_headroom(skb), BAM_DMUX_HDR_SIZE);
-	pad_len = sizeof(u32) - skb->len % sizeof(u32);
-	if (pad_len == sizeof(u32))
-		pad_len = 0;
-	tail = needed_room(skb_tailroom(skb), pad_len);
-
 	if (head || tail || skb_cloned(skb)) {
 		ret = pskb_expand_head(skb, head, tail, GFP_ATOMIC);
-		if (ret) {
-			dev_kfree_skb_any(skb);
-			return NETDEV_TX_OK;
-		}
+		if (ret)
+			return ret;
 	}
 
 	hdr = skb_push(skb, sizeof(*hdr));
-	hdr->magic = cpu_to_le16(BAM_DMUX_HDR_MAGIC);
+	hdr->magic = BAM_DMUX_HDR_MAGIC;
 	hdr->signal = 0;
 	hdr->cmd = BAM_DMUX_CMD_DATA;
-	hdr->pad = pad_len;
+	hdr->pad = pad;
 	hdr->ch = bndev->ch;
-	hdr->len = cpu_to_le16(skb->len - sizeof(*hdr));
-	if (pad_len)
-		skb_put_zero(skb, pad_len);
+	hdr->len = skb->len - sizeof(*hdr);
+	if (pad)
+		skb_put_zero(skb, pad);
 
-	ret = bam_dmux_tx_skb(dmux, skb);
-	if (ret == -EBUSY)
+	return 0;
+}
+
+static netdev_tx_t bam_dmux_netdev_start_xmit(struct sk_buff *skb,
+					      struct net_device *netdev)
+{
+	struct bam_dmux_netdev *bndev = netdev_priv(netdev);
+	struct bam_dmux *dmux = bndev->dmux;
+	struct bam_dmux_skb_dma *skb_dma;
+	int active, ret;
+
+	skb_dma = bam_dmux_tx_queue(dmux, skb);
+	if (!skb_dma)
 		return NETDEV_TX_BUSY;
-	if (ret)
-		dev_kfree_skb_any(skb);
 
+	active = pm_runtime_get(dmux->dev);
+	if (active < 0 && active != -EINPROGRESS)
+		goto drop;
+
+	ret = bam_dmux_tx_prepare_skb(bndev, skb);
+	if (ret)
+		goto drop;
+
+	if (!bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE))
+		goto drop;
+
+	if (active <= 0) {
+		/* Cannot sleep here so mark skb for wakeup handler and return */
+		if (!atomic_long_fetch_or(BIT(skb_dma - dmux->tx_skbs),
+					  &dmux->tx_deferred_skb))
+			queue_pm_work(&dmux->tx_wakeup_work);
+		return NETDEV_TX_OK;
+	}
+
+	if (!bam_dmux_skb_dma_submit_tx(skb_dma))
+		goto drop;
+
+	dma_async_issue_pending(dmux->tx);
 	return NETDEV_TX_OK;
+
+drop:
+	bam_dmux_tx_done(skb_dma);
+	dev_kfree_skb_any(skb);
+	return NETDEV_TX_OK;
+}
+
+static void bam_dmux_tx_wakeup_work(struct work_struct *work)
+{
+	struct bam_dmux *dmux = container_of(work, struct bam_dmux, tx_wakeup_work);
+	unsigned long pending;
+	int ret, i;
+
+	ret = pm_runtime_resume_and_get(dmux->dev);
+	if (ret < 0) {
+		dev_err(dmux->dev, "Failed to resume: %d\n", ret);
+		return;
+	}
+
+	pending = atomic_long_xchg(&dmux->tx_deferred_skb, 0);
+	if (!pending)
+		goto out;
+
+	dev_dbg(dmux->dev, "pending skbs after wakeup: %#lx\n", pending);
+	for_each_set_bit(i, &pending, BAM_DMUX_NUM_SKB) {
+		bam_dmux_skb_dma_submit_tx(&dmux->tx_skbs[i]);
+	}
+	dma_async_issue_pending(dmux->tx);
+
+out:
+	pm_runtime_put_autosuspend(dmux->dev);
 }
 
 static const struct net_device_ops bam_dmux_ops = {
@@ -664,17 +430,17 @@ static void bam_dmux_netdev_setup(struct net_device *dev)
 	dev->mtu = ETH_DATA_LEN;
 	dev->max_mtu = BAM_DMUX_MAX_DATA_SIZE;
 	dev->needed_headroom = sizeof(struct bam_dmux_hdr);
-	dev->needed_tailroom = sizeof(u32);
+	dev->needed_tailroom = sizeof(u32); /* word-aligned */
 	dev->tx_queue_len = DEFAULT_TX_QUEUE_LEN;
 
+	/* This perm addr will be used as interface identifier by IPv6 */
 	dev->addr_assign_type = NET_ADDR_RANDOM;
 	eth_random_addr(dev->perm_addr);
 }
 
 static void bam_dmux_register_netdev_work(struct work_struct *work)
 {
-	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
-					     register_netdev_work);
+	struct bam_dmux *dmux = container_of(work, struct bam_dmux, register_netdev_work);
 	struct bam_dmux_netdev *bndev;
 	struct net_device *netdev;
 	int ch, ret;
@@ -697,8 +463,7 @@ static void bam_dmux_register_netdev_work(struct work_struct *work)
 
 		ret = register_netdev(netdev);
 		if (ret) {
-			dev_err(dmux->dev,
-				"Failed to register netdev ch %u: %d\n",
+			dev_err(dmux->dev, "Failed to register netdev for channel %u: %d\n",
 				ch, ret);
 			free_netdev(netdev);
 			return;
@@ -708,94 +473,81 @@ static void bam_dmux_register_netdev_work(struct work_struct *work)
 	}
 }
 
-/* ===== RX path ===== */
+static void bam_dmux_rx_callback(void *data);
 
-static bool bam_dmux_submit_rx(struct bam_dmux *dmux, int idx)
+static bool bam_dmux_skb_dma_submit_rx(struct bam_dmux_skb_dma *skb_dma)
 {
-	struct bam_dmux_skb_dma *skb_dma = &dmux->rx_skbs[idx];
-	int ret;
+	struct bam_dmux *dmux = skb_dma->dmux;
+	struct dma_async_tx_descriptor *desc;
 
+	desc = dmaengine_prep_slave_single(dmux->rx, skb_dma->addr,
+					   skb_dma->skb->len, DMA_DEV_TO_MEM,
+					   DMA_PREP_INTERRUPT);
+	if (!desc) {
+		dev_err(dmux->dev, "Failed to prepare RX DMA buffer\n");
+		return false;
+	}
+
+	desc->callback = bam_dmux_rx_callback;
+	desc->callback_param = skb_dma;
+	desc->cookie = dmaengine_submit(desc);
+
+	/* Log first few RX descriptor submissions for debugging */
+	{
+		static int rx_submit_count;
+
+		if (rx_submit_count < 4) {
+			dev_info(dmux->dev,
+				"rx_submit[%d]: dma_addr=0x%pad len=%u cookie=%d\n",
+				rx_submit_count, &skb_dma->addr,
+				skb_dma->skb->len, desc->cookie);
+			rx_submit_count++;
+		}
+	}
+	return true;
+}
+
+static bool bam_dmux_skb_dma_queue_rx(struct bam_dmux_skb_dma *skb_dma, gfp_t gfp)
+{
 	if (!skb_dma->skb) {
-		skb_dma->skb = __netdev_alloc_skb(NULL, BAM_DMUX_BUFFER_SIZE,
-						   GFP_ATOMIC);
+		skb_dma->skb = __netdev_alloc_skb(NULL, BAM_DMUX_BUFFER_SIZE, gfp);
 		if (!skb_dma->skb)
 			return false;
 		skb_put(skb_dma->skb, BAM_DMUX_BUFFER_SIZE);
 	}
 
-	skb_dma->addr = dma_map_single(dmux->dev, skb_dma->skb->data,
-				       skb_dma->skb->len, DMA_FROM_DEVICE);
-	if (dma_mapping_error(dmux->dev, skb_dma->addr)) {
-		dev_err(dmux->dev, "RX DMA map failed for skb %d\n", idx);
-		skb_dma->addr = 0;
-		return false;
-	}
+	/* Fill with known pattern to detect if DMA actually writes data */
+	memset(skb_dma->skb->data, 0xAA, skb_dma->skb->len);
 
-	/* Flags = 0 for RX producer pipe (no EOT from APPS side) */
-	ret = bam_dmux_pipe_submit(dmux, &dmux->rx_pipe,
-				   skb_dma->addr, skb_dma->skb->len, 0);
-	if (ret) {
-		dma_unmap_single(dmux->dev, skb_dma->addr,
-				 skb_dma->skb->len, DMA_FROM_DEVICE);
-		skb_dma->addr = 0;
-		return false;
-	}
-
-	return true;
+	return bam_dmux_skb_dma_map(skb_dma, DMA_FROM_DEVICE) &&
+	       bam_dmux_skb_dma_submit_rx(skb_dma);
 }
 
-static void bam_dmux_queue_rx(struct bam_dmux *dmux)
+static void bam_dmux_cmd_data(struct bam_dmux_skb_dma *skb_dma)
 {
-	int i;
-
-	/*
-	 * Downstream sps_transfer_one rings doorbell after EACH descriptor.
-	 * Match this exactly: submit + doorbell per descriptor.
-	 */
-	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
-		if (dmux->rx_skbs[i].addr)
-			continue;
-		if (!bam_dmux_submit_rx(dmux, i))
-			break;
-		bam_dmux_pipe_doorbell(dmux, &dmux->rx_pipe);
-	}
-}
-
-static void bam_dmux_cmd_data(struct bam_dmux *dmux,
-			      struct bam_dmux_skb_dma *skb_dma, u16 sps_size)
-{
+	struct bam_dmux *dmux = skb_dma->dmux;
 	struct sk_buff *skb = skb_dma->skb;
 	struct bam_dmux_hdr *hdr = (struct bam_dmux_hdr *)skb->data;
-	struct net_device *netdev;
-	u16 pkt_len;
+	struct net_device *netdev = dmux->netdevs[hdr->ch];
 
-	if (hdr->ch >= BAM_DMUX_NUM_CH) {
-		dev_warn(dmux->dev, "Data for invalid channel %u\n", hdr->ch);
-		return;
-	}
-
-	netdev = dmux->netdevs[hdr->ch];
 	if (!netdev || !netif_running(netdev)) {
 		dev_warn(dmux->dev, "Data for inactive channel %u\n", hdr->ch);
 		return;
 	}
 
-	pkt_len = le16_to_cpu(hdr->len);
-	if (pkt_len == 0xffff)
-		pkt_len = sps_size - sizeof(*hdr);
-
-	if (pkt_len > BAM_DMUX_MAX_DATA_SIZE) {
-		dev_err(dmux->dev, "Data too large: %u > %u\n",
-			pkt_len, (u16)BAM_DMUX_MAX_DATA_SIZE);
+	if (hdr->len > BAM_DMUX_MAX_DATA_SIZE) {
+		dev_err(dmux->dev, "Data larger than buffer? (%u > %u)\n",
+			hdr->len, (u16)BAM_DMUX_MAX_DATA_SIZE);
 		return;
 	}
 
-	skb_dma->skb = NULL;
+	skb_dma->skb = NULL; /* Hand over to network stack */
 
 	skb_pull(skb, sizeof(*hdr));
-	skb_trim(skb, pkt_len);
+	skb_trim(skb, hdr->len);
 	skb->dev = netdev;
 
+	/* Only Raw-IP/QMAP is supported by this driver */
 	switch (skb->data[0] & 0xf0) {
 	case 0x40:
 		skb->protocol = htons(ETH_P_IP);
@@ -813,73 +565,72 @@ static void bam_dmux_cmd_data(struct bam_dmux *dmux,
 
 static void bam_dmux_cmd_open(struct bam_dmux *dmux, struct bam_dmux_hdr *hdr)
 {
-	dev_info(dmux->dev, "remote CMD_OPEN ch=%u\n", hdr->ch);
+	struct net_device *netdev = dmux->netdevs[hdr->ch];
+
+	dev_dbg(dmux->dev, "open channel: %u\n", hdr->ch);
 
 	if (__test_and_set_bit(hdr->ch, dmux->remote_channels)) {
 		dev_warn(dmux->dev, "Channel already open: %u\n", hdr->ch);
 		return;
 	}
 
-	if (dmux->netdevs[hdr->ch]) {
-		netif_device_attach(dmux->netdevs[hdr->ch]);
+	if (netdev) {
+		netif_device_attach(netdev);
 	} else {
+		/* Cannot sleep here, schedule work to register the netdev */
 		schedule_work(&dmux->register_netdev_work);
 	}
-
-	/*
-	 * Downstream: APPS responds to modem CMD_OPEN by sending
-	 * CMD_OPEN back. This completes the bidirectional handshake.
-	 * (In downstream, this happens in msm_bam_dmux_open() when
-	 * rmnet_bam probes onto the platform device. We simplify by
-	 * responding immediately.)
-	 */
-	if (bam_dmux_send_cmd(dmux, BAM_DMUX_CMD_OPEN, hdr->ch))
-		dev_err(dmux->dev, "Failed to send CMD_OPEN response ch=%u\n",
-			hdr->ch);
-	else
-		dev_info(dmux->dev, "CMD_OPEN response sent ch=%u\n", hdr->ch);
 }
 
 static void bam_dmux_cmd_close(struct bam_dmux *dmux, struct bam_dmux_hdr *hdr)
 {
-	dev_info(dmux->dev, "remote CMD_CLOSE ch=%u\n", hdr->ch);
+	struct net_device *netdev = dmux->netdevs[hdr->ch];
+
+	dev_dbg(dmux->dev, "close channel: %u\n", hdr->ch);
 
 	if (!__test_and_clear_bit(hdr->ch, dmux->remote_channels)) {
 		dev_err(dmux->dev, "Channel not open: %u\n", hdr->ch);
 		return;
 	}
 
-	if (dmux->netdevs[hdr->ch])
-		netif_device_detach(dmux->netdevs[hdr->ch]);
+	if (netdev)
+		netif_device_detach(netdev);
 }
 
-static void bam_dmux_process_rx(struct bam_dmux *dmux,
-				struct bam_dmux_skb_dma *skb_dma,
-				u16 sps_size)
+static void bam_dmux_rx_callback(void *data)
 {
+	struct bam_dmux_skb_dma *skb_dma = data;
+	struct bam_dmux *dmux = skb_dma->dmux;
 	struct sk_buff *skb = skb_dma->skb;
 	struct bam_dmux_hdr *hdr;
+	dma_addr_t saved_addr = skb_dma->addr;
 
-	dma_unmap_single(dmux->dev, skb_dma->addr, skb->len, DMA_FROM_DEVICE);
-	skb_dma->addr = 0;
+	bam_dmux_skb_dma_unmap(skb_dma, DMA_FROM_DEVICE);
 
 	hdr = (struct bam_dmux_hdr *)skb->data;
 
-	if (le16_to_cpu(hdr->magic) != BAM_DMUX_HDR_MAGIC) {
-		dev_err(dmux->dev, "Bad magic: %#x (bytes: %*ph)\n",
-			le16_to_cpu(hdr->magic),
-			min_t(int, 16, skb->len), skb->data);
-		return;
+	dev_info(dmux->dev,
+		 "rx_callback: dma=0x%pad virt=%px phys=0x%lx len=%u\n"
+		 "  bytes[0-31]=%*ph\n"
+		 "  hdr: magic=%#06x cmd=%u ch=%u pkt_len=%u pad=%u\n",
+		 &saved_addr, skb->data, (unsigned long)virt_to_phys(skb->data),
+		 skb->len,
+		 min_t(int, 32, skb->len), skb->data,
+		 hdr->magic, hdr->cmd, hdr->ch, hdr->len, hdr->pad);
+
+	if (hdr->magic != BAM_DMUX_HDR_MAGIC) {
+		dev_err(dmux->dev, "Invalid magic in header: %#x\n", hdr->magic);
+		goto out;
 	}
 
 	if (hdr->ch >= BAM_DMUX_NUM_CH) {
 		dev_dbg(dmux->dev, "Unsupported channel: %u\n", hdr->ch);
-		return;
+		goto out;
 	}
 
 	switch (hdr->cmd) {
 	case BAM_DMUX_CMD_DATA:
-		bam_dmux_cmd_data(dmux, skb_dma, sps_size);
+		bam_dmux_cmd_data(skb_dma);
 		break;
 	case BAM_DMUX_CMD_OPEN:
 		bam_dmux_cmd_open(dmux, hdr);
@@ -888,352 +639,199 @@ static void bam_dmux_process_rx(struct bam_dmux *dmux,
 		bam_dmux_cmd_close(dmux, hdr);
 		break;
 	default:
-		dev_err(dmux->dev, "Unsupported cmd %u on ch %u\n",
+		dev_err(dmux->dev, "Unsupported command %u on channel %u\n",
 			hdr->cmd, hdr->ch);
 		break;
 	}
+
+out:
+	if (bam_dmux_skb_dma_queue_rx(skb_dma, GFP_ATOMIC))
+		dma_async_issue_pending(dmux->rx);
 }
 
-/* ===== TX completion handling ===== */
-
-static void bam_dmux_process_tx_completions(struct bam_dmux *dmux)
+static bool bam_dmux_power_on(struct bam_dmux *dmux)
 {
-	struct bam_dmux_skb_dma *skb_dma;
-	dma_addr_t addr;
-	unsigned long flags;
-	u16 size;
+	struct device *dev = dmux->dev;
+	struct dma_slave_config dma_rx_conf = {
+		.direction = DMA_DEV_TO_MEM,
+		.src_maxburst = BAM_DMUX_BUFFER_SIZE,
+	};
 	int i;
 
-	while (bam_dmux_pipe_get_completion(dmux, &dmux->tx_pipe,
-					    &addr, &size)) {
-		spin_lock_irqsave(&dmux->tx_lock, flags);
-		for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
-			skb_dma = &dmux->tx_skbs[i];
-			if (skb_dma->addr == addr && skb_dma->skb) {
-				dma_unmap_single(dmux->dev, skb_dma->addr,
-						 skb_dma->skb->len,
-						 DMA_TO_DEVICE);
-				dev_consume_skb_any(skb_dma->skb);
-				skb_dma->skb = NULL;
-				skb_dma->addr = 0;
-				break;
-			}
+	if (!dmux->rx) {
+		dmux->rx = dma_request_chan(dev, "rx");
+		if (IS_ERR(dmux->rx)) {
+			dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
+			dmux->rx = NULL;
+			return false;
 		}
-		bam_dmux_tx_wake_queues(dmux);
-		spin_unlock_irqrestore(&dmux->tx_lock, flags);
 	}
-}
+	dmaengine_slave_config(dmux->rx, &dma_rx_conf);
 
-/*
- * BAM+pipe hardware init — configures BAM global registers, both pipes.
- * Matches downstream bam_init() which is called from bam_dmux_smsm_cb
- * AFTER the modem asserts A2_POWER_CONTROL (bit 1).
- *
- * Downstream sequence: pipe_init → pipe_set_irq → ACK → queue_rx.
- */
-static bool bam_dmux_hw_init(struct bam_dmux *dmux)
-{
-	/* Step 1: BAM global init (SW_RST + BAM_EN + CNFG) */
-	bam_dmux_bam_init(dmux);
-
-	/* Step 2: TX pipe (consumer, MEM->DEV) */
-	bam_dmux_pipe_init(dmux, &dmux->tx_pipe, false);
-
-	/* Step 3: RX pipe (producer, DEV->MEM) */
-	bam_dmux_pipe_init(dmux, &dmux->rx_pipe, true);
-
-	/*
-	 * Step 4: Enable pipe IRQs (downstream pipe_set_irq).
-	 * Downstream sets P_IRQ_EN=0x20 (EOT only) AFTER pipe init,
-	 * then clears stale P_IRQ_STTS.
-	 */
-	bam_writel(dmux, BAM_P_IRQ_EN(dmux->tx_pipe.pipe_num),
-		   P_TRNSFR_END_EN);
-	bam_writel(dmux, BAM_P_IRQ_CLR(dmux->tx_pipe.pipe_num), 0xFF);
-	bam_writel(dmux, BAM_P_IRQ_EN(dmux->rx_pipe.pipe_num),
-		   P_TRNSFR_END_EN);
-	bam_writel(dmux, BAM_P_IRQ_CLR(dmux->rx_pipe.pipe_num), 0xFF);
-
-	/* Step 5: Toggle ACK (downstream: toggle_apps_ack before queue_rx) */
-	bam_dmux_pc_ack(dmux);
-
-	/* Step 6: Submit RX buffers (per-descriptor doorbell) */
-	bam_dmux_queue_rx(dmux);
-
-	dmux->bam_initialized = true;
-
-	/* Diagnostic: dump descriptor FIFO content and BAM error status */
-	{
-		int i;
-		u32 p = dmux->rx_pipe.pipe_num;
-
-		dev_info(dmux->dev,
-			 "hw_init diag: RX P_IRQ_STTS=0x%x P_EVNT=0x%x "
-			 "P_SW_OFSTS=0x%x P_HALT=0x%x BAM_IRQ_STTS=0x%x\n",
-			 bam_readl(dmux, BAM_P_IRQ_STTS(p)),
-			 bam_readl(dmux, BAM_P_EVNT_REG(p)),
-			 bam_readl(dmux, BAM_P_SW_OFSTS(p)),
-			 bam_readl(dmux, BAM_P_HALT(p)),
-			 bam_readl(dmux, BAM_IRQ_STTS));
-
-		/* Dump first 4 RX descriptors from FIFO */
-		for (i = 0; i < 4 && i < BAM_DMUX_NUM_SKB; i++) {
-			struct bam_desc_hw *d = &dmux->rx_pipe.desc_fifo[i];
-
-			dev_info(dmux->dev,
-				 "  rx_desc[%d]: addr=0x%08x size=%u flags=0x%04x "
-				 "skb_dma=0x%pad\n",
-				 i, le32_to_cpu(d->addr), le16_to_cpu(d->size),
-				 le16_to_cpu(d->flags), &dmux->rx_skbs[i].addr);
+	if (!dmux->tx) {
+		dmux->tx = dma_request_chan(dev, "tx");
+		if (IS_ERR(dmux->tx)) {
+			dev_err(dev, "Failed to request TX DMA channel: %pe\n",
+				dmux->tx);
+			dmux->tx = NULL;
+			return false;
 		}
-
-		p = dmux->tx_pipe.pipe_num;
-		dev_info(dmux->dev,
-			 "hw_init diag: TX P_IRQ_STTS=0x%x P_EVNT=0x%x "
-			 "P_SW_OFSTS=0x%x\n",
-			 bam_readl(dmux, BAM_P_IRQ_STTS(p)),
-			 bam_readl(dmux, BAM_P_EVNT_REG(p)),
-			 bam_readl(dmux, BAM_P_SW_OFSTS(p)));
 	}
 
-	dev_info(dmux->dev, "hw_init complete: pipes + RX buffers ready\n");
+	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
+		if (!bam_dmux_skb_dma_queue_rx(&dmux->rx_skbs[i], GFP_KERNEL))
+			return false;
+	}
+
 	return true;
 }
 
-static void bam_dmux_hw_deinit(struct bam_dmux *dmux)
+static void bam_dmux_free_skbs(struct bam_dmux_skb_dma skbs[],
+			       enum dma_data_direction dir)
 {
 	int i;
 
-	dmux->bam_initialized = false;
-
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
-		struct bam_dmux_skb_dma *skb_dma = &dmux->rx_skbs[i];
+		struct bam_dmux_skb_dma *skb_dma = &skbs[i];
 
-		if (skb_dma->addr) {
-			dma_unmap_single(dmux->dev, skb_dma->addr,
-					 skb_dma->skb->len, DMA_FROM_DEVICE);
-			skb_dma->addr = 0;
-		}
+		if (skb_dma->addr)
+			bam_dmux_skb_dma_unmap(skb_dma, dir);
 		if (skb_dma->skb) {
-			dev_kfree_skb_any(skb_dma->skb);
+			dev_kfree_skb(skb_dma->skb);
 			skb_dma->skb = NULL;
 		}
 	}
-
-	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
-		struct bam_dmux_skb_dma *skb_dma = &dmux->tx_skbs[i];
-
-		if (skb_dma->addr) {
-			dma_unmap_single(dmux->dev, skb_dma->addr,
-					 skb_dma->skb->len, DMA_TO_DEVICE);
-			skb_dma->addr = 0;
-		}
-		if (skb_dma->skb) {
-			dev_kfree_skb_any(skb_dma->skb);
-			skb_dma->skb = NULL;
-		}
-	}
-
-	dmux->tx_pipe.head = 0;
-	dmux->tx_pipe.tail = 0;
-	dmux->rx_pipe.head = 0;
-	dmux->rx_pipe.tail = 0;
-	dmux->tx_next_skb = 0;
 }
 
-/* ===== Poll timer ===== */
-
-static void bam_dmux_poll_timer_fn(struct timer_list *t)
+static void bam_dmux_power_off(struct bam_dmux *dmux)
 {
-	struct bam_dmux *dmux = container_of(t, struct bam_dmux, poll_timer);
-	static unsigned int poll_count;
-	dma_addr_t addr;
-	u16 size;
-	bool got_rx = false;
-	int i;
+	/* Stop timer FIRST to prevent accessing released channels */
+	timer_delete_sync(&dmux->rx_poll_timer);
+	dmux->pc_state = false;
 
-	if (!dmux->bam_initialized || !dmux->pc_state) {
-		mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(20));
-		return;
+	if (dmux->tx) {
+		dmaengine_terminate_sync(dmux->tx);
+		dma_release_channel(dmux->tx);
+		dmux->tx = NULL;
 	}
 
-	/* Process TX completions */
-	bam_dmux_process_tx_completions(dmux);
-
-	/* Process RX completions */
-	while (bam_dmux_pipe_get_completion(dmux, &dmux->rx_pipe,
-					    &addr, &size)) {
-		for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
-			if (dmux->rx_skbs[i].addr == addr) {
-				bam_dmux_process_rx(dmux, &dmux->rx_skbs[i],
-						    size);
-				got_rx = true;
-				break;
-			}
-		}
-		if (i == BAM_DMUX_NUM_SKB)
-			dev_err(dmux->dev,
-				"RX completion addr %pad not found!\n", &addr);
+	if (dmux->rx) {
+		dmaengine_terminate_sync(dmux->rx);
+		dma_release_channel(dmux->rx);
+		dmux->rx = NULL;
 	}
 
-	if (got_rx)
-		bam_dmux_queue_rx(dmux);
-
-	if (poll_count < 20 || !(poll_count % 5000)) {
-		dev_info(dmux->dev,
-			 "poll[%u]: rx P_OFSTS=0x%x P_EVNT=0x%x "
-			 "tx P_OFSTS=0x%x P_EVNT=0x%x "
-			 "P5_CTRL=0x%x P4_CTRL=0x%x BAM_CTRL=0x%x "
-			 "rx_IRQ=0x%x tx_IRQ=0x%x "
-			 "rx_DESC=0x%x rx_SIZES=0x%x\n",
-			 poll_count,
-			 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_CTRL),
-			 bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_FIFO_SIZES(BAM_DMUX_RX_PIPE)));
-
-		/* Extended trust/security + pipe context diagnostics */
-		dev_info(dmux->dev,
-			 "poll[%u]: TRUST=0x%x P_TR[4]=0x%x P_TR[5]=0x%x "
-			 "SRCS=0x%x PIPE_ATTR=0x%x "
-			 "P5_RETR=0x%x P5_PSM1=0x%x P5_PSM2=0x%x "
-			 "P5_PRDCR=0x%x P5_CNSMR=0x%x\n",
-			 poll_count,
-			 bam_readl(dmux, BAM_TRUST_REG),
-			 bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_P_TRUST_REG(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_IRQ_SRCS_EE),
-			 bam_readl(dmux, BAM_PIPE_ATTR_EE),
-			 bam_readl(dmux, BAM_P_RETR_CNTXT(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_AU_PSM_CNTXT_1(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_PSM_CNTXT_2(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_PRDCR_SDBND(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_CNSMR_SDBND(BAM_DMUX_RX_PIPE)));
-	}
-
-	/*
-	 * Clear P_IRQ_STTS for both pipes every poll cycle.
-	 * Downstream SPS ISR clears these; we never did until now.
-	 * This might unblock the BAM if it stalls on pending IRQs.
-	 */
-	bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_RX_PIPE), 0xFF);
-	bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_TX_PIPE), 0xFF);
-	/* Also clear global BAM IRQ status */
-	bam_writel(dmux, BAM_IRQ_CLR, 0xFF);
-	poll_count++;
-
-	mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
+	bam_dmux_free_skbs(dmux->rx_skbs, DMA_FROM_DEVICE);
 }
-
-/* ===== BAM hardware ISR (downstream: SPS handles GIC SPI 29) ===== */
-
-/*
- * The BAM asserts GIC SPI 29 when pipe interrupts are pending.
- * Downstream, the SPS framework registers this ISR, reads
- * BAM_IRQ_SRCS_EE, and clears pipe interrupt status.
- * Without handling this interrupt, the BAM may misbehave.
- */
-static irqreturn_t bam_dmux_bam_isr(int irq, void *data)
-{
-	struct bam_dmux *dmux = data;
-	u32 srcs, stts;
-
-	srcs = bam_readl(dmux, BAM_IRQ_SRCS_EE);
-	if (!srcs)
-		return IRQ_NONE;
-
-	/* Clear global BAM interrupt status */
-	if (srcs & BIT(31)) {
-		stts = bam_readl(dmux, BAM_IRQ_STTS);
-		bam_writel(dmux, BAM_IRQ_CLR, stts);
-	}
-
-	/* Clear pipe 4 (TX) interrupt status */
-	if (srcs & BIT(BAM_DMUX_TX_PIPE)) {
-		stts = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE));
-		bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_TX_PIPE), stts);
-	}
-
-	/* Clear pipe 5 (RX) interrupt status */
-	if (srcs & BIT(BAM_DMUX_RX_PIPE)) {
-		stts = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_RX_PIPE));
-		bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_RX_PIPE), stts);
-	}
-
-	return IRQ_HANDLED;
-}
-
-/* ===== IRQ handlers ===== */
 
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 {
 	struct bam_dmux *dmux = data;
 	bool new_state;
 
-	irq_get_irqchip_state(dmux->pc_irq, IRQCHIP_STATE_LINE_LEVEL,
-			      &new_state);
+	/*
+	 * Read the actual modem state instead of toggling.  Boot_work may
+	 * have set pc_state=true before pc_irq fires, which would break
+	 * the toggle-based logic (it would interpret the first real modem
+	 * bit-1 assertion as "power down").
+	 */
+	irq_get_irqchip_state(dmux->pc_irq, IRQCHIP_STATE_LINE_LEVEL, &new_state);
 
-	dev_info(dmux->dev, "pc_irq: modem_bit1=%d pc_state=%d bam_init=%d\n",
-		 new_state, dmux->pc_state, dmux->bam_initialized);
+	dev_info(dmux->dev, "pc_irq: modem_bit1=%d pc_state=%d\n",
+		 new_state, dmux->pc_state);
 
 	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state && !dmux->pc_state) {
 		/*
-		 * Modem asserted A2_POWER_CONTROL (responded to our bit 1).
+		 * Modem asserted A2_POWER_CONTROL — modem has finished its
+		 * own BAM SW_RST.  Now do full BAM init: our configuration
+		 * will persist since the modem won't reset again.
 		 *
-		 * OLD DRIVER APPROACH: boot_work already configured BAM
-		 * pipes + submitted RX descriptors + toggled ACK + issued
-		 * doorbell BEFORE setting APPS bit 1. So by the time
-		 * pc_irq fires, pipes are ready and we just need to start
-		 * polling and send CMD_OPEN.
-		 *
-		 * If boot_work didn't complete (shouldn't happen), do
-		 * full init here as fallback.
+		 * Always re-init regardless of software state.  If boot_work
+		 * had set up pipes before APPS bit 1, the modem's SW_RST
+		 * wiped the hardware even though our sw pointers are stale.
 		 */
-		if (!dmux->bam_initialized) {
-			dev_info(dmux->dev,
-				 "pc_irq: full init (boot_work incomplete)\n");
-			if (!bam_dmux_hw_init(dmux)) {
-				dev_err(dmux->dev, "pc_irq: hw_init failed\n");
-				bam_dmux_hw_deinit(dmux);
-				goto out;
-			}
-		} else {
-			dev_info(dmux->dev,
-				 "pc_irq: pipes ready (boot_work)\n");
+		if (dmux->tx || dmux->rx) {
+			dev_info(dmux->dev, "pc_irq: cleaning up stale DMA state\n");
+			bam_dmux_power_off(dmux);
 		}
 
-		dmux->pc_state = new_state;
+		dev_info(dmux->dev, "pc_irq: full BAM init (modem ready)\n");
+		if (!bam_dmux_power_on(dmux)) {
+			dev_err(dmux->dev, "pc_irq: power_on failed\n");
+			bam_dmux_power_off(dmux);
+			goto out;
+		}
 
-		/* Start polling */
-		mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
-
-		/* Send CMD_OPEN for ch 0 — OCPU firmware never sends it */
-		if (bam_dmux_send_cmd(dmux, BAM_DMUX_CMD_OPEN,
-				      BAM_DMUX_CH_DATA_0))
-			dev_err(dmux->dev, "pc_irq: CMD_OPEN ch=0 failed\n");
-		else
-			dev_info(dmux->dev, "pc_irq: CMD_OPEN ch=0 sent\n");
-
-		/* Pre-register all netdevs (OCPU firmware never sends CMD_OPEN) */
-		bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
-		schedule_work(&dmux->register_netdev_work);
-
-	} else if (!new_state && dmux->pc_state) {
-		dev_info(dmux->dev, "pc_irq: modem powering down\n");
-		timer_delete_sync(&dmux->poll_timer);
-		bam_dmux_hw_deinit(dmux);
+		/* Toggle ACK to signal modem that APPS has configured pipes */
 		bam_dmux_pc_ack(dmux);
+
+		/* Write RX doorbell */
+		dma_async_issue_pending(dmux->rx);
+
+		/* Start poll timer */
+		mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
+
 		dmux->pc_state = new_state;
+
+		/* Reset pm_runtime to ACTIVE */
+		pm_runtime_disable(dmux->dev);
+		pm_runtime_set_active(dmux->dev);
+		pm_runtime_enable(dmux->dev);
+		pm_runtime_get_noresume(dmux->dev);
+		dev_info(dmux->dev, "pc_irq: pm_runtime reset done\n");
+
+		dmux->boot_done = true;
+
+		/* Send CMD_OPEN for ch 0 */
+		{
+			struct sk_buff *cmd_skb;
+			struct bam_dmux_hdr *hdr;
+			struct bam_dmux_skb_dma *skb_dma;
+
+			cmd_skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
+			if (cmd_skb) {
+				hdr = skb_put_zero(cmd_skb, sizeof(*hdr));
+				hdr->magic = BAM_DMUX_HDR_MAGIC;
+				hdr->cmd = BAM_DMUX_CMD_OPEN;
+				hdr->ch = BAM_DMUX_CH_DATA_0;
+
+				skb_dma = bam_dmux_tx_queue(dmux, cmd_skb);
+				if (skb_dma &&
+				    bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE) &&
+				    bam_dmux_skb_dma_submit_tx(skb_dma)) {
+					pm_runtime_get_noresume(dmux->dev);
+					dma_async_issue_pending(dmux->tx);
+					dev_info(dmux->dev,
+						 "pc_irq: CMD_OPEN ch=0 sent\n");
+				} else {
+					if (skb_dma) {
+						pm_runtime_get_noresume(dmux->dev);
+						bam_dmux_tx_done(skb_dma);
+					}
+					dev_kfree_skb(cmd_skb);
+					dev_err(dmux->dev,
+						"pc_irq: CMD_OPEN ch=0 FAILED\n");
+				}
+			}
+		}
+	} else if (new_state && dmux->pc_state) {
+		/* Already up (shouldn't happen with current flow) */
+		dma_async_issue_pending(dmux->rx);
+		dev_info(dmux->dev, "pc_irq: already up, re-issued doorbell\n");
+	} else if (!new_state) {
+		/* Modem de-asserted — power down */
+		dev_info(dmux->dev, "pc_irq: modem powering down\n");
+		timer_delete_sync(&dmux->rx_poll_timer);
+		bam_dmux_power_off(dmux);
+		bam_dmux_pc_ack(dmux);
+		pm_runtime_mark_last_busy(dmux->dev);
+		pm_runtime_put_autosuspend(dmux->dev);
 	}
+
+	dmux->pc_state = new_state;
+	wake_up_all(&dmux->pc_wait);
 
 out:
 	return IRQ_HANDLED;
@@ -1241,84 +839,202 @@ out:
 
 static irqreturn_t bam_dmux_pc_ack_irq(int irq, void *data)
 {
+	struct bam_dmux *dmux = data;
+
+	dev_dbg(dmux->dev, "pc ack\n");
+	complete_all(&dmux->pc_ack_completion);
+
 	return IRQ_HANDLED;
 }
 
-/* ===== Boot sequence ===== */
+static int bam_dmux_runtime_suspend(struct device *dev)
+{
+	struct bam_dmux *dmux = dev_get_drvdata(dev);
 
-/*
- * bam_dmux_boot_work_fn - initialize BAM, set APPS bit 1, register netdevs.
+	dev_dbg(dev, "runtime suspend\n");
+
+	/*
+	 * Don't touch SMSM during boot or when modem is already down.
+	 * When the modem powers down (clears its bit 1), pc_irq does
+	 * power_off + ACK + put_autosuspend.  If we also clear APPS
+	 * bit 1 here, the modem sees the change and re-powers — causing
+	 * an infinite power cycle storm.
+	 */
+	if (!dmux->boot_done || !dmux->pc_state)
+		return 0;
+
+	bam_dmux_pc_vote(dmux, false);
+
+	return 0;
+}
+
+static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
+{
+	struct bam_dmux *dmux = dev_get_drvdata(dev);
+
+	dev_dbg(dev, "runtime resume\n");
+
+	/*
+	 * During boot, the pc_irq handler manages the SMSM handshake
+	 * directly.  runtime_resume must not touch SMSM until the boot
+	 * handshake is complete, because:
+	 *
+	 * 1. dma_request_chan() creates device links that can trigger
+	 *    runtime_resume, setting APPS bit 1 prematurely.
+	 * 2. pm_runtime_disable()'s barrier can invoke runtime_resume,
+	 *    whose wait_for_completion_timeout will expire (no modem
+	 *    ACK for a redundant bit-1-set), causing it to clear bit 1.
+	 *    The modem sees bit 1 go 1→0 and powers down A2.
+	 */
+	if (!dmux->boot_done) {
+		dev_dbg(dev, "runtime resume: boot not done, skipping\n");
+		return 0;
+	}
+
+	/*
+	 * Ensure BAM_EN is set before waking the modem.  During
+	 * power_off, dma_release_channel() triggers bam_free_chan()
+	 * which does SW_RST when active_channels drops to 0, clearing
+	 * BAM_EN.  The modem's bam_check() requires BAM_EN=1.
+	 *
+	 * Same pattern as boot_work: allocate RX channel to trigger
+	 * bam_alloc_chan() → bam_init_powered_remotely() (SW_RST +
+	 * BAM_EN).  Keep it allocated so BAM_EN persists.
+	 */
+	if (!dmux->rx) {
+		dmux->rx = dma_request_chan(dev, "rx");
+		if (IS_ERR(dmux->rx)) {
+			dev_err(dev, "runtime resume: RX DMA request failed: %pe\n",
+				dmux->rx);
+			dmux->rx = NULL;
+			return -ENXIO;
+		}
+	}
+
+	/* Vote for power state (sets APPS bit 1, wakes modem) */
+	bam_dmux_pc_vote(dmux, true);
+
+	/* Wait for modem to ACK our power vote */
+	if (!wait_for_completion_timeout(&dmux->pc_ack_completion,
+					 BAM_DMUX_REMOTE_TIMEOUT)) {
+		bam_dmux_pc_vote(dmux, false);
+		return -ETIMEDOUT;
+	}
+
+	/* Wait for modem to come up (pc_irq sets pc_state) */
+	if (!wait_event_timeout(dmux->pc_wait, dmux->pc_state,
+				BAM_DMUX_REMOTE_TIMEOUT)) {
+		bam_dmux_pc_vote(dmux, false);
+		return -ETIMEDOUT;
+	}
+
+	return 0;
+}
+
+/**
+ * bam_dmux_boot_work_fn() - trigger modem A2 power-up via APPS SMSM bit 1.
  *
- * CRITICAL ORDERING — do everything BEFORE setting APPS SMSM bit 1:
+ * Runs ~1s after modem SMDINIT (SMSM bit 0).
  *
- *   1. SW_RST + BAM_EN + CNFG_BITS     (bam_dmux_bam_init)
- *   2. Configure pipe 4+5               (bam_dmux_pipe_init)
- *   3. Enable pipe IRQs                 (P_IRQ_EN)
- *   4. Toggle ACK (APPS bit 11)
- *   5. Submit RX descriptors + doorbell
- *   6. Start poll timer
- *   7. Set APPS bit 1                   ← modem's A2 DMA wakes up HERE
- *   8. Pre-register netdevs
+ * On MDM9607 with Quectel OCPU firmware, the modem does NOT set its
+ * SMSM bit 1 independently — it waits for APPS to set bit 1 first.
+ * When the modem sees APPS bit 1, it powers on A2 and performs a BAM
+ * SW_RST, wiping any prior BAM configuration.
  *
- * The modem's a2_apps_smsm_callback fires on APPS bit 1: it powers on
- * A2 hardware.  If BAM pipes are not yet configured when A2 powers on,
- * the modem's A2 DMA finds empty pipes and data transfer never starts.
+ * Therefore, we must NOT configure the BAM here.  We only:
+ *   1. Toggle ACK (APPS bit 11)
+ *   2. Set APPS bit 1 to trigger modem's A2 power-up
+ *   3. Pre-register netdevs
  *
- * Also pre-registers netdevs (wwan0-7) since the Quectel OCPU firmware
- * never sends CMD_OPEN packets.
+ * The actual BAM init (SW_RST + pipes + descriptors) happens in pc_irq
+ * AFTER the modem responds with modem bit 1, meaning the modem's own
+ * SW_RST has completed and our init will persist.
  */
 static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
-	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
-					     boot_work.work);
+	struct bam_dmux *dmux = container_of(work, struct bam_dmux, boot_work.work);
 
 	if (dmux->pc_state)
 		return;
 
-	dev_info(dmux->dev, "boot_work: initializing BAM before APPS bit 1\n");
+	dev_info(dmux->dev, "boot_work: triggering modem A2 power-up\n");
 
-	/* Steps 1-6: Full BAM + pipe init + ACK + RX buffers */
-	if (!bam_dmux_hw_init(dmux)) {
-		dev_err(dmux->dev, "boot_work: hw_init failed\n");
-		bam_dmux_hw_deinit(dmux);
-		return;
-	}
-
-	/* Start poll timer */
-	mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
-
-	/*
-	 * Step 7: Set APPS bit 1 LAST.
-	 * Everything is ready — pipes configured, descriptors posted,
-	 * doorbell written, ACK toggled.  Now wake the modem's A2 DMA.
-	 */
+	/* Set APPS bit 1 — modem will respond with modem bit 1 */
 	bam_dmux_pc_vote(dmux, true);
 	dev_info(dmux->dev, "boot_work: APPS bit 1 set, waiting for modem\n");
 
-	/* Step 8: Pre-register all netdevs (OCPU firmware never sends CMD_OPEN) */
+	/* Pre-register netdevs (Quectel firmware doesn't send CMD_OPEN) */
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
 }
 
+/**
+ * bam_dmux_rx_poll_timer_fn - poll for RX completions when BAM IRQ is blocked.
+ *
+ * On MDM9607, TrustZone blocks the BAM interrupt from reaching Linux.
+ * This timer callback periodically triggers completion processing by
+ * calling dmaengine_tx_status(), which reads P_SW_OFSTS in the BAM
+ * driver and fires callbacks for completed descriptors.
+ *
+ * Runs in softirq context via timer_list (more reliable than delayed_work
+ * on single-CPU embedded systems where workqueue scheduling can stall).
+ */
+static void bam_dmux_rx_poll_timer_fn(struct timer_list *t)
+{
+	struct bam_dmux *dmux = container_of(t, struct bam_dmux, rx_poll_timer);
+	static unsigned int poll_count;
+	enum dma_status status;
+
+	if (!dmux->rx || !dmux->pc_state) {
+		dev_info(dmux->dev, "rx_poll[%u]: skip rx=%p pc_state=%d\n",
+			 poll_count, dmux->rx, dmux->pc_state);
+		/* Re-arm even on skip — pc_state may be set momentarily */
+		if (dmux->rx)
+			mod_timer(&dmux->rx_poll_timer,
+				  jiffies + msecs_to_jiffies(5));
+		return;
+	}
+
+	status = dmaengine_tx_status(dmux->rx, 0, NULL);
+
+	if (poll_count < 20 || !(poll_count % 5000))
+		dev_info(dmux->dev, "rx_poll[%u]: tx_status=%d\n",
+			 poll_count, status);
+	poll_count++;
+
+	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
+}
+
+/**
+ * bam_dmux_remote_ready_irq - Modem has set SMDINIT, indicating it is ready
+ *
+ * This replaces the fixed 30-second delay with a deterministic trigger.
+ * The downstream kernel used smsm_state_cb_register() to watch for this
+ * same transition.
+ */
 static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 {
 	struct bam_dmux *dmux = data;
 
 	dev_info(dmux->dev, "remote ready (SMDINIT), scheduling boot_work\n");
+
+	/*
+	 * The modem's A2/BAM_DMUX subsystem initializes shortly after
+	 * SMDINIT is set.  On the downstream 3.18 kernel, there's a ~1.5s
+	 * gap between modem SMSM signal and BAM registration.  Use 1s
+	 * delay — long enough for A2 init but short enough to avoid the
+	 * modem timing out its DATA channels.
+	 */
 	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(1000));
 
 	return IRQ_HANDLED;
 }
 
-/* ===== Probe / Remove ===== */
-
 static int bam_dmux_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *bam_node;
 	struct bam_dmux *dmux;
-	struct resource res;
-	int ret, pc_ack_irq, remote_ready_irq;
+	int ret, pc_ack_irq, i;
 	unsigned int bit;
 
 	dmux = devm_kzalloc(dev, sizeof(*dmux), GFP_KERNEL);
@@ -1328,47 +1044,14 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	dmux->dev = dev;
 	platform_set_drvdata(pdev, dmux);
 
-	/*
-	 * Get BAM register base. First try our own "reg" property,
-	 * then fall back to parsing the DMA controller phandle.
-	 */
-	if (of_property_present(dev->of_node, "reg")) {
-		dmux->bam_base = devm_platform_ioremap_resource(pdev, 0);
-		if (IS_ERR(dmux->bam_base))
-			return dev_err_probe(dev, PTR_ERR(dmux->bam_base),
-					     "Failed to map BAM registers\n");
-	} else {
-		bam_node = of_parse_phandle(dev->of_node, "dmas", 0);
-		if (!bam_node)
-			return dev_err_probe(dev, -ENODEV,
-					     "No BAM address source\n");
+	dmux->pc_irq = platform_get_irq_byname(pdev, "pc");
+	if (dmux->pc_irq < 0)
+		return dmux->pc_irq;
 
-		ret = of_address_to_resource(bam_node, 0, &res);
-		if (ret) {
-			of_node_put(bam_node);
-			return dev_err_probe(dev, ret,
-					     "Failed to get BAM resource\n");
-		}
+	pc_ack_irq = platform_get_irq_byname(pdev, "pc-ack");
+	if (pc_ack_irq < 0)
+		return pc_ack_irq;
 
-		/* Get BAM hardware IRQ (GIC SPI 29) from DMA phandle */
-		dmux->bam_irq = irq_of_parse_and_map(bam_node, 0);
-
-		of_node_put(bam_node);
-
-		dmux->bam_base = devm_ioremap(dev, res.start,
-					      resource_size(&res));
-		if (!dmux->bam_base)
-			return dev_err_probe(dev, -ENOMEM,
-					     "Failed to ioremap BAM\n");
-
-		dev_info(dev, "BAM registers from DMA phandle: %pR\n", &res);
-	}
-
-	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
-	if (ret)
-		return ret;
-
-	/* SMSM state handles */
 	dmux->pc = devm_qcom_smem_state_get(dev, "pc", &bit);
 	if (IS_ERR(dmux->pc))
 		return dev_err_probe(dev, PTR_ERR(dmux->pc),
@@ -1381,114 +1064,97 @@ static int bam_dmux_probe(struct platform_device *pdev)
 				     "Failed to get pc-ack state\n");
 	dmux->pc_ack_mask = BIT(bit);
 
-	/* IRQs */
-	dmux->pc_irq = platform_get_irq_byname(pdev, "pc");
-	if (dmux->pc_irq < 0)
-		return dmux->pc_irq;
-
-	pc_ack_irq = platform_get_irq_byname(pdev, "pc-ack");
-	if (pc_ack_irq < 0)
-		return pc_ack_irq;
-
-	/* Allocate descriptor FIFOs */
-	dmux->tx_pipe.pipe_num = BAM_DMUX_TX_PIPE;
-	dmux->tx_pipe.desc_fifo = dma_alloc_coherent(dev, BAM_DESC_FIFO_SIZE,
-						      &dmux->tx_pipe.desc_fifo_phys,
-						      GFP_KERNEL);
-	if (!dmux->tx_pipe.desc_fifo)
-		return -ENOMEM;
-
-	dmux->rx_pipe.pipe_num = BAM_DMUX_RX_PIPE;
-	dmux->rx_pipe.desc_fifo = dma_alloc_coherent(dev, BAM_DESC_FIFO_SIZE,
-						      &dmux->rx_pipe.desc_fifo_phys,
-						      GFP_KERNEL);
-	if (!dmux->rx_pipe.desc_fifo) {
-		ret = -ENOMEM;
-		goto err_free_tx_fifo;
-	}
-
-	memset(dmux->tx_pipe.desc_fifo, 0, BAM_DESC_FIFO_SIZE);
-	memset(dmux->rx_pipe.desc_fifo, 0, BAM_DESC_FIFO_SIZE);
+	init_waitqueue_head(&dmux->pc_wait);
+	init_completion(&dmux->pc_ack_completion);
+	complete_all(&dmux->pc_ack_completion);
 
 	spin_lock_init(&dmux->tx_lock);
+	INIT_WORK(&dmux->tx_wakeup_work, bam_dmux_tx_wakeup_work);
 	INIT_WORK(&dmux->register_netdev_work, bam_dmux_register_netdev_work);
 	INIT_DELAYED_WORK(&dmux->boot_work, bam_dmux_boot_work_fn);
-	timer_setup(&dmux->poll_timer, bam_dmux_poll_timer_fn, 0);
+	timer_setup(&dmux->rx_poll_timer, bam_dmux_rx_poll_timer_fn, 0);
 
-	ret = devm_request_threaded_irq(dev, pc_ack_irq, NULL,
-					bam_dmux_pc_ack_irq,
+	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
+		dmux->rx_skbs[i].dmux = dmux;
+		dmux->tx_skbs[i].dmux = dmux;
+	}
+
+	/* Runtime PM manages our own power vote.
+	 * Note that the RX path may be active even if we are runtime suspended,
+	 * since it is controlled by the remote side.
+	 *
+	 * CRITICAL: Do NOT call pm_runtime_set_active() or
+	 * pm_runtime_get_noresume() here.  The device must start as
+	 * RPM_SUSPENDED so that dma_request_chan() (in boot_work) creates
+	 * device links in DL_STATE_DORMANT without touching the BAM DMA
+	 * controller's pm_runtime.  If the device starts RPM_ACTIVE,
+	 * device_link_add calls pm_runtime_get_sync() on the BAM DMA
+	 * controller, which disrupts the modem's A2 DMA initialization
+	 * and prevents it from asserting SMSM bit 1.
+	 */
+	pm_runtime_set_autosuspend_delay(dev, BAM_DMUX_AUTOSUSPEND_DELAY);
+	pm_runtime_use_autosuspend(dev);
+	pm_runtime_enable(dev);
+
+	ret = devm_request_threaded_irq(dev, pc_ack_irq, NULL, bam_dmux_pc_ack_irq,
 					IRQF_ONESHOT, NULL, dmux);
 	if (ret)
-		goto err_free_rx_fifo;
+		goto err_disable_pm;
 
-	ret = devm_request_threaded_irq(dev, dmux->pc_irq, NULL,
-					bam_dmux_pc_irq,
+	ret = devm_request_threaded_irq(dev, dmux->pc_irq, NULL, bam_dmux_pc_irq,
 					IRQF_ONESHOT, NULL, dmux);
 	if (ret)
-		goto err_free_rx_fifo;
+		goto err_disable_pm;
 
 	ret = irq_get_irqchip_state(dmux->pc_irq, IRQCHIP_STATE_LINE_LEVEL,
 				    &dmux->pc_state);
 	if (ret)
-		goto err_free_rx_fifo;
+		goto err_disable_pm;
 
-	remote_ready_irq = platform_get_irq_byname(pdev, "remote-ready");
-	if (remote_ready_irq > 0) {
-		ret = devm_request_threaded_irq(dev, remote_ready_irq, NULL,
-						bam_dmux_remote_ready_irq,
-						IRQF_ONESHOT, NULL, dmux);
-		if (ret)
-			dev_warn(dev,
-				 "failed to request remote-ready IRQ: %d\n",
-				 ret);
+	/* Register remote-ready IRQ (modem SMDINIT) for APPS-initiates mode */
+	{
+		int remote_ready_irq = platform_get_irq_byname(pdev, "remote-ready");
+
+		if (remote_ready_irq > 0) {
+			ret = devm_request_threaded_irq(dev, remote_ready_irq, NULL,
+							bam_dmux_remote_ready_irq,
+							IRQF_ONESHOT, NULL, dmux);
+			if (ret)
+				dev_warn(dev, "failed to request remote-ready IRQ: %d\n", ret);
+		}
 	}
 
-	/*
-	 * Request BAM hardware interrupt (GIC SPI 29).
-	 * Downstream SPS framework handles this to clear P_IRQ_STTS.
-	 * Without it, pending BAM interrupts are never acknowledged.
-	 */
-	if (dmux->bam_irq > 0) {
-		ret = devm_request_irq(dev, dmux->bam_irq, bam_dmux_bam_isr,
-				       IRQF_TRIGGER_HIGH, "bam_dmux_bam", dmux);
-		if (ret)
-			dev_warn(dev, "failed to request BAM IRQ %d: %d\n",
-				 dmux->bam_irq, ret);
-		else
-			dev_info(dev, "BAM IRQ %d registered\n", dmux->bam_irq);
-	}
+	dev_info(dev, "probe complete: pc_state=%d pc_irq=%d\n",
+		 dmux->pc_state, dmux->pc_irq);
 
-	dev_info(dev, "probe complete: pc_state=%d bam_base=%p bam_irq=%d\n",
-		 dmux->pc_state, dmux->bam_base, dmux->bam_irq);
-
+	/* Check if remote finished initialization before us */
 	if (dmux->pc_state) {
-		dev_info(dev, "modem already powered, initializing\n");
-		bam_dmux_hw_init(dmux);
-		mod_timer(&dmux->poll_timer, jiffies + msecs_to_jiffies(1));
+		dev_info(dev, "remote already powered on, initializing\n");
+		if (bam_dmux_power_on(dmux)) {
+			bam_dmux_pc_ack(dmux);
+			dma_async_issue_pending(dmux->rx);
+		} else
+			bam_dmux_power_off(dmux);
 	}
 
 	return 0;
 
-err_free_rx_fifo:
-	dma_free_coherent(dev, BAM_DESC_FIFO_SIZE,
-			   dmux->rx_pipe.desc_fifo,
-			   dmux->rx_pipe.desc_fifo_phys);
-err_free_tx_fifo:
-	dma_free_coherent(dev, BAM_DESC_FIFO_SIZE,
-			   dmux->tx_pipe.desc_fifo,
-			   dmux->tx_pipe.desc_fifo_phys);
+err_disable_pm:
+	pm_runtime_disable(dev);
+	pm_runtime_dont_use_autosuspend(dev);
 	return ret;
 }
 
 static void bam_dmux_remove(struct platform_device *pdev)
 {
 	struct bam_dmux *dmux = platform_get_drvdata(pdev);
+	struct device *dev = dmux->dev;
 	LIST_HEAD(list);
 	int i;
 
 	cancel_delayed_work_sync(&dmux->boot_work);
-	timer_delete_sync(&dmux->poll_timer);
 
+	/* Unregister network interfaces */
 	cancel_work_sync(&dmux->register_netdev_work);
 	rtnl_lock();
 	for (i = 0; i < BAM_DMUX_NUM_CH; ++i)
@@ -1496,17 +1162,27 @@ static void bam_dmux_remove(struct platform_device *pdev)
 			unregister_netdevice_queue(dmux->netdevs[i], &list);
 	unregister_netdevice_many(&list);
 	rtnl_unlock();
+	cancel_work_sync(&dmux->tx_wakeup_work);
 
+	/* Drop our own power vote */
+	pm_runtime_disable(dev);
+	pm_runtime_dont_use_autosuspend(dev);
+	bam_dmux_runtime_suspend(dev);
+	pm_runtime_set_suspended(dev);
+
+	/* Try to wait for remote side to drop power vote */
+	if (!wait_event_timeout(dmux->pc_wait, !dmux->rx, BAM_DMUX_REMOTE_TIMEOUT))
+		dev_err(dev, "Timed out waiting for remote side to suspend\n");
+
+	/* Make sure everything is cleaned up before we return */
 	disable_irq(dmux->pc_irq);
-	bam_dmux_hw_deinit(dmux);
-
-	dma_free_coherent(dmux->dev, BAM_DESC_FIFO_SIZE,
-			   dmux->rx_pipe.desc_fifo,
-			   dmux->rx_pipe.desc_fifo_phys);
-	dma_free_coherent(dmux->dev, BAM_DESC_FIFO_SIZE,
-			   dmux->tx_pipe.desc_fifo,
-			   dmux->tx_pipe.desc_fifo_phys);
+	bam_dmux_power_off(dmux);
+	bam_dmux_free_skbs(dmux->tx_skbs, DMA_TO_DEVICE);
 }
+
+static const struct dev_pm_ops bam_dmux_pm_ops = {
+	SET_RUNTIME_PM_OPS(bam_dmux_runtime_suspend, bam_dmux_runtime_resume, NULL)
+};
 
 static const struct of_device_id bam_dmux_of_match[] = {
 	{ .compatible = "qcom,bam-dmux" },
@@ -1519,11 +1195,12 @@ static struct platform_driver bam_dmux_driver = {
 	.remove = bam_dmux_remove,
 	.driver = {
 		.name = "bam-dmux",
+		.pm = &bam_dmux_pm_ops,
 		.of_match_table = bam_dmux_of_match,
 	},
 };
 module_platform_driver(bam_dmux_driver);
 
 MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("Qualcomm BAM-DMUX WWAN Network Driver (direct BAM access)");
+MODULE_DESCRIPTION("Qualcomm BAM-DMUX WWAN Network Driver");
 MODULE_AUTHOR("Stephan Gerhold <stephan@gerhold.net>");
