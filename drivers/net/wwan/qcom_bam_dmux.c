@@ -930,20 +930,21 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
  *
  * Runs ~1s after modem SMDINIT (SMSM bit 0).
  *
- * The RX DMA channel was already allocated at probe time, which
- * triggered bam_init_powered_remotely() (SW_RST + BAM_EN) well before
- * the modem firmware was loaded (~t=17s).  This is critical: the
- * modem's A2 DMA checks BAM_EN at power-up.  If BAM_EN is already
- * set, the modem uses the existing BAM without doing a BAM-wide
- * SW_RST.  If BAM_EN is NOT set, the modem does its own SW_RST
- * which wipes any APPS pipe configuration.
+ * In the old 3.18 kernel, the modem spontaneously sets its SMSM bit 1
+ * (A2_POWER_CONTROL) after boot, and APPS reacts by doing BAM init +
+ * pipe config in bam_dmux_smsm_cb → bam_init().  APPS never sets its
+ * own bit 1 during initial boot.
  *
- * The old 3.18 kernel's SPS framework registered BAM 0x04044000 at
- * t=23.457s (before modem boot at ~t=28s).  We replicate this by
- * allocating the RX DMA channel at probe time (~t=1.39s).
+ * However, on Quectel OCPU firmware, we set APPS bit 1 here to ensure
+ * the modem's A2 DMA powers up.  The actual BAM init + pipe config is
+ * deferred to pc_irq (when modem responds with its own bit 1).
  *
- * Pipe configuration is deferred to pc_irq (when modem sets bit 1)
- * to match the old kernel's sps_connect() sequence.
+ * IMPORTANT: Do NOT call dma_request_chan() here or at probe time.
+ * The BAM hardware at 0x04044000 is powered by the modem subsystem.
+ * Until the modem firmware is loaded and running (~t=17s), the BAM
+ * registers are physically inaccessible and any access causes an
+ * external abort.  dma_request_chan() is called in pc_irq → power_on,
+ * after the modem has set bit 1 (confirming BAM hardware is accessible).
  *
  * Also pre-registers netdevs (wwan0-7) since the Quectel OCPU firmware
  * never sends CMD_OPEN packets.
@@ -957,8 +958,8 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 
 	/*
 	 * Set APPS bit 1 — tells the modem to power up A2 DMA.
-	 * BAM_EN was already set at probe time, so the modem's A2 will
-	 * find the BAM enabled and skip its own SW_RST.
+	 * The modem will respond by setting its own bit 1, which
+	 * triggers pc_irq where we do BAM init + pipe config.
 	 */
 	bam_dmux_pc_vote(dmux, true);
 	dev_info(dmux->dev, "boot_work: APPS bit 1 set, waiting for modem\n");
@@ -1084,47 +1085,34 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	 *
 	 * CRITICAL: Do NOT call pm_runtime_set_active() or
 	 * pm_runtime_get_noresume() here.  The device must start as
-	 * RPM_SUSPENDED so that dma_request_chan() creates device links
-	 * in DL_STATE_DORMANT without touching the BAM DMA controller's
-	 * pm_runtime.
+	 * RPM_SUSPENDED so that dma_request_chan() (deferred to pc_irq)
+	 * creates device links in DL_STATE_DORMANT without touching
+	 * the BAM DMA controller's pm_runtime.
+	 *
+	 * Do NOT call dma_request_chan() here either.  The BAM hardware
+	 * at 0x04044000 is powered by the modem subsystem and its
+	 * registers are physically inaccessible until the modem firmware
+	 * is loaded (~t=17s).  Any register access before that causes
+	 * an external abort.
 	 */
 	pm_runtime_set_autosuspend_delay(dev, BAM_DMUX_AUTOSUSPEND_DELAY);
 	pm_runtime_use_autosuspend(dev);
 	pm_runtime_enable(dev);
 
-	/*
-	 * Allocate RX DMA channel early — triggers bam_init_powered_remotely()
-	 * (SW_RST + BAM_EN) well before the modem firmware loads (~t=17s).
-	 *
-	 * The old 3.18 kernel's SPS framework registered BAM 0x04044000 at
-	 * t=23.457s, before the modem Q6 firmware started.  The modem's A2
-	 * DMA checks BAM_EN at power-up: if set, it uses the existing BAM
-	 * without doing a BAM-wide SW_RST.  If we defer this to boot_work
-	 * (after modem SMDINIT at ~t=28s), the modem's A2 does its own
-	 * SW_RST which wipes all APPS configuration.
-	 */
-	dmux->rx = dma_request_chan(dev, "rx");
-	if (IS_ERR(dmux->rx)) {
-		ret = PTR_ERR(dmux->rx);
-		dmux->rx = NULL;
-		dev_err(dev, "Failed to request RX DMA channel early: %d\n", ret);
-		goto err_disable_pm;
-	}
-
 	ret = devm_request_threaded_irq(dev, pc_ack_irq, NULL, bam_dmux_pc_ack_irq,
 					IRQF_ONESHOT, NULL, dmux);
 	if (ret)
-		goto err_release_rx;
+		goto err_disable_pm;
 
 	ret = devm_request_threaded_irq(dev, dmux->pc_irq, NULL, bam_dmux_pc_irq,
 					IRQF_ONESHOT, NULL, dmux);
 	if (ret)
-		goto err_release_rx;
+		goto err_disable_pm;
 
 	ret = irq_get_irqchip_state(dmux->pc_irq, IRQCHIP_STATE_LINE_LEVEL,
 				    &dmux->pc_state);
 	if (ret)
-		goto err_release_rx;
+		goto err_disable_pm;
 
 	/* Register remote-ready IRQ (modem SMDINIT) for APPS-initiates mode */
 	{
@@ -1154,9 +1142,6 @@ static int bam_dmux_probe(struct platform_device *pdev)
 
 	return 0;
 
-err_release_rx:
-	dma_release_channel(dmux->rx);
-	dmux->rx = NULL;
 err_disable_pm:
 	pm_runtime_disable(dev);
 	pm_runtime_dont_use_autosuspend(dev);
