@@ -801,32 +801,45 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state && !dmux->pc_state) {
 		/*
-		 * Modem asserted A2_POWER_CONTROL (bit 1) — either
-		 * spontaneously during boot, or in response to us
-		 * setting APPS bit 1 in boot_work.  Either way, proceed
-		 * with BAM init + pipe config + ACK.
+		 * Modem asserted A2_POWER_CONTROL (bit 1) — this means
+		 * the modem's a2_subsystem_boot() completed and its A2
+		 * DMA engine + BAM pipes are initialized.
 		 *
-		 * DMA channel allocation and BAM init (SW_RST + BAM_EN)
-		 * happen here via dma_request_chan() inside power_on().
-		 * The modem has already set bit 1, confirming the BAM
-		 * hardware is powered and accessible.
+		 * Match old 3.18 kernel bam_init() sequence exactly:
+		 *   1. sps_register_bam_device (BAM init)
+		 *   2. sps_connect(TX pipe 4)
+		 *   3. sps_connect(RX pipe 5)
+		 *   4. toggle_apps_ack() — XOR bit 11 in APPS_STATE
+		 *   5. complete(bam_connection_completion)
+		 *   6. queue_rx() — 32 RX descriptors + doorbell
+		 *
+		 * CRITICAL: The old kernel does NOT set APPS bit 1 here.
+		 * It only toggles ACK (bit 11).  Setting APPS bit 1
+		 * triggers a2_apps_smsm_callback which is a SEPARATE
+		 * power management path that prematurely sets
+		 * apps_bam_link_ready=true without proper pipe init.
+		 *
+		 * After pipe setup + ACK, the modem's
+		 * a2_apps_smsm_ack_callback fires and confirms the link.
+		 * Then CMD_OPEN triggers data flow.
 		 */
 		if (!dmux->tx) {
-			dev_info(dmux->dev, "pc_irq: configuring pipes\n");
+			dev_info(dmux->dev, "pc_irq: modem A2 ready, configuring pipes\n");
 			if (!bam_dmux_power_on(dmux)) {
 				dev_err(dmux->dev, "pc_irq: power_on failed\n");
 				bam_dmux_power_off(dmux);
 				goto out;
 			}
 			/*
-			 * Match old 3.18 kernel bam_init() sequence:
-			 *   1. BAM register + pipe config (done in power_on)
-			 *   2. toggle_apps_ack (ACK = bit 11)
-			 *   3. queue_rx (issue_pending = doorbell)
-			 *   4. CMD_OPEN (issue_pending(TX) = doorbell)
-			 * The modem expects ACK before data flow.
+			 * Step 4: toggle_apps_ack (ACK = bit 11).
+			 * Do NOT set APPS bit 1 — matching old kernel.
+			 * The modem sees ACK toggle → confirms link ready.
 			 */
 			bam_dmux_pc_ack(dmux);
+			dev_info(dmux->dev,
+				 "pc_irq: ACK toggled (bit 11)\n");
+
+			/* Step 6: queue_rx — issue pending RX + TX */
 			dma_async_issue_pending(dmux->rx);
 			if (dmux->cmd_open_queued) {
 				pm_runtime_get_noresume(dmux->dev);
@@ -837,11 +850,8 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			}
 			mod_timer(&dmux->rx_poll_timer,
 				  jiffies + msecs_to_jiffies(1));
-			bam_dmux_pc_vote(dmux, true);
-			dev_info(dmux->dev,
-				 "pc_irq: ACK sent, APPS bit 1 set\n");
 		} else {
-			dev_info(dmux->dev, "pc_irq: pipes ready (boot_work)\n");
+			dev_info(dmux->dev, "pc_irq: pipes already configured\n");
 		}
 
 		dmux->pc_state = new_state;
@@ -981,24 +991,30 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 }
 
 /**
- * bam_dmux_boot_work_fn() - register netdevs and trigger A2 init.
+ * bam_dmux_boot_work_fn() - register netdevs and wait for modem A2.
  *
  * Runs ~1s after modem SMDINIT (SMSM bit 0).
  *
- * The modem's A2 subsystem depends on seeing APPS set
- * SMSM_A2_POWER_CONTROL (bit 1) in SMSM_APPS_STATE.  In the old 3.18
- * kernel, the modem set its own bit 1 spontaneously during RCINIT boot.
- * However, our SMSM driver pre-sets INIT|SMDINIT|RPCINIT|PROC_AWAKE in
- * APPS state at probe time (before the modem boots).  When the modem
- * initializes its SMSM, it caches the APPS state as 0x1029.  Later,
- * when we kick the modem back, it computes changed = 0x1029 ^ 0x1029 = 0
- * and dispatches no callbacks.  If any modem service needed an SMSM
- * transition callback to gate A2 init, the modem would be stuck.
+ * The modem's A2 subsystem initializes independently during its RCINIT
+ * boot sequence (a2_subsystem_boot).  At the end of that init, the modem
+ * sets SMSM_A2_POWER_CONTROL (bit 1) in SMSM_MODEM_STATE to announce:
+ * "my A2 DMA engine and BAM pipes are ready."
  *
- * The fix: explicitly set APPS bit 1 here to trigger the modem's
- * a2_apps_smsm_callback, which votes A2 on, sets modem's bit 1,
- * and toggles ACK.  Our pc_irq fires on the modem's bit 1 transition
- * and does the full pipe init + ACK sequence.
+ * The downstream 3.18 kernel's bam_dmux driver registers a callback on
+ * MODEM_STATE bit 1 and WAITS for the modem to set it.  When the modem
+ * does, the callback fires and runs bam_init() → pipe config → ACK toggle
+ * → queue_rx.  The old kernel NEVER sets APPS bit 1 during initial setup
+ * — only later during UL wakeup (power_vote).
+ *
+ * Previously we tried setting APPS bit 1 proactively here to trigger the
+ * modem's a2_apps_smsm_callback.  But that callback is a SEPARATE power
+ * management path — it votes A2 power on and sets apps_bam_link_ready,
+ * but does NOT initialize the modem's BAM pipes for the APPS direction.
+ * Result: modem never writes to RX pipe 5 (P_SW_OFSTS stuck at 0).
+ *
+ * Fix: match the old kernel — just register netdevs and wait.  The modem
+ * will set MODEM bit 1 on its own during a2_subsystem_boot(), which fires
+ * our pc_irq → pipe init → ACK toggle → queue_rx.
  *
  * IMPORTANT: Do NOT call dma_request_chan() here or at probe time.
  * The BAM hardware at 0x04044000 is powered by the modem subsystem.
@@ -1021,12 +1037,12 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	schedule_work(&dmux->register_netdev_work);
 
 	/*
-	 * Request A2 power from the modem by setting APPS bit 1.
-	 * The modem's a2_apps_smsm_callback will respond by setting
-	 * modem bit 1, which triggers our pc_irq → full BAM init.
+	 * Do NOT set APPS bit 1 here.  Wait for the modem to set MODEM
+	 * bit 1 independently via a2_subsystem_boot().  This typically
+	 * happens a few seconds after SMDINIT.  Our pc_irq will fire
+	 * when the modem sets bit 1, and handle pipe init + ACK there.
 	 */
-	dev_info(dmux->dev, "boot_work: requesting A2 power (setting APPS bit 1)\n");
-	bam_dmux_pc_vote(dmux, true);
+	dev_info(dmux->dev, "boot_work: netdevs registered, waiting for modem A2 init (MODEM bit 1)\n");
 }
 
 /**
