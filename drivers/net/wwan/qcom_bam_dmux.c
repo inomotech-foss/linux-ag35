@@ -270,47 +270,59 @@ static void bam_dmux_pc_ack(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * BAM Hardware Init — NO SW_RST (modem owns BAM)
+ * BAM Hardware Init — matching downstream SPS bam_init() exactly
  *
- * The modem firmware initializes the BAM during a2_bam_init() at boot.
- * It configures pipe 5 (modem TX) once and never re-initializes.
- * SW_RST from APPS side wipes the modem's pipe config, breaking pipe 5.
+ * Downstream 3.18 kernel (satellite_mode=0) does:
+ *   1. SW_RST (set bit 0, then clear it)
+ *   2. BAM_EN (set bit 1)
+ *   3. CACHE_MISS_ERR_RESP_EN = 0 (clear bit 19)
+ *   4. LOCAL_CLK_GATING = 1 (set bits 18:17 to 01 → bit 17 set)
+ *   5. DESC_CNT_TRSHLD = 0x1000 (A2_SUMMING_THRESHOLD)
+ *   6. CNFG_BITS = 0xFFFFF7FF (all set except bit 11)
+ *   7. IRQ_SRCS_MSK_EE: set BAM_IRQ bit (bit 31)
+ *   8. IRQ_EN = 0x16 (TIMER | ERROR | HRESP_ERR)
  *
- * The working 3.18 kernel's register dump shows:
- *   BAM_CTRL=0x00020002  (bit 17 + BAM_EN — set by modem)
- *   BAM_IRQ_EN=0x16  IRQ_SRCS_MSK_EE(0)=0x80000030
- *
- * We only set BAM_EN (in case modem hasn't yet), IRQ registers, and
- * DESC_CNT_TRSHLD.  Per-pipe IRQ bits are added in bam_pipe_hw_init().
+ * Result: BAM_CTRL = 0x00020002 (matching working 3.18 register dump)
  * ────────────────────────────────────────────────────────────────────────── */
+
+/* BAM_CTRL field masks (NDP BAM) */
+#define BAM_CACHE_MISS_ERR_RESP_EN	BIT(19)
+#define BAM_LOCAL_CLK_GATING_MASK	(BIT(18) | BIT(17))
 
 static void bam_hw_init(struct bam_dmux *dmux)
 {
 	u32 val;
 
-	val = bam_readl(dmux, BAM_CTRL);
-	dev_info(dmux->dev, "bam_hw_init: BAM_CTRL=0x%08x\n", val);
+	dev_info(dmux->dev, "bam_hw_init: PRE BAM_CTRL=0x%08x\n",
+		 bam_readl(dmux, BAM_CTRL));
 
-	/* Ensure BAM is enabled (don't reset — modem owns BAM state) */
-	if (!(val & BAM_EN)) {
-		val |= BAM_EN;
-		bam_writel(dmux, BAM_CTRL, val);
-	}
+	/* Step 1: Software reset — clear all BAM state */
+	bam_writel(dmux, BAM_CTRL, BAM_SW_RST);
+	bam_writel(dmux, BAM_CTRL, 0);
 
-	/* Descriptor count threshold (matching working 3.18: 0x1000) */
+	/* Step 2+3+4: Enable BAM + set CTRL fields in one write */
+	val = BAM_EN | BIT(17);  /* BAM_EN + LOCAL_CLK_GATING=1 */
+	/* CACHE_MISS_ERR_RESP_EN (bit 19) left clear */
+	bam_writel(dmux, BAM_CTRL, val);
+
+	/* Step 5: Descriptor count threshold */
 	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, 0x1000);
 
-	/* BAM-level IRQ enable (matching working 3.18: 0x16) */
+	/* Step 6: Config bits (all workarounds on except BAM_FULL_PIPE) */
+	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
+
+	/* Step 7: Global IRQ mask for EE 0 — set BAM_IRQ bit */
+	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
+
+	/* Step 8: BAM-level IRQ enable */
 	bam_writel(dmux, BAM_IRQ_EN,
 		   BAM_IRQ_TIMER_EN | BAM_IRQ_ERROR_EN | BAM_IRQ_HRESP_ERR_EN);
 
-	/* Global IRQ mask for EE 0 (pipe bits added in pipe_init) */
-	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
-
 	dev_info(dmux->dev,
-		 "bam_hw_init: POST BAM_CTRL=0x%08x IRQ_EN=0x%08x "
-		 "IRQ_SRCS_MSK=0x%08x DESC_CNT=0x%08x\n",
+		 "bam_hw_init: POST BAM_CTRL=0x%08x CNFG=0x%08x "
+		 "IRQ_EN=0x%08x IRQ_SRCS_MSK=0x%08x DESC_CNT=0x%08x\n",
 		 bam_readl(dmux, BAM_CTRL),
+		 bam_readl(dmux, BAM_CNFG_BITS),
 		 bam_readl(dmux, BAM_IRQ_EN),
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)),
 		 bam_readl(dmux, BAM_DESC_CNT_TRSHLD));
@@ -1048,7 +1060,7 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 {
 	int i, ret;
 
-	/* Step 1: BAM hardware init (BAM_EN + IRQ, no SW_RST) */
+	/* Step 1: Full BAM hardware init (SW_RST + BAM_EN + CNFG + IRQ) */
 	bam_hw_init(dmux);
 
 	/* Step 2: Initialize TX pipe (pipe 4, consumer) */
@@ -1129,18 +1141,20 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 /* ──────────────────────────────────────────────────────────────────────────
  * SMSM IRQ Handlers + Boot Sequence
  *
- * Boot sequence:
+ * Matching downstream 3.18 bam_dmux.c exactly:
+ *
  *   1. remote-ready IRQ fires (modem set SMDINIT)
  *   2. boot_work runs after 1s delay:
- *      a. BAM init (BAM_EN + IRQ, NO SW_RST — modem owns BAM)
- *      b. Pipe init (P_RST + config) + queue RX descriptors
- *      c. Ring RX doorbell
- *      d. Set APPS bit 1 (signal modem)
- *   3. Modem responds: sets MODEM bit 1
- *   4. pc_irq fires:
- *      a. Toggle ACK (modem sends CMD_OPEN after receiving this)
- *      b. Re-ring RX doorbell
- *      c. Start poll timer
+ *      a. Register netdevs
+ *      b. Set APPS A2_POWER_CONTROL (bit 1) — request modem power up
+ *      c. NO BAM init here — just signal the modem
+ *   3. Modem responds: sets MODEM A2_POWER_CONTROL (bit 1)
+ *   4. pc_irq fires (matching downstream bam_dmux_smsm_cb):
+ *      a. Full BAM init (SW_RST + BAM_EN + CNFG + IRQ)
+ *      b. Pipe init (P_RST + config for pipes 4 & 5)
+ *      c. Toggle ACK (downstream does this BEFORE queue_rx)
+ *      d. Queue RX descriptors + ring doorbell
+ *      e. Start poll timer
  *   5. Modem receives ACK → sends CMD_OPEN on pipe 5
  *   6. Poll timer detects CMD_OPEN, opens channels
  *   7. ndo_open sends CMD_OPEN back to modem
@@ -1162,25 +1176,34 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	if (new_state && !dmux->pc_state) {
 		/*
 		 * Modem set A2_POWER_CONTROL (bit 1).
-		 * BAM should already be initialized by boot_work.
-		 * ACK the modem — it sends CMD_OPEN after receiving this.
+		 * This matches downstream bam_dmux_smsm_cb "init" path.
+		 *
+		 * Do full BAM init HERE (not in boot_work), because the
+		 * modem has already initialized its side of the BAM and
+		 * is ready for us.
 		 */
-		dev_info(dmux->dev, "pc_irq: modem powered up\n");
+		dev_info(dmux->dev, "pc_irq: modem powered up, initializing BAM\n");
 
+		if (!bam_dmux_power_on(dmux)) {
+			dev_err(dmux->dev, "pc_irq: power_on failed\n");
+			bam_dmux_power_off(dmux);
+			goto out;
+		}
+
+		/*
+		 * Downstream does toggle_apps_ack() BEFORE queue_rx().
+		 * The modem needs to see the ACK before it starts sending
+		 * CMD_OPEN on pipe 5.
+		 */
 		bam_dmux_pc_ack(dmux);
 		dev_info(dmux->dev, "pc_irq: ACK toggled\n");
 
-		if (dmux->pipes_active) {
-			/* Re-ring RX doorbell */
-			bam_pipe_doorbell(dmux, &dmux->rx_pipe);
+		/* Now queue RX and ring doorbell (after ACK) */
+		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 
-			/* Start polling if not already running */
-			mod_timer(&dmux->rx_poll_timer,
-				  jiffies + msecs_to_jiffies(1));
-		} else {
-			dev_warn(dmux->dev,
-				 "pc_irq: pipes not active yet!\n");
-		}
+		/* Start polling */
+		mod_timer(&dmux->rx_poll_timer,
+			  jiffies + msecs_to_jiffies(1));
 
 		dmux->pc_state = new_state;
 
@@ -1268,35 +1291,12 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	schedule_work(&dmux->register_netdev_work);
 
 	/*
-	 * Downstream sequence (from bam_init() in 3.18 bam_dmux.c):
-	 *   1. BAM init (BAM_EN + IRQ setup, NO SW_RST — modem owns BAM)
-	 *   2. Pipe init (P_RST + config)
-	 *   3. Queue RX buffers + ring doorbells
-	 *   4. Set APPS bit 1 LAST (after BAM is fully ready)
+	 * Matching downstream: boot_work just signals the modem.
+	 * Full BAM init happens later in pc_irq, AFTER the modem
+	 * responds with A2_POWER_CONTROL (bit 1).
 	 *
-	 * The key insight: BAM must be fully initialized with RX buffers
-	 * queued BEFORE we signal the modem.  Otherwise the modem tries
-	 * to send CMD_OPEN on pipe 5 before our RX pipe is ready.
-	 */
-	dev_info(dmux->dev, "boot_work: initializing BAM\n");
-	if (!bam_dmux_power_on(dmux)) {
-		dev_err(dmux->dev, "boot_work: power_on failed\n");
-		bam_dmux_power_off(dmux);
-		return;
-	}
-
-	/* Ring RX doorbell (modem needs to see available buffers) */
-	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
-	dev_info(dmux->dev, "boot_work: RX doorbell rung\n");
-
-	/*
-	 * Signal the modem.  BAM + pipes are ready for its response.
-	 * The modem will set MODEM bit 1 → pc_irq fires.
-	 * pc_irq toggles ACK → modem sends CMD_OPEN on pipe 5.
-	 *
-	 * Do NOT toggle ACK here — ACK must be in response to the
-	 * modem's state change.  Premature ACK desynchronizes the
-	 * toggle protocol and prevents modem from sending CMD_OPEN.
+	 * This is critical: the modem must have fully initialized
+	 * its BAM before we do SW_RST + pipe config.
 	 */
 	dev_info(dmux->dev,
 		 "boot_work: requesting A2 power (setting APPS bit 1)\n");
