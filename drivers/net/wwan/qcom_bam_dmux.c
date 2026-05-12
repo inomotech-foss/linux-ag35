@@ -744,34 +744,25 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state && !dmux->pc_state) {
 		/*
-		 * Modem asserted A2_POWER_CONTROL — modem has finished its
-		 * own BAM SW_RST.  Now do full BAM init: our configuration
-		 * will persist since the modem won't reset again.
-		 *
-		 * Always re-init regardless of software state.  If boot_work
-		 * had set up pipes before APPS bit 1, the modem's SW_RST
-		 * wiped the hardware even though our sw pointers are stale.
+		 * Modem asserted A2_POWER_CONTROL (responded to our bit 1).
+		 * boot_work already configured pipes + submitted descriptors.
+		 * If boot_work didn't finish (shouldn't happen), do full init.
 		 */
-		if (dmux->tx || dmux->rx) {
-			dev_info(dmux->dev, "pc_irq: cleaning up stale DMA state\n");
-			bam_dmux_power_off(dmux);
+		if (!dmux->tx) {
+			dev_info(dmux->dev, "pc_irq: full init (boot_work incomplete)\n");
+			if (!bam_dmux_power_on(dmux)) {
+				dev_err(dmux->dev, "pc_irq: power_on failed\n");
+				bam_dmux_power_off(dmux);
+				goto out;
+			}
+			bam_dmux_pc_ack(dmux);
+			dma_async_issue_pending(dmux->rx);
+			mod_timer(&dmux->rx_poll_timer,
+				  jiffies + msecs_to_jiffies(1));
+			bam_dmux_pc_vote(dmux, true);
+		} else {
+			dev_info(dmux->dev, "pc_irq: pipes ready (boot_work)\n");
 		}
-
-		dev_info(dmux->dev, "pc_irq: full BAM init (modem ready)\n");
-		if (!bam_dmux_power_on(dmux)) {
-			dev_err(dmux->dev, "pc_irq: power_on failed\n");
-			bam_dmux_power_off(dmux);
-			goto out;
-		}
-
-		/* Toggle ACK to signal modem that APPS has configured pipes */
-		bam_dmux_pc_ack(dmux);
-
-		/* Write RX doorbell */
-		dma_async_issue_pending(dmux->rx);
-
-		/* Start poll timer */
-		mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
 
 		dmux->pc_state = new_state;
 
@@ -932,38 +923,72 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 }
 
 /**
- * bam_dmux_boot_work_fn() - trigger modem A2 power-up via APPS SMSM bit 1.
+ * bam_dmux_boot_work_fn() - initialize BAM, set APPS bit 1, register netdevs.
  *
  * Runs ~1s after modem SMDINIT (SMSM bit 0).
  *
- * On MDM9607 with Quectel OCPU firmware, the modem does NOT set its
- * SMSM bit 1 independently — it waits for APPS to set bit 1 first.
- * When the modem sees APPS bit 1, it powers on A2 and performs a BAM
- * SW_RST, wiping any prior BAM configuration.
+ * CRITICAL ORDERING — do everything BEFORE setting APPS SMSM bit 1:
  *
- * Therefore, we must NOT configure the BAM here.  We only:
- *   1. Toggle ACK (APPS bit 11)
- *   2. Set APPS bit 1 to trigger modem's A2 power-up
- *   3. Pre-register netdevs
+ *   1. SW_RST + BAM_EN    (dma_request_chan triggers bam_init_powered_remotely)
+ *   2. Configure pipe 4+5  (bam_dmux_power_on → prep descriptors → bam_chan_init_hw)
+ *   3. Submit RX descriptors + doorbell
+ *   4. Toggle ACK (APPS bit 11)
+ *   5. Set APPS bit 1       ← modem's A2 DMA wakes up HERE
  *
- * The actual BAM init (SW_RST + pipes + descriptors) happens in pc_irq
- * AFTER the modem responds with modem bit 1, meaning the modem's own
- * SW_RST has completed and our init will persist.
+ * The modem's a2_apps_smsm_callback fires on APPS bit 1: it powers on
+ * A2 hardware and sets apps_bam_link_ready=true.  If BAM pipes are not
+ * yet configured when A2 powers on, the modem's A2 DMA finds empty
+ * pipes and data transfer never starts — the A2 DMA does NOT re-scan
+ * pipes later.
+ *
+ * Also pre-registers netdevs (wwan0-7) since the Quectel OCPU firmware
+ * never sends CMD_OPEN packets.
  */
 static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux, boot_work.work);
+	struct dma_chan *ch;
 
 	if (dmux->pc_state)
 		return;
 
-	dev_info(dmux->dev, "boot_work: triggering modem A2 power-up\n");
+	dev_info(dmux->dev, "boot_work: initializing BAM\n");
 
-	/* Set APPS bit 1 — modem will respond with modem bit 1 */
+	/* Step 1: SW_RST + BAM_EN via first DMA channel allocation */
+	ch = dma_request_chan(dmux->dev, "rx");
+	if (IS_ERR(ch)) {
+		dev_err(dmux->dev, "boot_work: RX DMA request failed: %pe\n", ch);
+		schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(500));
+		return;
+	}
+	dmux->rx = ch;
+	dev_info(dmux->dev, "boot_work: BAM_EN set\n");
+
+	/* Step 2: Configure pipes + submit RX descriptors */
+	if (!bam_dmux_power_on(dmux)) {
+		dev_err(dmux->dev, "boot_work: power_on failed\n");
+		bam_dmux_power_off(dmux);
+		return;
+	}
+	dev_info(dmux->dev, "boot_work: pipes configured + RX descs submitted\n");
+
+	/* Step 3: Toggle ACK (APPS bit 11) */
+	bam_dmux_pc_ack(dmux);
+
+	/* Step 4: Write RX doorbell */
+	dma_async_issue_pending(dmux->rx);
+
+	/* Step 5: Start poll timer (BAM IRQ blocked by TZ) */
+	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
+
+	/*
+	 * Step 6: Set APPS bit 1 LAST.
+	 * Everything is ready — pipes configured, descriptors posted,
+	 * doorbell written, ACK toggled.  Now wake the modem's A2 DMA.
+	 */
 	bam_dmux_pc_vote(dmux, true);
 	dev_info(dmux->dev, "boot_work: APPS bit 1 set, waiting for modem\n");
 
-	/* Pre-register netdevs (Quectel firmware doesn't send CMD_OPEN) */
 	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
 	schedule_work(&dmux->register_netdev_work);
 }
