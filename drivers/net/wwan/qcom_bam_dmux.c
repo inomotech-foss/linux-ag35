@@ -300,18 +300,18 @@ static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 		/* Step 1: Software reset — clear all BAM state */
 		bam_writel(dmux, BAM_CTRL, BAM_SW_RST);
 		bam_writel(dmux, BAM_CTRL, 0);
-
-		/* Step 2+3+4: Enable BAM + set CTRL fields in one write */
-		val = BAM_EN | BIT(17);  /* BAM_EN + LOCAL_CLK_GATING=1 */
-		/* CACHE_MISS_ERR_RESP_EN (bit 19) left clear */
-		bam_writel(dmux, BAM_CTRL, val);
-
-		/* Step 5: Descriptor count threshold */
-		bam_writel(dmux, BAM_DESC_CNT_TRSHLD, 0x1000);
-
-		/* Step 6: Config bits */
-		bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
 	}
+
+	/* Step 2+3+4: Enable BAM + set CTRL fields */
+	val = BAM_EN | BIT(17);  /* BAM_EN + LOCAL_CLK_GATING=1 */
+	/* CACHE_MISS_ERR_RESP_EN (bit 19) left clear */
+	bam_writel(dmux, BAM_CTRL, val);
+
+	/* Step 5: Descriptor count threshold */
+	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, 0x1000);
+
+	/* Step 6: Config bits */
+	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
 
 	/* Step 7: Global IRQ mask for EE 0 — set BAM_IRQ bit */
 	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
