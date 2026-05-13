@@ -289,27 +289,29 @@ static void bam_dmux_pc_ack(struct bam_dmux *dmux)
 #define BAM_CACHE_MISS_ERR_RESP_EN	BIT(19)
 #define BAM_LOCAL_CLK_GATING_MASK	(BIT(18) | BIT(17))
 
-static void bam_hw_init(struct bam_dmux *dmux)
+static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 {
 	u32 val;
 
-	dev_info(dmux->dev, "bam_hw_init: PRE BAM_CTRL=0x%08x\n",
-		 bam_readl(dmux, BAM_CTRL));
+	dev_info(dmux->dev, "bam_hw_init: PRE BAM_CTRL=0x%08x reset=%d\n",
+		 bam_readl(dmux, BAM_CTRL), do_reset);
 
-	/* Step 1: Software reset — clear all BAM state */
-	bam_writel(dmux, BAM_CTRL, BAM_SW_RST);
-	bam_writel(dmux, BAM_CTRL, 0);
+	if (do_reset) {
+		/* Step 1: Software reset — clear all BAM state */
+		bam_writel(dmux, BAM_CTRL, BAM_SW_RST);
+		bam_writel(dmux, BAM_CTRL, 0);
 
-	/* Step 2+3+4: Enable BAM + set CTRL fields in one write */
-	val = BAM_EN | BIT(17);  /* BAM_EN + LOCAL_CLK_GATING=1 */
-	/* CACHE_MISS_ERR_RESP_EN (bit 19) left clear */
-	bam_writel(dmux, BAM_CTRL, val);
+		/* Step 2+3+4: Enable BAM + set CTRL fields in one write */
+		val = BAM_EN | BIT(17);  /* BAM_EN + LOCAL_CLK_GATING=1 */
+		/* CACHE_MISS_ERR_RESP_EN (bit 19) left clear */
+		bam_writel(dmux, BAM_CTRL, val);
 
-	/* Step 5: Descriptor count threshold */
-	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, 0x1000);
+		/* Step 5: Descriptor count threshold */
+		bam_writel(dmux, BAM_DESC_CNT_TRSHLD, 0x1000);
 
-	/* Step 6: Config bits (all workarounds on except BAM_FULL_PIPE) */
-	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
+		/* Step 6: Config bits */
+		bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
+	}
 
 	/* Step 7: Global IRQ mask for EE 0 — set BAM_IRQ bit */
 	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
@@ -1056,12 +1058,12 @@ static void bam_dmux_register_netdev_work(struct work_struct *work)
  * Power On / Off — full BAM init sequence
  * ────────────────────────────────────────────────────────────────────────── */
 
-static bool bam_dmux_power_on(struct bam_dmux *dmux)
+static bool bam_dmux_power_on(struct bam_dmux *dmux, bool do_reset)
 {
 	int i, ret;
 
-	/* Step 1: Full BAM hardware init (SW_RST + BAM_EN + CNFG + IRQ) */
-	bam_hw_init(dmux);
+	/* Step 1: BAM hardware init (optionally with SW_RST) */
+	bam_hw_init(dmux, do_reset);
 
 	/* Step 2: Initialize TX pipe (pipe 4, consumer) */
 	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe, BAM_DMUX_TX_PIPE, false);
@@ -1184,21 +1186,33 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		 */
 		dev_info(dmux->dev, "pc_irq: modem powered up, initializing BAM\n");
 
-		if (!bam_dmux_power_on(dmux)) {
+		/*
+		 * On initial boot, the modem has already initialized the
+		 * shared BAM via a2_bam_init().  A SW_RST would wipe the
+		 * modem's pipe configuration and DMA state, preventing
+		 * CMD_OPEN from ever arriving.  Skip the reset.
+		 *
+		 * On reconnect (after power-off/on cycle), a full reset
+		 * may be needed, but for now we always skip it since the
+		 * modem re-initializes its side anyway.
+		 */
+		if (!bam_dmux_power_on(dmux, false)) {
 			dev_err(dmux->dev, "pc_irq: power_on failed\n");
 			bam_dmux_power_off(dmux);
 			goto out;
 		}
 
 		/*
-		 * Downstream does toggle_apps_ack() BEFORE queue_rx().
-		 * The modem needs to see the ACK before it starts sending
-		 * CMD_OPEN on pipe 5.
+		 * Toggle APPS ACK to tell modem we're ready.
+		 * Downstream does: pipe init → ACK → queue_rx + doorbell.
+		 * We do: pipe init + queue_rx → ACK → doorbell.
+		 * The modem sees ACK, then we ring the doorbell to make
+		 * the 32 pre-queued RX descriptors visible to hardware.
 		 */
 		bam_dmux_pc_ack(dmux);
 		dev_info(dmux->dev, "pc_irq: ACK toggled\n");
 
-		/* Now queue RX and ring doorbell (after ACK) */
+		/* Ring RX doorbell to make queued descriptors active */
 		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 
 		/* Start polling */
@@ -1284,33 +1298,24 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
 					     boot_work.work);
 
-	/*
-	 * Matching downstream 3.18 kernel: do NOT set APPS bit 1 here.
-	 *
-	 * The downstream kernel never sets APPS A2_POWER_CONTROL during
-	 * initial boot.  It just registers SMSM callbacks and waits for
-	 * the modem to spontaneously set MODEM bit 1 (at the end of
-	 * a2_subsystem_boot()).  APPS bit 1 only gets set later during
-	 * ul_wakeup (when a channel is opened by the network stack).
-	 *
-	 * Setting APPS bit 1 prematurely triggers the modem's
-	 * a2_apps_smsm_callback (power-management wakeup path) before
-	 * a2_subsystem_boot() has completed.  The modem's BAM DMUX
-	 * channels aren't registered yet, so CMD_OPEN is never sent.
-	 * Then our SW_RST in bam_hw_init wipes any BAM state the modem
-	 * had set up, leaving the RX pipe permanently stuck.
-	 *
-	 * Instead, we wait for pc_irq to fire when the modem naturally
-	 * sets bit 1.  CMD_OPEN from the modem will create netdevs.
-	 */
-	if (dmux->pc_state) {
-		dev_info(dmux->dev,
-			 "boot_work: modem already up, initializing BAM\n");
+	if (dmux->pc_state)
 		return;
-	}
 
+	/*
+	 * The Quectel firmware does NOT spontaneously set MODEM bit 1.
+	 * It waits for APPS to set bit 1 first, then responds via
+	 * a2_apps_smsm_callback.  But the modem's a2_subsystem_boot()
+	 * needs time to complete after SMDINIT before we can set bit 1.
+	 * The remote-ready IRQ (SMDINIT) schedules us with a delay to
+	 * ensure the modem's A2 subsystem has finished initialization.
+	 *
+	 * This MUST NOT trigger a BAM SW_RST — the modem has already
+	 * initialized the shared BAM hardware during a2_bam_init().
+	 * BAM init happens later in pc_irq, skipping the SW_RST.
+	 */
 	dev_info(dmux->dev,
-		 "boot_work: waiting for modem to set A2_POWER_CONTROL\n");
+		 "boot_work: requesting A2 power (setting APPS bit 1)\n");
+	bam_dmux_pc_vote(dmux, true);
 }
 
 static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
@@ -1318,7 +1323,8 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 	struct bam_dmux *dmux = data;
 
 	dev_info(dmux->dev,
-		 "remote ready (SMDINIT), waiting for modem A2_POWER_CONTROL\n");
+		 "remote ready (SMDINIT), scheduling boot_work in 1s\n");
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(1000));
 
 	return IRQ_HANDLED;
 }
