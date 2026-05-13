@@ -1284,32 +1284,36 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
 					     boot_work.work);
 
-	if (dmux->pc_state)
-		return;
-
-	bitmap_fill(dmux->remote_channels, BAM_DMUX_NUM_CH);
-	schedule_work(&dmux->register_netdev_work);
-
 	/*
-	 * Matching downstream: boot_work just signals the modem.
-	 * Full BAM init happens later in pc_irq, AFTER the modem
-	 * responds with A2_POWER_CONTROL (bit 1).
+	 * Matching downstream 3.18 kernel: do NOT set APPS bit 1 here.
 	 *
-	 * This is critical: the modem must have fully initialized
-	 * its BAM before we do SW_RST + pipe config.
+	 * The downstream kernel never sets APPS A2_POWER_CONTROL during
+	 * initial boot.  It just registers SMSM callbacks and waits for
+	 * the modem to spontaneously set MODEM bit 1 (at the end of
+	 * a2_subsystem_boot()).  APPS bit 1 only gets set later during
+	 * ul_wakeup (when a channel is opened by the network stack).
+	 *
+	 * Setting APPS bit 1 prematurely triggers the modem's
+	 * a2_apps_smsm_callback (power-management wakeup path) before
+	 * a2_subsystem_boot() has completed.  The modem's BAM DMUX
+	 * channels aren't registered yet, so CMD_OPEN is never sent.
+	 * Then our SW_RST in bam_hw_init wipes any BAM state the modem
+	 * had set up, leaving the RX pipe permanently stuck.
+	 *
+	 * Instead, we wait for pc_irq to fire when the modem naturally
+	 * sets bit 1.  CMD_OPEN from the modem will create netdevs.
 	 */
-	dev_info(dmux->dev,
-		 "boot_work: requesting A2 power (setting APPS bit 1)\n");
-	bam_dmux_pc_vote(dmux, true);
-}
-
-static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
-{
-	struct bam_dmux *dmux = data;
+	if (dmux->pc_state) {
+		dev_info(dmux->dev,
+			 "boot_work: modem already up, initializing BAM\n");
+		return;
+	}
 
 	dev_info(dmux->dev,
-		 "remote ready (SMDINIT), scheduling boot_work\n");
-	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(1000));
+		 "boot_work: waiting for modem to set A2_POWER_CONTROL\n");
+
+	dev_info(dmux->dev,
+		 "remote ready (SMDINIT), waiting for modem A2_POWER_CONTROL\n");
 
 	return IRQ_HANDLED;
 }
