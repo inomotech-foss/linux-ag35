@@ -1311,6 +1311,11 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 
 	dev_info(dmux->dev,
 		 "boot_work: waiting for modem to set A2_POWER_CONTROL\n");
+}
+
+static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
+{
+	struct bam_dmux *dmux = data;
 
 	dev_info(dmux->dev,
 		 "remote ready (SMDINIT), waiting for modem A2_POWER_CONTROL\n");
