@@ -699,6 +699,60 @@ static void bam_dmux_rx_handle(struct bam_dmux_skb_dma *skb_dma)
 	}
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * Send CMD_OPEN directly on TX pipe (no netdev needed)
+ *
+ * The Quectel firmware does not spontaneously send CMD_OPEN during boot.
+ * In the stock firmware, the modem sends CMD_OPEN first, then APPS responds.
+ * But with Quectel OCPU firmware, we must send CMD_OPEN first to trigger
+ * the modem's a2_sio_channel_open, which echoes CMD_OPEN back.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+static bool bam_dmux_send_open_cmd(struct bam_dmux *dmux, u8 ch_id)
+{
+	struct bam_dmux_skb_dma *skb_dma;
+	struct bam_dmux_hdr *hdr;
+	struct sk_buff *skb;
+	int ret;
+
+	skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
+	if (!skb)
+		return false;
+
+	hdr = skb_put_zero(skb, sizeof(*hdr));
+	hdr->magic = BAM_DMUX_HDR_MAGIC;
+	hdr->cmd = BAM_DMUX_CMD_OPEN;
+	hdr->ch = ch_id;
+
+	/* Use a dedicated skb_dma slot for this init command */
+	skb_dma = &dmux->tx_skbs[0];
+	skb_dma->skb = skb;
+	skb_dma->dmux = dmux;
+	skb_dma->len = skb->len;
+
+	if (!bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE)) {
+		dev_kfree_skb(skb);
+		skb_dma->skb = NULL;
+		return false;
+	}
+
+	ret = bam_pipe_submit_desc(dmux, &dmux->tx_pipe, skb_dma->addr,
+				   skb_dma->len, DESC_FLAG_EOT | DESC_FLAG_INT,
+				   skb_dma);
+	if (ret) {
+		bam_dmux_skb_dma_unmap(skb_dma, DMA_TO_DEVICE);
+		dev_kfree_skb(skb);
+		skb_dma->skb = NULL;
+		return false;
+	}
+
+	bam_pipe_doorbell(dmux, &dmux->tx_pipe);
+
+	dev_info(dmux->dev, "sent CMD_OPEN for channel %u on pipe %u\n",
+		 ch_id, BAM_DMUX_TX_PIPE);
+	return true;
+}
+
 static bool bam_dmux_queue_rx(struct bam_dmux *dmux,
 			      struct bam_dmux_skb_dma *skb_dma, gfp_t gfp)
 {
@@ -1214,6 +1268,20 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 		/* Ring RX doorbell to make queued descriptors active */
 		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
+
+		dev_info(dmux->dev,
+			 "pc_irq: post-init P_EVNT_REG(5)=0x%08x "
+			 "P_SW_OFSTS(5)=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
+
+		/*
+		 * Quectel firmware does not send CMD_OPEN spontaneously.
+		 * Send CMD_OPEN for channel 0 to trigger the modem's
+		 * a2_sio_channel_open(), which echoes CMD_OPEN back.
+		 */
+		bam_dmux_send_open_cmd(dmux, 0);
 
 		/* Start polling */
 		mod_timer(&dmux->rx_poll_timer,
