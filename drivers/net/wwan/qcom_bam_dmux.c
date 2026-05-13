@@ -292,15 +292,44 @@ static void bam_dmux_pc_ack(struct bam_dmux *dmux)
 static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 {
 	u32 val;
+	u32 ctrl = bam_readl(dmux, BAM_CTRL);
 
 	dev_info(dmux->dev, "bam_hw_init: PRE BAM_CTRL=0x%08x reset=%d\n",
-		 bam_readl(dmux, BAM_CTRL), do_reset);
+		 ctrl, do_reset);
 
-	if (do_reset) {
-		/* Step 1: Software reset — clear all BAM state */
-		bam_writel(dmux, BAM_CTRL, BAM_SW_RST);
-		bam_writel(dmux, BAM_CTRL, 0);
+	if (!do_reset) {
+		/*
+		 * Remote BAM — modem owns the hardware.
+		 * Downstream uses bam_check() which just verifies BAM_EN.
+		 * Don't write any global registers.
+		 */
+		if (!(ctrl & BAM_EN)) {
+			dev_warn(dmux->dev,
+				 "bam_hw_init: BAM not enabled by modem!\n");
+			/* Enable it ourselves as fallback */
+			val = BAM_EN | BIT(17);
+			bam_writel(dmux, BAM_CTRL, val);
+		}
+
+		/* Only set IRQ_SRCS_MSK for our EE (BAM-level IRQ bit) */
+		bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
+
+		dev_info(dmux->dev,
+			 "bam_hw_init: POST BAM_CTRL=0x%08x CNFG=0x%08x "
+			 "IRQ_EN=0x%08x IRQ_SRCS_MSK=0x%08x DESC_CNT=0x%08x\n",
+			 bam_readl(dmux, BAM_CTRL),
+			 bam_readl(dmux, BAM_CNFG_BITS),
+			 bam_readl(dmux, BAM_IRQ_EN),
+			 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)),
+			 bam_readl(dmux, BAM_DESC_CNT_TRSHLD));
+		return;
 	}
+
+	/* Full reset path (local BAM management) */
+
+	/* Step 1: Software reset — clear all BAM state */
+	bam_writel(dmux, BAM_CTRL, BAM_SW_RST);
+	bam_writel(dmux, BAM_CTRL, 0);
 
 	/* Step 2+3+4: Enable BAM + set CTRL fields */
 	val = BAM_EN | BIT(17);  /* BAM_EN + LOCAL_CLK_GATING=1 */
@@ -1199,30 +1228,31 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
  *
  * Matching downstream 3.18 bam_dmux.c:
  *
- *   The downstream kernel's BAM init is triggered by modem setting bit 1.
- *   APPS does SW_RST + full BAM init + ACK + queue_rx.  Only later does
- *   APPS set its own bit 1 (via ul_wakeup/power_vote when data is needed).
- *   This means BAM is fully initialized BEFORE the modem's
- *   apps_bam_link_ready flag is set.
+ *   The downstream kernel registers the A2 BAM with
+ *   SPS_BAM_MGR_DEVICE_REMOTE — the modem owns and initializes the BAM.
+ *   The SPS driver calls bam_check() (just verifies BAM_EN) instead of
+ *   bam_init() (which does SW_RST).  APPS never resets the BAM.
  *
- *   On Quectel firmware, modem waits for APPS bit 1 before responding.
- *   We initialize BAM (with SW_RST) in boot_work BEFORE setting APPS
- *   bit 1, ensuring the BAM is ready when the modem enables its data path.
+ *   On Quectel firmware, modem waits for APPS bit 1 before initializing
+ *   A2 hardware (including BAM).  We must set APPS bit 1 first, let the
+ *   modem initialize its BAM/pipes, then configure APPS-side pipes.
+ *
+ *   CRITICAL: Do NOT do BAM SW_RST.  The modem initializes both the
+ *   global BAM state and its own pipes (from its EE) when it processes
+ *   APPS bit 1.  A SW_RST wipes the modem's pipe configuration, and
+ *   the modem does NOT re-initialize pipes — only a2_hw_power_on()
+ *   runs, which doesn't include BAM pipe setup.
  *
  *   Sequence:
  *   1. remote-ready IRQ fires (modem set SMDINIT)
  *   2. boot_work runs after 1s delay:
- *      a. Full BAM init (SW_RST + BAM_EN + CNFG + IRQ)
- *      b. Pipe init (P_RST + config for pipes 4 & 5)
- *      c. Queue RX descriptors + ring doorbell
- *      d. Set APPS A2_POWER_CONTROL (bit 1)
- *   3. Modem responds: sets MODEM A2_POWER_CONTROL (bit 1)
- *      and apps_bam_link_ready=true (modem can now send data)
+ *      - Set APPS A2_POWER_CONTROL (bit 1)
+ *   3. Modem responds: initializes A2/BAM, sets MODEM bit 1
  *   4. pc_irq fires:
- *      a. Toggle ACK
- *      b. Re-ring RX doorbell
- *      c. Start poll timer
- *   5. Modem sends CMD_OPEN on pipe 5
+ *      a. BAM init (NO SW_RST) + pipe init + queue RX
+ *      b. Toggle ACK
+ *      c. Send CMD_OPEN + start poll timer
+ *   5. Modem echoes CMD_OPEN on pipe 5
  *   6. Poll timer detects CMD_OPEN, opens channels
  * ────────────────────────────────────────────────────────────────────────── */
 
@@ -1242,22 +1272,19 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	if (new_state && !dmux->pc_state) {
 		/*
 		 * Modem set A2_POWER_CONTROL (bit 1).
-		 * This matches downstream bam_dmux_smsm_cb "init" path.
+		 * This means the modem has initialized the A2 BAM hardware
+		 * and is ready for data transfer.
 		 *
-		 * Normally, boot_work has already initialized the BAM
-		 * (with SW_RST) BEFORE setting APPS bit 1.  The modem
-		 * responds by setting its bit 1 (which triggers this IRQ).
-		 *
-		 * If BAM isn't initialized yet (e.g., modem set bit 1
-		 * spontaneously before boot_work ran), do it now.
+		 * Initialize APPS-side BAM + pipes now (NO SW_RST).
+		 * The modem owns the BAM and has already set it up.
+		 * Downstream uses SPS_BAM_MGR_DEVICE_REMOTE which calls
+		 * bam_check() (verify only) instead of bam_init() (reset).
 		 */
 		dev_info(dmux->dev, "pc_irq: modem powered up, pipes_active=%d\n",
 			 dmux->pipes_active);
 
 		if (!dmux->pipes_active) {
-			dev_info(dmux->dev,
-				 "pc_irq: BAM not yet initialized, doing full init\n");
-			if (!bam_dmux_power_on(dmux, true)) {
+			if (!bam_dmux_power_on(dmux, false)) {
 				dev_err(dmux->dev, "pc_irq: power_on failed\n");
 				bam_dmux_power_off(dmux);
 				goto out;
@@ -1386,35 +1413,17 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	 * a2_apps_smsm_callback which immediately sets
 	 * apps_bam_link_ready=true, enabling the modem to send data.
 	 *
-	 * CRITICAL: Initialize BAM BEFORE setting APPS bit 1.
+	 * CRITICAL: Do NOT initialize BAM here.  The modem initializes
+	 * the A2 BAM (including global state + modem-side pipes) when it
+	 * processes APPS bit 1.  If we do SW_RST or write BAM_CTRL before
+	 * the modem, we might interfere with its init.  If the modem does
+	 * its own BAM init after ours, it wipes our pipe config.
 	 *
-	 * If we set bit 1 first, the modem immediately enables its
-	 * data path (apps_bam_link_ready=true) and may try to send
-	 * CMD_OPEN before our BAM pipes are configured.  The downstream
-	 * 3.18 kernel avoids this because BAM init happens in response
-	 * to the modem's spontaneous bit 1 (which fires before APPS
-	 * ever sets its own bit 1 via ul_wakeup/power_vote).
-	 *
-	 * We do SW_RST here, matching downstream SPS bam_init() exactly.
-	 * The modem's a2_bam_init() has already configured the BAM, but
-	 * downstream always resets it from the APPS side.  The modem
-	 * re-initializes its DMA when it processes our APPS bit 1 via
-	 * a2_power_vote(A2_CLIENT_APPS, true).
+	 * Instead, just request A2 power.  When the modem responds with
+	 * its bit 1, pc_irq will initialize APPS-side pipes.
 	 */
 	dev_info(dmux->dev,
-		 "boot_work: initializing BAM before requesting A2 power\n");
-
-	if (!bam_dmux_power_on(dmux, true)) {
-		dev_err(dmux->dev, "boot_work: BAM power_on failed\n");
-		return;
-	}
-
-	/* Ring RX doorbell so BAM knows descriptors are available */
-	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
-
-	/* Now tell modem we're ready — set APPS bit 1 */
-	dev_info(dmux->dev,
-		 "boot_work: BAM ready, requesting A2 power (setting APPS bit 1)\n");
+		 "boot_work: requesting A2 power (setting APPS bit 1)\n");
 	bam_dmux_pc_vote(dmux, true);
 }
 
