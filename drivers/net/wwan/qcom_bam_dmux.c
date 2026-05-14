@@ -1458,29 +1458,26 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * The Quectel firmware defers a2_bam_init() to
-	 * a2_apps_smsm_callback, which fires when APPS sets bit 1.
-	 * The modem registers the A2 BAM with SPS_BAM_MGR_DEVICE_REMOTE,
-	 * causing SPS to call bam_check() — a read-only verify that
-	 * requires BAM_EN to already be 1.
+	 * The Quectel firmware expects APPS to be the BAM master.
+	 * Evidence: BAM_CTRL=0x00020000 (BAM_EN=0) and all pipe
+	 * P_CTRL=0x00000000 even after modem boot.  The modem
+	 * never configures BAM registers — it uses
+	 * SPS_BAM_MGR_DEVICE_REMOTE which calls bam_check()
+	 * (read-only verify that requires BAM_EN=1).
 	 *
-	 * If BAM_EN=0 when the modem tries to register, bam_check()
-	 * fails and the modem never connects its A2 DMA to the BAM
-	 * pipes.  Result: TX descriptors get consumed by BAM hardware
-	 * but nobody reads the data; RX stays at 0 forever.
+	 * Perform a FULL BAM SW_RST to clear stale TZ/bootloader
+	 * state (BAM_CTRL=0x00020000 is residual), then set BAM_EN
+	 * and all global registers.  Since the modem hasn't touched
+	 * any pipes (all P_CTRL=0), SW_RST wipes nothing.
 	 *
-	 * Fix: Set BAM_EN + global registers BEFORE setting APPS bit 1.
-	 * This ensures the modem's bam_check() succeeds and the modem
-	 * can connect its pipe endpoints.
+	 * After SW_RST, the modem's bam_check() will find BAM_EN=1
+	 * and its sps_connect() can establish A2 DMA connections.
 	 *
-	 * Do NOT do SW_RST here — the BAM may have been partially
-	 * configured by TZ/bootloader and we don't want to wipe that.
-	 * Do NOT do pipe init here — that happens in pc_irq after the
-	 * modem has configured its side.
+	 * Pipe init happens later in pc_irq after modem responds.
 	 */
 	dev_info(dmux->dev,
-		 "boot_work: enabling BAM before requesting A2 power\n");
-	bam_hw_init(dmux, false);
+		 "boot_work: full BAM reset before requesting A2 power\n");
+	bam_hw_init(dmux, true);
 
 	dev_info(dmux->dev,
 		 "boot_work: requesting A2 power (setting APPS bit 1)\n");
