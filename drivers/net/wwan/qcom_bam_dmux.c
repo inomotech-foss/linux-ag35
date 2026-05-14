@@ -936,15 +936,67 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 	bam_dmux_process_rx_completions(dmux);
 
 	if (poll_count < 20 || !(poll_count % 5000)) {
+		u32 tx_hw = bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_TX_PIPE));
+		u32 rx_hw = bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE));
+
 		dev_info(dmux->dev,
 			 "poll[%u]: tx_sw=0x%04x rx_sw=0x%04x "
-			 "tx_hw=0x%04x rx_hw=0x%04x\n", poll_count,
+			 "tx_hw=0x%08x rx_hw=0x%08x\n", poll_count,
 			 dmux->tx_pipe.sw_offset, dmux->rx_pipe.sw_offset,
-			 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_TX_PIPE))
-				& P_SW_OFSTS_MASK,
-			 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE))
-				& P_SW_OFSTS_MASK);
+			 tx_hw, rx_hw);
 	}
+
+	/* One-shot detailed error/status dump at poll[20] */
+	if (poll_count == 20) {
+		u32 bam_irq, p4_irq, p5_irq;
+
+		bam_irq = bam_readl(dmux, BAM_IRQ_STTS);
+		p4_irq = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE));
+		p5_irq = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_RX_PIPE));
+
+		dev_info(dmux->dev,
+			 "DIAG: BAM_IRQ_STTS=0x%08x "
+			 "P4_IRQ_STTS=0x%08x P5_IRQ_STTS=0x%08x\n",
+			 bam_irq, p4_irq, p5_irq);
+		dev_info(dmux->dev,
+			 "DIAG: BAM_CTRL=0x%08x CNFG=0x%08x "
+			 "IRQ_SRCS_EE=0x%08x IRQ_SRCS_MSK=0x%08x\n",
+			 bam_readl(dmux, BAM_CTRL),
+			 bam_readl(dmux, BAM_CNFG_BITS),
+			 bam_readl(dmux, BAM_IRQ_SRCS_EE(BAM_DMUX_EE)),
+			 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
+		dev_info(dmux->dev,
+			 "DIAG: P4 CTRL=0x%08x HALT=0x%08x "
+			 "EVNT_REG=0x%08x DESC_ADDR=0x%08x "
+			 "FIFO_SZ=0x%08x EVNT_TRSHLD=0x%08x\n",
+			 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
+			 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_TX_PIPE)),
+			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_TX_PIPE)),
+			 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(BAM_DMUX_TX_PIPE)),
+			 bam_readl(dmux, BAM_P_FIFO_SIZES(BAM_DMUX_TX_PIPE)),
+			 bam_readl(dmux, BAM_P_EVNT_GEN_TRSHLD(BAM_DMUX_TX_PIPE)));
+		dev_info(dmux->dev,
+			 "DIAG: P5 CTRL=0x%08x HALT=0x%08x "
+			 "EVNT_REG=0x%08x DESC_ADDR=0x%08x "
+			 "FIFO_SZ=0x%08x EVNT_TRSHLD=0x%08x\n",
+			 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_FIFO_SIZES(BAM_DMUX_RX_PIPE)),
+			 bam_readl(dmux, BAM_P_EVNT_GEN_TRSHLD(BAM_DMUX_RX_PIPE)));
+
+		/* Clear any pending IRQs so they don't accumulate */
+		if (bam_irq)
+			bam_writel(dmux, BAM_IRQ_CLR, bam_irq);
+		if (p4_irq)
+			bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_TX_PIPE),
+				   p4_irq);
+		if (p5_irq)
+			bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_RX_PIPE),
+				   p5_irq);
+	}
+
 	poll_count++;
 
 	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
@@ -1458,26 +1510,20 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * The Quectel firmware expects APPS to be the BAM master.
-	 * Evidence: BAM_CTRL=0x00020000 (BAM_EN=0) and all pipe
-	 * P_CTRL=0x00000000 even after modem boot.  The modem
-	 * never configures BAM registers — it uses
-	 * SPS_BAM_MGR_DEVICE_REMOTE which calls bam_check()
-	 * (read-only verify that requires BAM_EN=1).
+	 * Set BAM_EN + global registers BEFORE setting APPS bit 1.
+	 * Evidence: BAM_CTRL=0x00020000 (BAM_EN=0) at boot — TZ
+	 * leaves this BAM disabled.  The modem's bam_check() needs
+	 * BAM_EN=1 to succeed.
 	 *
-	 * Perform a FULL BAM SW_RST to clear stale TZ/bootloader
-	 * state (BAM_CTRL=0x00020000 is residual), then set BAM_EN
-	 * and all global registers.  Since the modem hasn't touched
-	 * any pipes (all P_CTRL=0), SW_RST wipes nothing.
-	 *
-	 * After SW_RST, the modem's bam_check() will find BAM_EN=1
-	 * and its sps_connect() can establish A2 DMA connections.
+	 * Do NOT do SW_RST — it wipes TZ's security configuration
+	 * (trust registers, EE assignments) and has been tested with
+	 * no improvement.  Just set the minimum global state needed.
 	 *
 	 * Pipe init happens later in pc_irq after modem responds.
 	 */
 	dev_info(dmux->dev,
-		 "boot_work: full BAM reset before requesting A2 power\n");
-	bam_hw_init(dmux, true);
+		 "boot_work: enabling BAM before requesting A2 power\n");
+	bam_hw_init(dmux, false);
 
 	dev_info(dmux->dev,
 		 "boot_work: requesting A2 power (setting APPS bit 1)\n");
@@ -1489,7 +1535,9 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 	struct bam_dmux *dmux = data;
 
 	dev_info(dmux->dev,
-		 "remote ready (SMDINIT), scheduling boot_work in 1s\n");
+		 "remote ready (SMDINIT), scheduling boot_work in 1s "
+		 "BAM_CTRL=0x%08x\n",
+		 bam_readl(dmux, BAM_CTRL));
 	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(1000));
 
 	return IRQ_HANDLED;
@@ -1540,6 +1588,15 @@ static int bam_dmux_probe(struct platform_device *pdev)
 
 	dev_info(dev, "BAM at %pa size 0x%llx mapped to %px\n",
 		 &res.start, (u64)resource_size(&res), dmux->bam_base);
+
+	/* Early BAM state dump — capture TZ/bootloader configuration */
+	dev_info(dev, "BAM EARLY: CTRL=0x%08x REVISION=0x%08x "
+		 "NUM_PIPES=0x%08x CNFG=0x%08x TRUST=0x%08x\n",
+		 bam_readl(dmux, BAM_CTRL),
+		 bam_readl(dmux, BAM_REVISION),
+		 bam_readl(dmux, BAM_NUM_PIPES),
+		 bam_readl(dmux, BAM_CNFG_BITS),
+		 bam_readl(dmux, BAM_TRUST_REG));
 
 	/* SMSM power control */
 	dmux->pc_irq = platform_get_irq_byname(pdev, "pc");
