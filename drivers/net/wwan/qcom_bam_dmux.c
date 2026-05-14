@@ -1535,9 +1535,7 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 	struct bam_dmux *dmux = data;
 
 	dev_info(dmux->dev,
-		 "remote ready (SMDINIT), scheduling boot_work in 1s "
-		 "BAM_CTRL=0x%08x\n",
-		 bam_readl(dmux, BAM_CTRL));
+		 "remote ready (SMDINIT), scheduling boot_work in 1s\n");
 	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(1000));
 
 	return IRQ_HANDLED;
