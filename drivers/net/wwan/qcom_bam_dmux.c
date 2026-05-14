@@ -70,7 +70,9 @@
 #define BAM_P_IRQ_STTS(p)		(0x13010 + (p) * 0x1000)
 #define BAM_P_IRQ_CLR(p)		(0x13014 + (p) * 0x1000)
 #define BAM_P_IRQ_EN(p)			(0x13018 + (p) * 0x1000)
-#define BAM_P_TRUST(p)			(0x13030 + (p) * 0x1000)
+/* Trust/security registers — in BAM v1.7.0 these are in a separate block */
+#define BAM_TRUST_REG			0x2000
+#define BAM_P_TRUST_REG(p)		(0x2020 + (p) * 0x4)
 
 /* Per-pipe event registers — event offset = 0x13800 + pipe * 0x1000 */
 #define BAM_P_SW_OFSTS(p)		(0x13800 + (p) * 0x1000)
@@ -103,8 +105,8 @@
 /* P_IRQ_EN bits */
 #define P_TRNSFR_END_EN			BIT(5)
 
-/* Descriptor threshold — downstream uses 4 */
-#define BAM_DESC_CNT_TRSHLD_VAL		0x0004
+/* Descriptor count threshold — downstream uses 0x1000 (A2_SUMMING_THRESHOLD=4096) */
+#define BAM_DESC_CNT_TRSHLD_VAL		0x1000
 
 /* ──────────────────────────────────────────────────────────────────────────
  * BAM Descriptor Hardware Format
@@ -293,25 +295,68 @@ static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 {
 	u32 val;
 	u32 ctrl = bam_readl(dmux, BAM_CTRL);
+	int p;
 
-	dev_info(dmux->dev, "bam_hw_init: PRE BAM_CTRL=0x%08x reset=%d\n",
-		 ctrl, do_reset);
+	dev_info(dmux->dev,
+		 "bam_hw_init: PRE BAM_CTRL=0x%08x REVISION=0x%08x "
+		 "NUM_PIPES=0x%08x CNFG=0x%08x reset=%d\n",
+		 ctrl,
+		 bam_readl(dmux, BAM_REVISION),
+		 bam_readl(dmux, BAM_NUM_PIPES),
+		 bam_readl(dmux, BAM_CNFG_BITS),
+		 do_reset);
+
+	/* Dump trust registers and pipe states before we touch anything */
+	dev_info(dmux->dev, "  TRUST_REG=0x%08x\n",
+		 bam_readl(dmux, BAM_TRUST_REG));
+	for (p = 0; p < 6; p++)
+		dev_info(dmux->dev,
+			 "  pipe %d: P_TRUST=0x%08x P_CTRL=0x%08x "
+			 "P_HALT=0x%08x SW_OFSTS=0x%08x\n",
+			 p,
+			 bam_readl(dmux, BAM_P_TRUST_REG(p)),
+			 bam_readl(dmux, BAM_P_CTRL(p)),
+			 bam_readl(dmux, BAM_P_HALT(p)),
+			 bam_readl(dmux, BAM_P_SW_OFSTS(p)));
 
 	if (!do_reset) {
 		/*
 		 * Remote BAM — modem owns the hardware.
-		 * Downstream uses bam_check() which just verifies BAM_EN.
-		 * Don't write any global registers.
+		 * Downstream uses bam_check() (verify BAM_EN only) instead
+		 * of bam_init() (SW_RST).  However, we MUST still configure
+		 * CNFG_BITS, DESC_CNT_TRSHLD, and IRQ_EN — the bam_dmux_dma
+		 * node is disabled so bam_dma.c never runs, and the modem
+		 * may not have set these to the values APPS-side pipes need.
+		 *
+		 * The downstream MDM9607 3.18 kernel sets these in
+		 * bam_init()/bam_init_powered_remotely().  Without correct
+		 * CNFG_BITS (hardware workarounds), the BAM DMA data path
+		 * may not function — P_SW_OFSTS stays at 0 forever.
 		 */
 		if (!(ctrl & BAM_EN)) {
 			dev_warn(dmux->dev,
 				 "bam_hw_init: BAM not enabled by modem!\n");
-			/* Enable it ourselves as fallback */
 			val = BAM_EN | BIT(17);
 			bam_writel(dmux, BAM_CTRL, val);
 		}
 
-		/* Only set IRQ_SRCS_MSK for our EE (BAM-level IRQ bit) */
+		/* Descriptor count threshold (downstream A2_SUMMING_THRESHOLD) */
+		bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
+
+		/*
+		 * CNFG_BITS — enable all hardware workarounds except
+		 * BAM_FULL_PIPE (bit 11).  Matches downstream 0xFFFFF7FF.
+		 * Without these, the producer pipe (modem→APPS) DMA path
+		 * may not connect properly.
+		 */
+		bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
+
+		/* BAM-level IRQ enable (TIMER | ERROR | HRESP_ERR) */
+		bam_writel(dmux, BAM_IRQ_EN,
+			   BAM_IRQ_TIMER_EN | BAM_IRQ_ERROR_EN |
+			   BAM_IRQ_HRESP_ERR_EN);
+
+		/* Unmask BAM-level IRQ in EE 0's IRQ sources */
 		bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
 
 		dev_info(dmux->dev,
@@ -337,7 +382,7 @@ static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 	bam_writel(dmux, BAM_CTRL, val);
 
 	/* Step 5: Descriptor count threshold */
-	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, 0x1000);
+	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
 
 	/* Step 6: Config bits */
 	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
@@ -433,13 +478,17 @@ static int bam_pipe_hw_init(struct bam_dmux *dmux, struct bam_pipe *pipe,
 
 	dev_info(dmux->dev,
 		 "pipe%u_init: DONE P_CTRL=0x%08x DESC_ADDR=0x%08x "
-		 "FIFO_SZ=0x%08x SW_OFSTS=0x%08x EVNT_REG=0x%08x\n",
+		 "FIFO_SZ=0x%08x SW_OFSTS=0x%08x EVNT_REG=0x%08x "
+		 "P_TRUST=0x%08x P_HALT=0x%08x P_IRQ_STTS=0x%08x\n",
 		 pipe_index,
 		 bam_readl(dmux, BAM_P_CTRL(pipe_index)),
 		 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(pipe_index)),
 		 bam_readl(dmux, BAM_P_FIFO_SIZES(pipe_index)),
 		 bam_readl(dmux, BAM_P_SW_OFSTS(pipe_index)),
-		 bam_readl(dmux, BAM_P_EVNT_REG(pipe_index)));
+		 bam_readl(dmux, BAM_P_EVNT_REG(pipe_index)),
+		 bam_readl(dmux, BAM_P_TRUST_REG(pipe_index)),
+		 bam_readl(dmux, BAM_P_HALT(pipe_index)),
+		 bam_readl(dmux, BAM_P_IRQ_STTS(pipe_index)));
 
 	return 0;
 }
