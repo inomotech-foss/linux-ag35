@@ -224,6 +224,11 @@ struct bam_dmux {
 	struct timer_list rx_poll_timer;
 	bool boot_done;
 
+	/* CMD_OPEN retry — modem A2 DMA needs time to initialize */
+	unsigned int cmd_open_retries;
+	unsigned long cmd_open_next_retry;
+	bool cmd_open_acked;
+
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
 	struct work_struct register_netdev_work;
 	struct net_device *netdevs[BAM_DMUX_NUM_CH];
@@ -714,7 +719,8 @@ static void bam_dmux_cmd_open(struct bam_dmux *dmux, struct bam_dmux_hdr *hdr)
 {
 	struct net_device *netdev = dmux->netdevs[hdr->ch];
 
-	dev_dbg(dmux->dev, "open channel: %u\n", hdr->ch);
+	dev_info(dmux->dev, "CMD_OPEN received for channel %u\n", hdr->ch);
+	dmux->cmd_open_acked = true;
 
 	if (__test_and_set_bit(hdr->ch, dmux->remote_channels))
 		return;
@@ -793,7 +799,12 @@ static bool bam_dmux_send_open_cmd(struct bam_dmux *dmux, u8 ch_id)
 	struct sk_buff *skb;
 	int ret;
 
-	skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
+	/* Safety: don't overwrite a pending CMD_OPEN */
+	skb_dma = &dmux->tx_skbs[0];
+	if (skb_dma->skb)
+		return false;
+
+	skb = alloc_skb(sizeof(*hdr), GFP_ATOMIC);
 	if (!skb)
 		return false;
 
@@ -803,7 +814,6 @@ static bool bam_dmux_send_open_cmd(struct bam_dmux *dmux, u8 ch_id)
 	hdr->ch = ch_id;
 
 	/* Use a dedicated skb_dma slot for this init command */
-	skb_dma = &dmux->tx_skbs[0];
 	skb_dma->skb = skb;
 	skb_dma->dmux = dmux;
 	skb_dma->len = skb->len;
@@ -995,6 +1005,31 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 		if (p5_irq)
 			bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_RX_PIPE),
 				   p5_irq);
+	}
+
+	/*
+	 * CMD_OPEN retry — the modem's A2 DMA engine needs time to
+	 * fully initialize after setting bit 1.  The initial CMD_OPEN
+	 * sent in pc_irq may arrive before the A2 hardware is listening,
+	 * in which case the data is lost.  Retry every 5 seconds.
+	 */
+	if (!dmux->cmd_open_acked &&
+	    dmux->rx_pipe.sw_offset == 0 &&
+	    dmux->cmd_open_retries < 12 &&
+	    time_after(jiffies, dmux->cmd_open_next_retry)) {
+		pm_runtime_get_noresume(dmux->dev);
+		if (bam_dmux_send_open_cmd(dmux, 0)) {
+			dmux->cmd_open_retries++;
+			dmux->cmd_open_next_retry = jiffies + 5 * HZ;
+			dev_info(dmux->dev,
+				 "CMD_OPEN retry %u sent\n",
+				 dmux->cmd_open_retries);
+		} else {
+			pm_runtime_put_noidle(dmux->dev);
+			dev_warn(dmux->dev,
+				 "CMD_OPEN retry %u failed\n",
+				 dmux->cmd_open_retries + 1);
+		}
 	}
 
 	poll_count++;
@@ -1432,6 +1467,11 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		pm_runtime_get_noresume(dmux->dev);
 
 		bam_dmux_send_open_cmd(dmux, 0);
+
+		/* Set up CMD_OPEN retry — first retry in 5 seconds */
+		dmux->cmd_open_retries = 0;
+		dmux->cmd_open_acked = false;
+		dmux->cmd_open_next_retry = jiffies + 5 * HZ;
 
 		/* Start polling */
 		mod_timer(&dmux->rx_poll_timer,
