@@ -1589,14 +1589,11 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	dev_info(dev, "BAM at %pa size 0x%llx mapped to %px\n",
 		 &res.start, (u64)resource_size(&res), dmux->bam_base);
 
-	/* Early BAM state dump — capture TZ/bootloader configuration */
-	dev_info(dev, "BAM EARLY: CTRL=0x%08x REVISION=0x%08x "
-		 "NUM_PIPES=0x%08x CNFG=0x%08x TRUST=0x%08x\n",
-		 bam_readl(dmux, BAM_CTRL),
-		 bam_readl(dmux, BAM_REVISION),
-		 bam_readl(dmux, BAM_NUM_PIPES),
-		 bam_readl(dmux, BAM_CNFG_BITS),
-		 bam_readl(dmux, BAM_TRUST_REG));
+	/*
+	 * Do NOT read BAM registers here — the BAM clock domain is
+	 * powered by the modem, which hasn't booted yet.  Reading
+	 * causes an external abort (bus fault).
+	 */
 
 	/* SMSM power control */
 	dmux->pc_irq = platform_get_irq_byname(pdev, "pc");
