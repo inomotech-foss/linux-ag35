@@ -1295,10 +1295,12 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
  *   Sequence:
  *   1. remote-ready IRQ fires (modem set SMDINIT)
  *   2. boot_work runs after 1s delay:
+ *      - BAM global init (BAM_EN + CNFG_BITS + IRQ — NO SW_RST, NO pipes)
  *      - Set APPS A2_POWER_CONTROL (bit 1)
- *   3. Modem responds: initializes A2/BAM, sets MODEM bit 1
+ *   3. Modem responds: registers A2 BAM (needs BAM_EN=1), connects pipes,
+ *      sets MODEM bit 1
  *   4. pc_irq fires:
- *      a. BAM init (NO SW_RST) + pipe init + queue RX
+ *      a. Pipe init + queue RX
  *      b. Toggle ACK
  *      c. Send CMD_OPEN + start poll timer
  *   5. Modem echoes CMD_OPEN on pipe 5
@@ -1321,13 +1323,12 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	if (new_state && !dmux->pc_state) {
 		/*
 		 * Modem set A2_POWER_CONTROL (bit 1).
-		 * This means the modem has initialized the A2 BAM hardware
-		 * and is ready for data transfer.
+		 * The modem has registered its A2 BAM (bam_check passed
+		 * because boot_work set BAM_EN beforehand) and connected
+		 * its pipe endpoints.  Now init APPS-side pipes.
 		 *
-		 * Initialize APPS-side BAM + pipes now (NO SW_RST).
-		 * The modem owns the BAM and has already set it up.
-		 * Downstream uses SPS_BAM_MGR_DEVICE_REMOTE which calls
-		 * bam_check() (verify only) instead of bam_init() (reset).
+		 * bam_hw_init is called again defensively to re-verify
+		 * global BAM state — the modem may have touched it.
 		 */
 		dev_info(dmux->dev, "pc_irq: modem powered up, pipes_active=%d\n",
 			 dmux->pipes_active);
@@ -1457,20 +1458,30 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * The Quectel firmware does NOT spontaneously set MODEM bit 1.
-	 * It waits for APPS to set bit 1 first, then responds via
-	 * a2_apps_smsm_callback which immediately sets
-	 * apps_bam_link_ready=true, enabling the modem to send data.
+	 * The Quectel firmware defers a2_bam_init() to
+	 * a2_apps_smsm_callback, which fires when APPS sets bit 1.
+	 * The modem registers the A2 BAM with SPS_BAM_MGR_DEVICE_REMOTE,
+	 * causing SPS to call bam_check() — a read-only verify that
+	 * requires BAM_EN to already be 1.
 	 *
-	 * CRITICAL: Do NOT initialize BAM here.  The modem initializes
-	 * the A2 BAM (including global state + modem-side pipes) when it
-	 * processes APPS bit 1.  If we do SW_RST or write BAM_CTRL before
-	 * the modem, we might interfere with its init.  If the modem does
-	 * its own BAM init after ours, it wipes our pipe config.
+	 * If BAM_EN=0 when the modem tries to register, bam_check()
+	 * fails and the modem never connects its A2 DMA to the BAM
+	 * pipes.  Result: TX descriptors get consumed by BAM hardware
+	 * but nobody reads the data; RX stays at 0 forever.
 	 *
-	 * Instead, just request A2 power.  When the modem responds with
-	 * its bit 1, pc_irq will initialize APPS-side pipes.
+	 * Fix: Set BAM_EN + global registers BEFORE setting APPS bit 1.
+	 * This ensures the modem's bam_check() succeeds and the modem
+	 * can connect its pipe endpoints.
+	 *
+	 * Do NOT do SW_RST here — the BAM may have been partially
+	 * configured by TZ/bootloader and we don't want to wipe that.
+	 * Do NOT do pipe init here — that happens in pc_irq after the
+	 * modem has configured its side.
 	 */
+	dev_info(dmux->dev,
+		 "boot_work: enabling BAM before requesting A2 power\n");
+	bam_hw_init(dmux, false);
+
 	dev_info(dmux->dev,
 		 "boot_work: requesting A2 power (setting APPS bit 1)\n");
 	bam_dmux_pc_vote(dmux, true);
