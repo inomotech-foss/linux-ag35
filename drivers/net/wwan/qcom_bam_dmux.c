@@ -81,6 +81,10 @@
 #define BAM_P_FIFO_SIZES(p)		(0x13820 + (p) * 0x1000)
 #define BAM_P_EVNT_GEN_TRSHLD(p)	(0x13828 + (p) * 0x1000)
 
+/* BAM2BAM registers (to detect modem pipe config) */
+#define BAM_P_DATA_FIFO_ADDR(p)		(0x13824 + (p) * 0x1000)
+#define BAM_P_EVNT_DEST_ADDR(p)		(0x1382C + (p) * 0x1000)
+
 /* BAM_CTRL bits */
 #define BAM_SW_RST			BIT(0)
 #define BAM_EN				BIT(1)
@@ -930,6 +934,44 @@ static void bam_dmux_process_rx_completions(struct bam_dmux *dmux)
 		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 }
 
+static void bam_dmux_dump_pipes(struct bam_dmux *dmux, const char *label)
+{
+	int p;
+
+	dev_info(dmux->dev,
+		 "%s: BAM_CTRL=0x%08x CNFG=0x%08x IRQ_EN=0x%08x\n",
+		 label,
+		 bam_readl(dmux, BAM_CTRL),
+		 bam_readl(dmux, BAM_CNFG_BITS),
+		 bam_readl(dmux, BAM_IRQ_EN));
+
+	for (p = 0; p < 4; p++)
+		dev_info(dmux->dev,
+			 "%s: EE%d IRQ_SRCS=0x%08x MSK=0x%08x\n",
+			 label, p,
+			 bam_readl(dmux, BAM_IRQ_SRCS_EE(p)),
+			 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(p)));
+
+	for (p = 4; p <= 5; p++)
+		dev_info(dmux->dev,
+			 "%s: P%d CTRL=0x%08x HALT=0x%08x IRQ_STTS=0x%08x "
+			 "IRQ_EN=0x%08x SW=0x%08x EVNT=0x%08x "
+			 "DESC=0x%08x FIFO_SZ=0x%08x TRSHLD=0x%08x "
+			 "DATA_FIFO=0x%08x EVNT_DEST=0x%08x\n",
+			 label, p,
+			 bam_readl(dmux, BAM_P_CTRL(p)),
+			 bam_readl(dmux, BAM_P_HALT(p)),
+			 bam_readl(dmux, BAM_P_IRQ_STTS(p)),
+			 bam_readl(dmux, BAM_P_IRQ_EN(p)),
+			 bam_readl(dmux, BAM_P_SW_OFSTS(p)),
+			 bam_readl(dmux, BAM_P_EVNT_REG(p)),
+			 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(p)),
+			 bam_readl(dmux, BAM_P_FIFO_SIZES(p)),
+			 bam_readl(dmux, BAM_P_EVNT_GEN_TRSHLD(p)),
+			 bam_readl(dmux, BAM_P_DATA_FIFO_ADDR(p)),
+			 bam_readl(dmux, BAM_P_EVNT_DEST_ADDR(p)));
+}
+
 static void bam_dmux_poll_timer_fn(struct timer_list *t)
 {
 	struct bam_dmux *dmux = container_of(t, struct bam_dmux, rx_poll_timer);
@@ -945,7 +987,7 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 	bam_dmux_process_tx_completions(dmux);
 	bam_dmux_process_rx_completions(dmux);
 
-	if (poll_count < 20 || !(poll_count % 5000)) {
+	if (poll_count < 20 || !(poll_count % 1000)) {
 		u32 tx_hw = bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_TX_PIPE));
 		u32 rx_hw = bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE));
 
@@ -1009,8 +1051,8 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 
 	/*
 	 * CMD_OPEN fallback — downstream protocol: modem sends CMD_OPEN
-	 * first.  We wait 5s for modem's CMD_OPEN.  If nothing arrives,
-	 * send CMD_OPEN from APPS as fallback (some firmware may require it).
+	 * first.  Wait 15s for modem's CMD_OPEN.  If nothing arrives,
+	 * send CMD_OPEN from APPS as fallback.
 	 * Retry every 5 seconds up to 12 times.
 	 */
 	if (!dmux->cmd_open_acked &&
@@ -1022,28 +1064,15 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 			dmux->cmd_open_retries++;
 			dmux->cmd_open_next_retry = jiffies + 5 * HZ;
 			dev_info(dmux->dev,
-				 "CMD_OPEN fallback %u sent (no modem CMD_OPEN after %us)\n",
-				 dmux->cmd_open_retries,
-				 dmux->cmd_open_retries * 5);
-			/* Dump BAM state at each CMD_OPEN retry */
-			dev_info(dmux->dev,
-				 "RETRY-DIAG: BAM_CTRL=0x%08x "
-				 "P4[CTRL=0x%08x SW=0x%08x EVNT=0x%08x HALT=0x%08x] "
-				 "P5[CTRL=0x%08x SW=0x%08x EVNT=0x%08x HALT=0x%08x]\n",
-				 bam_readl(dmux, BAM_CTRL),
-				 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
-				 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_TX_PIPE)),
-				 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_TX_PIPE)),
-				 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_TX_PIPE)),
-				 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
-				 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
-				 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
-				 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_RX_PIPE)));
+				 "CMD_OPEN fallback %u sent\n",
+				 dmux->cmd_open_retries);
+			/* Full BAM dump at each CMD_OPEN retry */
+			bam_dmux_dump_pipes(dmux, "RETRY-DIAG");
 		} else {
 			pm_runtime_put_noidle(dmux->dev);
-			dev_warn(dmux->dev,
-				 "CMD_OPEN fallback %u failed\n",
-				 dmux->cmd_open_retries + 1);
+			if (dmux->cmd_open_retries == 0)
+				dev_warn(dmux->dev,
+					 "CMD_OPEN fallback send failed\n");
 		}
 	}
 
@@ -1377,30 +1406,19 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 /* ──────────────────────────────────────────────────────────────────────────
  * SMSM IRQ Handlers + Boot Sequence
  *
- * Matching downstream 3.18 bam_dmux.c init semantics:
+ * Attempt 7: diagnostic approach — dump modem's pipe config before touching.
  *
- *   Downstream: modem sets bit 1 → APPS bam_init (SW_RST + pipe_init +
- *   toggle_apps_ack + queue_rx) → modem sees ACK → connects pipes → sends.
- *
- *   The critical invariant: when the modem first reads APPS SMSM state,
- *   BOTH the vote bit (1) and the ACK bit (11) must be set, AND the BAM
- *   must be fully configured (pipes + RX descriptors queued).
- *
- *   AG35 adaptation (modem needs APPS bit 1 to trigger A2 power-on):
- *   1. remote-ready IRQ fires (modem set SMDINIT)
- *   2. boot_work runs after 1s delay:
- *      a. Full BAM init (SW_RST + BAM_EN + pipes + RX queue + doorbell)
- *      b. Atomically set APPS bit 1 AND bit 11 (single IPC to modem)
- *   3. Modem receives IPC, reads APPS state (sees both bits + BAM ready):
- *      a. bam_check (BAM_EN=1)
- *      b. Connects to pre-configured pipes 4+5
- *      c. Sets MODEM bit 1+11
- *      d. Starts sending CMD_OPEN on pipe 5
- *   4. pc_irq fires (modem set bit 1):
- *      a. Activates polling + runtime PM
- *      b. Sends CMD_OPEN fallback (some firmware needs APPS to initiate)
- *   5. Poll timer finds modem's CMD_OPEN in RX pipe
- *   6. Channels open, data can flow
+ *   1. remote-ready → boot_work:
+ *      a. Global BAM init (SW_RST + BAM_EN + CNFG_BITS)
+ *      b. Vote APPS bit 1
+ *   2. Modem A2 init → sets MODEM bit 1+11
+ *   3. pc_irq:
+ *      a. DIAGNOSTIC: dump ALL pipe registers (check modem's config)
+ *      b. Init pipe 4 (TX only)
+ *      c. Init pipe 5 (RX) — ONLY if modem hasn't configured it
+ *      d. Queue 32 RX + doorbell
+ *      e. Toggle ACK (bit 11)
+ *      f. Start polling (no CMD_OPEN for 15s)
  * ────────────────────────────────────────────────────────────────────────── */
 
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
@@ -1417,35 +1435,64 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state && !dmux->pc_state) {
+		int i, ret;
+
 		/*
 		 * Modem set A2_POWER_CONTROL (bit 1) — A2 is initialized.
+		 * Global BAM init (SW_RST + BAM_EN) was done in boot_work.
 		 *
-		 * All BAM init (SW_RST + pipe config + RX queue + ACK +
-		 * vote) was done atomically in boot_work BEFORE we ever
-		 * signalled the modem.  By the time modem sees our bit 1,
-		 * everything is already configured.  We just need to
-		 * activate the data path here.
+		 * DIAGNOSTIC: dump full pipe state BEFORE touching anything
+		 * to see if modem has configured pipes 4/5 during A2 init.
 		 */
-
-		dev_info(dmux->dev, "pc_irq: modem powered up, pipes_active=%d\n",
-			 dmux->pipes_active);
+		bam_dmux_dump_pipes(dmux, "PRE-INIT");
 
 		if (!dmux->pipes_active) {
-			dev_err(dmux->dev,
-				"pc_irq: pipes not active — boot_work incomplete?\n");
-			goto out;
+			/* Init pipe 4 (TX / consumer) always */
+			ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
+					       BAM_DMUX_TX_PIPE, false);
+			if (ret) {
+				dev_err(dmux->dev,
+					"pc_irq: TX pipe init failed: %d\n",
+					ret);
+				goto out;
+			}
+
+			/* Init pipe 5 (RX / producer) */
+			ret = bam_pipe_hw_init(dmux, &dmux->rx_pipe,
+					       BAM_DMUX_RX_PIPE, true);
+			if (ret) {
+				dev_err(dmux->dev,
+					"pc_irq: RX pipe init failed: %d\n",
+					ret);
+				bam_pipe_deinit(dmux, &dmux->tx_pipe);
+				goto out;
+			}
+
+			dmux->pipes_active = true;
+			dev_info(dmux->dev,
+				 "pc_irq: pipes 4+5 initialized\n");
 		}
 
-		/* Dump post-modem-ack state for diagnostics */
+		/* Queue 32 RX descriptors BEFORE ACK toggle */
+		for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
+			if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i],
+					       GFP_KERNEL)) {
+				dev_err(dmux->dev,
+					"pc_irq: RX queue %d failed\n", i);
+			}
+		}
+		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 		dev_info(dmux->dev,
-			 "pc_irq: P_EVNT_REG(5)=0x%08x "
-			 "P_SW_OFSTS(5)=0x%08x P_HALT(5)=0x%08x "
-			 "P_CTRL(5)=0x%08x IRQ_SRCS_MSK=0x%08x\n",
-			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
+			 "pc_irq: %d RX queued, doorbell rung\n",
+			 BAM_DMUX_NUM_SKB);
+
+		/* Toggle ACK AFTER queue_rx — modem should see descriptors
+		 * when it processes the ACK callback */
+		bam_dmux_pc_ack(dmux);
+		dev_info(dmux->dev, "pc_irq: ACK toggled\n");
+
+		/* Post-init diagnostic dump */
+		bam_dmux_dump_pipes(dmux, "POST-INIT");
 
 		dmux->pc_state = new_state;
 		dmux->boot_done = true;
@@ -1453,20 +1500,17 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		pm_runtime_disable(dmux->dev);
 		pm_runtime_set_active(dmux->dev);
 		pm_runtime_enable(dmux->dev);
-		/* One get for "link is up", one for CMD_OPEN tx_done put */
 		pm_runtime_get_noresume(dmux->dev);
 		pm_runtime_get_noresume(dmux->dev);
 
 		/*
-		 * Send CMD_OPEN as fallback — downstream protocol says
-		 * modem sends CMD_OPEN first, but some firmware needs
-		 * APPS to initiate.
+		 * DON'T send CMD_OPEN immediately.
+		 * Downstream protocol: modem sends CMD_OPEN first.
+		 * Wait 15s before sending CMD_OPEN as fallback.
 		 */
-		bam_dmux_send_open_cmd(dmux, 0);
-
 		dmux->cmd_open_retries = 0;
 		dmux->cmd_open_acked = false;
-		dmux->cmd_open_next_retry = jiffies + 5 * HZ;
+		dmux->cmd_open_next_retry = jiffies + 15 * HZ;
 
 		/* Start polling */
 		mod_timer(&dmux->rx_poll_timer,
@@ -1545,69 +1589,19 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Complete BAM init BEFORE signalling modem.
+	 * Global BAM init only — SW_RST + BAM_EN + CNFG_BITS + IRQ_EN.
+	 * Pipe config deferred to pc_irq (after modem has set its bit 1).
 	 *
-	 * Key insight: the modem's A2 DMA will NOT start TX (pipe 5)
-	 * until it sees BOTH APPS bit 1 (A2_POWER_CONTROL) and
-	 * APPS bit 11 (A2_POWER_CONTROL_ACK) set.  In previous
-	 * attempts, we set bit 1 first (triggering modem A2 init)
-	 * and bit 11 later in pc_irq — but by then the modem had
-	 * already checked for ACK and found it missing.
-	 *
-	 * Matching downstream bam_init() + toggle_apps_ack() semantics:
-	 * everything must be ready BEFORE the modem connects to pipes.
-	 *
-	 * Sequence:
-	 *   1. BAM global init (SW_RST + BAM_EN + CNFG_BITS + IRQ_EN)
-	 *   2. Pipe 4+5 init (P_RST + P_CTRL + desc FIFO + P_EN)
-	 *   3. Queue 32 RX descriptors on pipe 5 + ring doorbell
-	 *   4. Atomically set APPS bit 1 AND bit 11 (single IPC)
-	 *
-	 * When modem receives the IPC, APPS state has both bits set,
-	 * BAM is fully configured, pipes are ready, RX descriptors
-	 * are queued.  Modem can immediately bam_check() + connect
-	 * to pipes + start sending CMD_OPEN on pipe 5.
-	 */
-
-	dev_info(dmux->dev,
-		 "boot_work: full BAM init (SW_RST + pipes + RX)\n");
-
-	/* Step 1: Full power-on (BAM + pipes + RX queue) */
-	if (!bam_dmux_power_on(dmux, true)) {
-		dev_err(dmux->dev, "boot_work: power_on failed!\n");
-		return;
-	}
-
-	/* Ring the doorbell for RX pipe */
-	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
-
-	dev_info(dmux->dev,
-		 "boot_work: BAM + pipes + %d RX ready, doorbell rung\n",
-		 BAM_DMUX_NUM_SKB);
-	dev_info(dmux->dev,
-		 "boot_work: P5 EVNT_REG=0x%08x SW_OFSTS=0x%08x "
-		 "HALT=0x%08x CTRL=0x%08x\n",
-		 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
-		 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
-		 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_RX_PIPE)),
-		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)));
-
-	/*
-	 * Step 2: Atomically set APPS bit 1 (vote) AND bit 11 (ACK).
-	 *
-	 * Using a single SMSM update ensures the modem sees both bits
-	 * in one IPC — no window where bit 1 is set but bit 11 isn't.
-	 *
-	 * Both pc and pc_ack operate on the same SMSM entry (APPS state),
-	 * so we can use either handle to set both bits at once.
+	 * The modem's bam_check() needs BAM_EN=1 to pass.
 	 */
 	dev_info(dmux->dev,
-		 "boot_work: setting APPS bit 1 (vote) + bit 11 (ACK) atomically\n");
-	reinit_completion(&dmux->pc_ack_completion);
-	qcom_smem_state_update_bits(dmux->pc,
-				    dmux->pc_mask | dmux->pc_ack_mask,
-				    dmux->pc_mask | dmux->pc_ack_mask);
-	dmux->pc_ack_state = true;  /* Track ACK toggle state */
+		 "boot_work: global BAM init (SW_RST + BAM_EN), no pipes\n");
+
+	bam_hw_init(dmux, true);
+
+	dev_info(dmux->dev,
+		 "boot_work: BAM ready, requesting A2 power\n");
+	bam_dmux_pc_vote(dmux, true);
 }
 
 static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
