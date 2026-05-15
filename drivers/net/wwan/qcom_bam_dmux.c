@@ -1025,6 +1025,20 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 				 "CMD_OPEN fallback %u sent (no modem CMD_OPEN after %us)\n",
 				 dmux->cmd_open_retries,
 				 dmux->cmd_open_retries * 5);
+			/* Dump BAM state at each CMD_OPEN retry */
+			dev_info(dmux->dev,
+				 "RETRY-DIAG: BAM_CTRL=0x%08x "
+				 "P4[CTRL=0x%08x SW=0x%08x EVNT=0x%08x HALT=0x%08x] "
+				 "P5[CTRL=0x%08x SW=0x%08x EVNT=0x%08x HALT=0x%08x]\n",
+				 bam_readl(dmux, BAM_CTRL),
+				 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
+				 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_TX_PIPE)),
+				 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_TX_PIPE)),
+				 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_TX_PIPE)),
+				 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
+				 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
+				 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
+				 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_RX_PIPE)));
 		} else {
 			pm_runtime_put_noidle(dmux->dev);
 			dev_warn(dmux->dev,
@@ -1386,10 +1400,11 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
  *      (NO pipe init, NO RX queue — deferred to pc_irq)
  *   3. Modem responds: bam_check (BAM_EN=1), initializes A2,
  *      sets MODEM bit 1+11
- *   4. pc_irq fires:
- *      a. Init pipes (TX/RX) + queue 32 RX + ring doorbell
- *      b. Toggle ACK (APPS bit 11) — signals APPS ready
- *      c. Wait for modem's CMD_OPEN (5s), then retry if needed
+ *   4. pc_irq fires (matching downstream bam_init() order):
+ *      a. Init pipes (TX/RX)
+ *      b. Toggle ACK (APPS bit 11) — BEFORE queue_rx!
+ *      c. Queue 32 RX descriptors + ring doorbell
+ *      d. Send CMD_OPEN immediately + start poll timer
  *   5. Poll timer finds modem's CMD_OPEN in RX pipe
  *   6. Channels open, data can flow
  * ────────────────────────────────────────────────────────────────────────── */
@@ -1411,10 +1426,12 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		/*
 		 * Modem set A2_POWER_CONTROL (bit 1) — A2 is initialized.
 		 *
-		 * Matching downstream bam_init() / reconnect_to_bam():
-		 * pipe init → toggle ACK → queue_rx.  Downstream does NOT
-		 * send CMD_OPEN from APPS — the modem sends CMD_OPEN first
-		 * for channels it wants to open.
+		 * Match downstream bam_init() order EXACTLY:
+		 *   1. pipe init (TX + RX)
+		 *   2. toggle_apps_ack()    <-- BEFORE queue_rx!
+		 *   3. queue_rx() + doorbell
+		 *   4. Send CMD_OPEN immediately (fallback for firmware
+		 *      that doesn't send CMD_OPEN spontaneously)
 		 */
 		int i, ret;
 
@@ -1425,7 +1442,6 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			/*
 			 * Pipes not yet configured — init them now.
 			 * Global BAM (SW_RST + BAM_EN) was done in boot_work.
-			 * Only pipe-level init is needed here.
 			 */
 			ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
 					       BAM_DMUX_TX_PIPE, false);
@@ -1446,35 +1462,35 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 				goto out;
 			}
 
-			/* Queue 32 RX descriptors */
-			for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
-				if (!bam_dmux_queue_rx(dmux,
-						       &dmux->rx_skbs[i],
-						       GFP_KERNEL)) {
-					dev_err(dmux->dev,
-						"pc_irq: RX queue %d failed\n",
-						i);
-				}
-			}
-
 			dmux->pipes_active = true;
-
 			dev_info(dmux->dev,
-				 "pc_irq: pipes initialized, %d RX queued\n",
-				 BAM_DMUX_NUM_SKB);
+				 "pc_irq: pipes 4+5 initialized\n");
 		}
 
-		/* Ring RX doorbell to make queued descriptors active */
-		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
-
 		/*
-		 * Toggle APPS ACK to tell modem we're ready.
+		 * Step 2: Toggle APPS ACK BEFORE queue_rx.
 		 * Downstream: pipe init → toggle_apps_ack → queue_rx.
-		 * We queue_rx before ACK (already done above) since the
-		 * modem may start sending CMD_OPEN as soon as it sees ACK.
+		 * The modem may use the ACK edge to arm its A2 DMA,
+		 * then the doorbell (from queue_rx) triggers data flow.
 		 */
 		bam_dmux_pc_ack(dmux);
-		dev_info(dmux->dev, "pc_irq: ACK toggled\n");
+		dev_info(dmux->dev, "pc_irq: ACK toggled (before queue_rx)\n");
+
+		/*
+		 * Step 3: Queue 32 RX descriptors + ring doorbell.
+		 * This must happen AFTER ACK (matching downstream order).
+		 */
+		for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
+			if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i],
+					       GFP_KERNEL)) {
+				dev_err(dmux->dev,
+					"pc_irq: RX queue %d failed\n", i);
+			}
+		}
+		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
+		dev_info(dmux->dev,
+			 "pc_irq: %d RX queued, doorbell rung\n",
+			 BAM_DMUX_NUM_SKB);
 
 		dev_info(dmux->dev,
 			 "pc_irq: post-init P_EVNT_REG(5)=0x%08x "
@@ -1489,15 +1505,18 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		pm_runtime_disable(dmux->dev);
 		pm_runtime_set_active(dmux->dev);
 		pm_runtime_enable(dmux->dev);
-		/* One get for "link is up" */
+		/* One get for "link is up", one for CMD_OPEN tx_done put */
+		pm_runtime_get_noresume(dmux->dev);
 		pm_runtime_get_noresume(dmux->dev);
 
 		/*
-		 * Do NOT send CMD_OPEN immediately.  Downstream protocol:
-		 * modem sends CMD_OPEN first, APPS responds.  Give modem
-		 * 5 seconds to send CMD_OPEN.  If it doesn't, send
-		 * CMD_OPEN from APPS as fallback.
+		 * Step 4: Send CMD_OPEN immediately.
+		 * Some firmware won't send CMD_OPEN spontaneously and
+		 * needs APPS to initiate.  Send it now — if modem
+		 * doesn't process it, retry every 5s.
 		 */
+		bam_dmux_send_open_cmd(dmux, 0);
+
 		dmux->cmd_open_retries = 0;
 		dmux->cmd_open_acked = false;
 		dmux->cmd_open_next_retry = jiffies + 5 * HZ;
