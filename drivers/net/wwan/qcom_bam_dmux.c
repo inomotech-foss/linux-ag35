@@ -1364,32 +1364,28 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
  *
  * Matching downstream 3.18 bam_dmux.c:
  *
- *   The downstream kernel registers the A2 BAM with
- *   SPS_BAM_MGR_DEVICE_REMOTE — the modem owns and initializes the BAM.
- *   The SPS driver calls bam_check() (just verifies BAM_EN) instead of
- *   bam_init() (which does SW_RST).  APPS never resets the BAM.
+ *   The downstream MDM9607 DTS does NOT set qcom,satellite-mode, so the
+ *   SPS driver is the BAM master and runs the FULL bam_init():
+ *   SW_RST + BAM_EN + CNFG_BITS + IRQ_EN.  This happens in
+ *   smsm_cb → bam_init(), AFTER the modem ACKs the APPS vote.
  *
- *   On Quectel firmware, modem waits for APPS bit 1 before initializing
- *   A2 hardware (including BAM).  We must set APPS bit 1 first, let the
- *   modem initialize its BAM/pipes, then configure APPS-side pipes.
- *
- *   CRITICAL: Do NOT do BAM SW_RST.  The modem initializes both the
- *   global BAM state and its own pipes (from its EE) when it processes
- *   APPS bit 1.  A SW_RST wipes the modem's pipe configuration, and
- *   the modem does NOT re-initialize pipes — only a2_hw_power_on()
- *   runs, which doesn't include BAM pipe setup.
+ *   The modem's bam_dmux service watches for the BAM_CTRL transition
+ *   (BAM_EN=0 → SW_RST=1 → SW_RST=0 → BAM_EN=1) to know APPS finished
+ *   its init.  If APPS sets BAM_EN before voting, the modem never sees
+ *   this transition and never sends CMD_OPEN.
  *
  *   Sequence:
  *   1. remote-ready IRQ fires (modem set SMDINIT)
  *   2. boot_work runs after 1s delay:
- *      - BAM global init (BAM_EN + CNFG_BITS + IRQ — NO SW_RST, NO pipes)
- *      - Set APPS A2_POWER_CONTROL (bit 1)
- *   3. Modem responds: registers A2 BAM (needs BAM_EN=1), connects pipes,
- *      sets MODEM bit 1
+ *      - Set APPS A2_POWER_CONTROL (bit 1) — NO BAM access at all
+ *   3. Modem responds: connects its pipes, sets MODEM bit 1
  *   4. pc_irq fires:
- *      a. Pipe init + queue RX
- *      b. Toggle ACK
- *      c. Send CMD_OPEN + start poll timer
+ *      a. bam_hw_init(true) — SW_RST + BAM_EN + CNFG_BITS + IRQ_EN
+ *      b. Pipe init (TX/RX) + queue 32 RX
+ *      c. Toggle ACK
+ *      d. Send CMD_OPEN + start poll timer (Quectel firmware
+ *         doesn't always send CMD_OPEN spontaneously, so we
+ *         prime the pump and retry on timeout)
  *   5. Modem echoes CMD_OPEN on pipe 5
  *   6. Poll timer detects CMD_OPEN, opens channels
  * ────────────────────────────────────────────────────────────────────────── */
@@ -1409,19 +1405,22 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state && !dmux->pc_state) {
 		/*
-		 * Modem set A2_POWER_CONTROL (bit 1).
-		 * The modem has registered its A2 BAM (bam_check passed
-		 * because boot_work set BAM_EN beforehand) and connected
-		 * its pipe endpoints.  Now init APPS-side pipes.
+		 * Modem set A2_POWER_CONTROL (bit 1) in response to our
+		 * vote.  Now do FULL BAM init: SW_RST + BAM_EN + CNFG_BITS
+		 * + IRQ_EN + connect both pipes + queue RX + toggle ACK.
 		 *
-		 * bam_hw_init is called again defensively to re-verify
-		 * global BAM state — the modem may have touched it.
+		 * This matches downstream bam_init() (drivers/soc/qcom/
+		 * bam_dmux.c → sps_bam_enable() → bam_init()).  The
+		 * modem's bam_dmux service watches for the BAM_CTRL
+		 * transition (BAM_EN=0 → SW_RST → BAM_EN=1) to know
+		 * APPS finished init — without SW_RST, the modem never
+		 * sees this transition and never sends CMD_OPEN.
 		 */
 		dev_info(dmux->dev, "pc_irq: modem powered up, pipes_active=%d\n",
 			 dmux->pipes_active);
 
 		if (!dmux->pipes_active) {
-			if (!bam_dmux_power_on(dmux, false)) {
+			if (!bam_dmux_power_on(dmux, true)) {
 				dev_err(dmux->dev, "pc_irq: power_on failed\n");
 				bam_dmux_power_off(dmux);
 				goto out;
@@ -1550,21 +1549,17 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Set BAM_EN + global registers BEFORE setting APPS bit 1.
-	 * Evidence: BAM_CTRL=0x00020000 (BAM_EN=0) at boot — TZ
-	 * leaves this BAM disabled.  The modem's bam_check() needs
-	 * BAM_EN=1 to succeed.
+	 * Match downstream EXACTLY: APPS does NOT touch BAM hardware
+	 * before voting.  We only set APPS bit 1 (vote) here; the
+	 * modem will respond with bit 1 (and bit 11), then pc_irq
+	 * fires and runs the full bam_init (SW_RST + BAM_EN + ...).
 	 *
-	 * Do NOT do SW_RST — it wipes TZ's security configuration
-	 * (trust registers, EE assignments) and has been tested with
-	 * no improvement.  Just set the minimum global state needed.
-	 *
-	 * Pipe init happens later in pc_irq after modem responds.
+	 * This ordering is critical: the modem's bam_dmux service
+	 * watches for the BAM_CTRL transition (BAM_EN=0 → SW_RST → BAM_EN=1)
+	 * to know APPS finished its init.  If we enable BAM before
+	 * voting, the modem never sees this transition and its
+	 * bam_dmux service never starts sending CMD_OPEN.
 	 */
-	dev_info(dmux->dev,
-		 "boot_work: enabling BAM before requesting A2 power\n");
-	bam_hw_init(dmux, false);
-
 	dev_info(dmux->dev,
 		 "boot_work: requesting A2 power (setting APPS bit 1)\n");
 	bam_dmux_pc_vote(dmux, true);
