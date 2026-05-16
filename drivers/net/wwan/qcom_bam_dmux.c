@@ -31,10 +31,12 @@
 #include <linux/if_arp.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/irq.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/soc/qcom/smem_state.h>
@@ -213,6 +215,8 @@ struct bam_dmux_skb_dma {
 struct bam_dmux {
 	struct device *dev;
 	void __iomem *bam_base;		/* BAM register base */
+	int bam_irq;			/* BAM hardware IRQ */
+	bool bam_irq_registered;
 
 	/* SMSM power control */
 	int pc_irq;
@@ -592,6 +596,74 @@ static void bam_pipe_doorbell(struct bam_dmux *dmux, struct bam_pipe *pipe)
 	wmb();
 	bam_writel_sync(dmux, BAM_P_EVNT_REG(pipe->pipe_index),
 			pipe->desc_offset);
+}
+
+/*
+ * Clear all pending BAM and pipe interrupt status.
+ *
+ * The downstream SPS ISR (bam_isr → bam_pipe_get_and_clear_irq_status)
+ * clears these on every interrupt.  Without clearing, the P_WAKE IRQ
+ * status (bit 2) accumulates on producer pipes after doorbell, and may
+ * prevent the BAM DMA engine from starting descriptor processing.
+ */
+static void bam_clear_irqs(struct bam_dmux *dmux)
+{
+	u32 stts;
+
+	/* BAM-level IRQ */
+	stts = bam_readl(dmux, BAM_IRQ_STTS);
+	if (stts)
+		bam_writel(dmux, BAM_IRQ_CLR, stts);
+
+	/* Pipe 4 (TX) IRQ */
+	stts = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE));
+	if (stts)
+		bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_TX_PIPE), stts);
+
+	/* Pipe 5 (RX) IRQ */
+	stts = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_RX_PIPE));
+	if (stts)
+		bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_RX_PIPE), stts);
+}
+
+/*
+ * BAM hardware ISR — matches downstream SPS bam_isr().
+ *
+ * The downstream SPS layer registers this ISR for BAM IRQ 29.
+ * It reads IRQ_SRCS_EE, clears BAM-level and pipe-level interrupt
+ * status via IRQ_CLR / P_IRQ_CLR.  Without this, accumulated
+ * interrupt status may prevent the BAM DMA engine from processing
+ * producer pipe (RX) descriptors.
+ */
+static irqreturn_t bam_dmux_bam_isr(int irq, void *data)
+{
+	struct bam_dmux *dmux = data;
+	u32 srcs, stts;
+
+	if (!READ_ONCE(dmux->pipes_active))
+		return IRQ_HANDLED;
+
+	srcs = bam_readl(dmux, BAM_IRQ_SRCS_EE(BAM_DMUX_EE));
+
+	/* BAM-level IRQ */
+	if (srcs & BIT(31)) {
+		stts = bam_readl(dmux, BAM_IRQ_STTS);
+		bam_writel(dmux, BAM_IRQ_CLR, stts);
+	}
+
+	/* Pipe 4 (TX) */
+	if (srcs & BIT(BAM_DMUX_TX_PIPE)) {
+		stts = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE));
+		bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_TX_PIPE), stts);
+	}
+
+	/* Pipe 5 (RX) */
+	if (srcs & BIT(BAM_DMUX_RX_PIPE)) {
+		stts = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_RX_PIPE));
+		bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_RX_PIPE), stts);
+	}
+
+	return IRQ_HANDLED;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -1015,6 +1087,14 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 	if (!READ_ONCE(dmux->pipes_active) || !READ_ONCE(dmux->pc_state))
 		return;
 
+	/*
+	 * Clear accumulated IRQ status at every poll iteration.
+	 * The downstream SPS ISR does this on every BAM interrupt.
+	 * Without clearing, the BAM DMA engine may stall on producer
+	 * pipes (RX) due to unacknowledged P_WAKE or EOT status.
+	 */
+	bam_clear_irqs(dmux);
+
 	bam_dmux_process_tx_completions(dmux);
 	bam_dmux_process_rx_completions(dmux);
 
@@ -1031,16 +1111,6 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 
 	/* One-shot detailed error/status dump at poll[20] */
 	if (poll_count == 20) {
-		u32 bam_irq, p4_irq, p5_irq;
-
-		bam_irq = bam_readl(dmux, BAM_IRQ_STTS);
-		p4_irq = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_TX_PIPE));
-		p5_irq = bam_readl(dmux, BAM_P_IRQ_STTS(BAM_DMUX_RX_PIPE));
-
-		dev_info(dmux->dev,
-			 "DIAG: BAM_IRQ_STTS=0x%08x "
-			 "P4_IRQ_STTS=0x%08x P5_IRQ_STTS=0x%08x\n",
-			 bam_irq, p4_irq, p5_irq);
 		dev_info(dmux->dev,
 			 "DIAG: BAM_CTRL=0x%08x CNFG=0x%08x "
 			 "IRQ_SRCS_EE=0x%08x IRQ_SRCS_MSK=0x%08x\n",
@@ -1048,36 +1118,15 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 			 bam_readl(dmux, BAM_CNFG_BITS),
 			 bam_readl(dmux, BAM_IRQ_SRCS_EE(BAM_DMUX_EE)),
 			 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
-		dev_info(dmux->dev,
-			 "DIAG: P4 CTRL=0x%08x HALT=0x%08x "
-			 "EVNT_REG=0x%08x DESC_ADDR=0x%08x "
-			 "FIFO_SZ=0x%08x EVNT_TRSHLD=0x%08x\n",
-			 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_P_FIFO_SIZES(BAM_DMUX_TX_PIPE)),
-			 bam_readl(dmux, BAM_P_EVNT_GEN_TRSHLD(BAM_DMUX_TX_PIPE)));
-		dev_info(dmux->dev,
-			 "DIAG: P5 CTRL=0x%08x HALT=0x%08x "
-			 "EVNT_REG=0x%08x DESC_ADDR=0x%08x "
-			 "FIFO_SZ=0x%08x EVNT_TRSHLD=0x%08x\n",
-			 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_FIFO_SIZES(BAM_DMUX_RX_PIPE)),
-			 bam_readl(dmux, BAM_P_EVNT_GEN_TRSHLD(BAM_DMUX_RX_PIPE)));
-
-		/* Clear any pending IRQs so they don't accumulate */
-		if (bam_irq)
-			bam_writel(dmux, BAM_IRQ_CLR, bam_irq);
-		if (p4_irq)
-			bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_TX_PIPE),
-				   p4_irq);
-		if (p5_irq)
-			bam_writel(dmux, BAM_P_IRQ_CLR(BAM_DMUX_RX_PIPE),
-				   p5_irq);
+		/* Dump ALL 6 pipes to see if modem configured any */
+		for (int p = 0; p < 6; p++)
+			dev_info(dmux->dev,
+				 "DIAG: P%d CTRL=0x%08x HALT=0x%08x "
+				 "SW=0x%08x EVNT=0x%08x\n", p,
+				 bam_readl(dmux, BAM_P_CTRL(p)),
+				 bam_readl(dmux, BAM_P_HALT(p)),
+				 bam_readl(dmux, BAM_P_SW_OFSTS(p)),
+				 bam_readl(dmux, BAM_P_EVNT_REG(p)));
 	}
 
 	/*
@@ -1625,6 +1674,36 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	}
 	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 
+	/*
+	 * Clear all pending IRQ status IMMEDIATELY after doorbell.
+	 *
+	 * The doorbell generates P_WAKE (IRQ_STTS bit 2) on the RX pipe.
+	 * The downstream SPS ISR clears this via P_IRQ_CLR.  Without
+	 * clearing, the BAM DMA engine may not begin processing
+	 * producer pipe descriptors.  This was not done in attempts 1-14.
+	 */
+	bam_clear_irqs(dmux);
+
+	/* Register BAM IRQ handler — matching downstream SPS bam_isr().
+	 * The ISR clears IRQ status which may unblock producer pipe DMA.
+	 * Request it AFTER BAM init (BAM must be powered and enabled).
+	 */
+	if (dmux->bam_irq > 0 && !dmux->bam_irq_registered) {
+		ret = devm_request_irq(dmux->dev, dmux->bam_irq,
+				       bam_dmux_bam_isr,
+				       IRQF_TRIGGER_HIGH | IRQF_SHARED,
+				       "bam-dmux-bam", dmux);
+		if (ret)
+			dev_warn(dmux->dev,
+				 "BAM IRQ %d request failed: %d (continuing without ISR)\n",
+				 dmux->bam_irq, ret);
+		else {
+			dmux->bam_irq_registered = true;
+			dev_info(dmux->dev,
+				 "BAM IRQ %d registered\n", dmux->bam_irq);
+		}
+	}
+
 	dev_info(dmux->dev,
 		 "ack_work: BAM init complete, %d RX queued\n",
 		 BAM_DMUX_NUM_SKB);
@@ -1817,11 +1896,19 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	}
 
 	ret = of_address_to_resource(bam_node, 0, &res);
-	of_node_put(bam_node);
 	if (ret) {
+		of_node_put(bam_node);
 		dev_err(dev, "Failed to get BAM resource: %d\n", ret);
 		return ret;
 	}
+
+	/* Get BAM hardware IRQ from the DMA controller node.
+	 * The downstream SPS layer registers bam_isr() for this IRQ.
+	 * Without handling it, accumulated P_IRQ_STTS (especially P_WAKE)
+	 * may prevent the BAM DMA engine from processing RX descriptors.
+	 */
+	dmux->bam_irq = of_irq_get(bam_node, 0);
+	of_node_put(bam_node);
 
 	dmux->bam_base = devm_ioremap(dev, res.start, resource_size(&res));
 	if (!dmux->bam_base) {
