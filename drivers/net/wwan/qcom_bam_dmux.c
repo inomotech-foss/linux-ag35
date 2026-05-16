@@ -225,6 +225,7 @@ struct bam_dmux {
 
 	/* Boot / lifecycle */
 	struct delayed_work boot_work;
+	struct delayed_work ack_work;	/* Delayed ACK toggle after pc_irq */
 	struct timer_list rx_poll_timer;
 	bool boot_done;
 
@@ -1406,27 +1407,46 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 /* ──────────────────────────────────────────────────────────────────────────
  * SMSM IRQ Handlers + Boot Sequence
  *
- * Attempt 8: match downstream protocol exactly.
+ * Attempt 9: fix timing — do all BAM init in boot_work BEFORE modem
+ * responds, delay ACK toggle 500ms after modem responds.
  *
- * ROOT CAUSE OF ATTEMPTS 1-7: APPS was prematurely setting APPS bit 1
- * (A2_POWER_CONTROL / power vote) in boot_work.  This forced the modem
- * into a power-vote ACK path (modem sets bit 1+11 simultaneously) instead
- * of the proper A2 initialization path.
+ * Key insight: The modem needs time after setting modem bit 1 to finish
+ * registering its APPS-bit-11 SMSM callback.  Previous attempts toggled
+ * ACK within ~200ms of modem responding — modem may miss the toggle.
  *
- * In the downstream 3.18 kernel:
- *   - APPS NEVER sets bit 1 during BAM-DMUX init
- *   - Modem spontaneously sets modem bit 1 when A2 DMA is ready
- *   - APPS responds: SW_RST + pipe init + toggle ACK (bit 11) + queue RX
- *   - Modem sees ACK → sends CMD_OPEN
- *   - APPS bit 1 is only set later during ul_wakeup() for uplink data
+ * Also: do NOT do SW_RST after modem responds.  All BAM/pipe init is
+ * done in boot_work, so the BAM state is stable when modem runs its init.
  *
- * New flow:
- *   1. remote-ready → wait for modem to set modem bit 1 (120s timeout)
- *   2. pc_irq (modem bit 1): FULL BAM init + pipe init + ACK + queue RX
- *   3. Modem sends CMD_OPEN → channels opened
- *   4. APPS bit 1 set only on netdev open (power vote for uplink)
- *   5. Fallback: if modem never sets bit 1 in 120s, set APPS bit 1
+ * Flow:
+ *   1. boot_work (1s after SMDINIT):
+ *      a. Full BAM init (SW_RST + BAM_EN + config)
+ *      b. Init pipes 4+5 + queue 32 RX + doorbell
+ *      c. Set APPS bit 1 (trigger modem A2 init)
+ *
+ *   2. pc_irq (modem bit 1): schedule ack_work in 500ms
+ *
+ *   3. ack_work (+500ms): toggle ACK (bit 11) + start polling
  * ────────────────────────────────────────────────────────────────────────── */
+
+static void bam_dmux_ack_work_fn(struct work_struct *work)
+{
+	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
+					     ack_work.work);
+
+	dev_info(dmux->dev, "ack_work: toggling ACK (APPS bit 11)\n");
+	bam_dmux_pc_ack(dmux);
+
+	/* Diagnostic dump after ACK */
+	bam_dmux_dump_pipes(dmux, "POST-ACK");
+
+	/* CMD_OPEN fallback after 15s */
+	dmux->cmd_open_retries = 0;
+	dmux->cmd_open_acked = false;
+	dmux->cmd_open_next_retry = jiffies + 15 * HZ;
+
+	/* Start polling */
+	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
+}
 
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 {
@@ -1439,77 +1459,19 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	dev_info(dmux->dev, "pc_irq: modem_bit1=%d pc_state=%d\n",
 		 new_state, dmux->pc_state);
 
-	cancel_delayed_work(&dmux->boot_work);
-
 	if (new_state && !dmux->pc_state) {
-		int i, ret;
-
 		/*
-		 * Modem set A2_POWER_CONTROL (bit 1) — A2 DMA is ready.
+		 * Modem set A2_POWER_CONTROL (bit 1).
 		 *
-		 * Downstream sequence (bam_dmux_smsm_cb → bam_init):
-		 *   1. vote_dfab (bus clock)
-		 *   2. sps_register_bam_device (SW_RST + BAM_EN + config)
-		 *   3. sps_connect TX pipe 4
-		 *   4. sps_connect RX pipe 5
-		 *   5. toggle_apps_ack (APPS bit 11)
-		 *   6. queue_rx
+		 * BAM + pipes were already configured in boot_work.
+		 * RX descriptors already queued + doorbell rung.
 		 *
-		 * We do the same here — all in one shot, no prior boot_work.
-		 * APPS bit 1 is NOT set (matching downstream bam_init).
+		 * DON'T touch BAM hardware here — no SW_RST, no pipe init.
+		 * Just schedule ACK toggle with 500ms delay to give modem
+		 * time to finish its internal A2 init.
 		 */
-
-		/* Step 1: Full BAM hardware init (SW_RST + BAM_EN + config) */
 		dev_info(dmux->dev,
-			 "pc_irq: full BAM init (SW_RST + BAM_EN)\n");
-		bam_hw_init(dmux, true);
-
-		if (!dmux->pipes_active) {
-			/* Step 2: Init pipe 4 (TX / consumer) */
-			ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
-					       BAM_DMUX_TX_PIPE, false);
-			if (ret) {
-				dev_err(dmux->dev,
-					"pc_irq: TX pipe init failed: %d\n",
-					ret);
-				goto out;
-			}
-
-			/* Step 3: Init pipe 5 (RX / producer) */
-			ret = bam_pipe_hw_init(dmux, &dmux->rx_pipe,
-					       BAM_DMUX_RX_PIPE, true);
-			if (ret) {
-				dev_err(dmux->dev,
-					"pc_irq: RX pipe init failed: %d\n",
-					ret);
-				bam_pipe_deinit(dmux, &dmux->tx_pipe);
-				goto out;
-			}
-
-			dmux->pipes_active = true;
-			dev_info(dmux->dev,
-				 "pc_irq: pipes 4+5 initialized\n");
-		}
-
-		/* Step 4: Toggle ACK BEFORE queue_rx (matching downstream) */
-		bam_dmux_pc_ack(dmux);
-		dev_info(dmux->dev, "pc_irq: ACK toggled (APPS bit 11)\n");
-
-		/* Step 5: Queue 32 RX descriptors + doorbell */
-		for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
-			if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i],
-					       GFP_KERNEL)) {
-				dev_err(dmux->dev,
-					"pc_irq: RX queue %d failed\n", i);
-			}
-		}
-		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
-		dev_info(dmux->dev,
-			 "pc_irq: %d RX queued, doorbell rung\n",
-			 BAM_DMUX_NUM_SKB);
-
-		/* Post-init diagnostic dump */
-		bam_dmux_dump_pipes(dmux, "POST-INIT");
+			 "pc_irq: modem A2 ready, scheduling ACK in 500ms\n");
 
 		dmux->pc_state = new_state;
 		dmux->boot_done = true;
@@ -1520,18 +1482,8 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		pm_runtime_get_noresume(dmux->dev);
 		pm_runtime_get_noresume(dmux->dev);
 
-		/*
-		 * DON'T send CMD_OPEN — downstream protocol says modem
-		 * sends CMD_OPEN first after seeing our ACK toggle.
-		 * Wait 15s, then send CMD_OPEN as fallback.
-		 */
-		dmux->cmd_open_retries = 0;
-		dmux->cmd_open_acked = false;
-		dmux->cmd_open_next_retry = jiffies + 15 * HZ;
-
-		/* Start polling */
-		mod_timer(&dmux->rx_poll_timer,
-			  jiffies + msecs_to_jiffies(1));
+		schedule_delayed_work(&dmux->ack_work,
+				      msecs_to_jiffies(500));
 
 	} else if (new_state && dmux->pc_state) {
 		if (dmux->pipes_active)
@@ -1540,6 +1492,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			 "pc_irq: already up, re-issued doorbell\n");
 	} else if (!new_state) {
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
+		cancel_delayed_work(&dmux->ack_work);
 		bam_dmux_power_off(dmux);
 		bam_dmux_pc_ack(dmux);
 		pm_runtime_mark_last_busy(dmux->dev);
@@ -1549,7 +1502,6 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	dmux->pc_state = new_state;
 	wake_up_all(&dmux->pc_wait);
 
-out:
 	return IRQ_HANDLED;
 }
 
@@ -1601,31 +1553,60 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
 					     boot_work.work);
+	int i, ret;
 
 	if (dmux->pc_state || dmux->pipes_active)
 		return;
 
 	/*
-	 * FALLBACK: Modem did not spontaneously set A2_POWER_CONTROL
-	 * (bit 1) within the timeout.  Force it by setting APPS bit 1
-	 * (power vote).
+	 * Full BAM + pipe init BEFORE triggering modem.
 	 *
-	 * This is NOT the normal downstream flow — downstream never
-	 * sets APPS bit 1 during init.  But on some firmware variants
-	 * the modem may require APPS to vote first.
-	 *
-	 * Do BAM global init first so bam_check() passes when modem
-	 * responds, then set APPS bit 1.  pc_irq handler will do
-	 * pipe init + ACK when modem responds.
+	 * This ensures the BAM is fully configured and RX descriptors
+	 * are queued BEFORE the modem starts its A2 DMA.  No BAM
+	 * hardware changes happen after the modem responds.
 	 */
-	dev_warn(dmux->dev,
-		 "FALLBACK: modem did not set POWER_CONTROL in 120s, "
-		 "forcing with APPS vote\n");
+	dev_info(dmux->dev,
+		 "boot_work: full BAM init (SW_RST + BAM_EN + pipes)\n");
 
+	/* Step 1: BAM global init */
 	bam_hw_init(dmux, true);
 
+	/* Step 2: Init pipes */
+	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
+			       BAM_DMUX_TX_PIPE, false);
+	if (ret) {
+		dev_err(dmux->dev, "boot_work: TX pipe init failed: %d\n",
+			ret);
+		return;
+	}
+
+	ret = bam_pipe_hw_init(dmux, &dmux->rx_pipe,
+			       BAM_DMUX_RX_PIPE, true);
+	if (ret) {
+		dev_err(dmux->dev, "boot_work: RX pipe init failed: %d\n",
+			ret);
+		bam_pipe_deinit(dmux, &dmux->tx_pipe);
+		return;
+	}
+
+	dmux->pipes_active = true;
+
+	/* Step 3: Queue 32 RX + doorbell */
+	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
+		if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i], GFP_KERNEL))
+			dev_err(dmux->dev,
+				"boot_work: RX queue %d failed\n", i);
+	}
+	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
+
 	dev_info(dmux->dev,
-		 "boot_work: BAM ready, requesting A2 power (APPS bit 1)\n");
+		 "boot_work: BAM ready, %d RX queued, setting APPS bit 1\n",
+		 BAM_DMUX_NUM_SKB);
+
+	/* Diagnostic dump before triggering modem */
+	bam_dmux_dump_pipes(dmux, "PRE-VOTE");
+
+	/* Step 4: Set APPS bit 1 — trigger modem A2 init */
 	bam_dmux_pc_vote(dmux, true);
 }
 
@@ -1634,9 +1615,8 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 	struct bam_dmux *dmux = data;
 
 	dev_info(dmux->dev,
-		 "remote ready (SMDINIT), waiting for modem A2 POWER_CONTROL "
-		 "(120s timeout)\n");
-	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(120000));
+		 "remote ready (SMDINIT), scheduling boot_work in 1s\n");
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(1000));
 
 	return IRQ_HANDLED;
 }
@@ -1722,6 +1702,7 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	INIT_WORK(&dmux->tx_wakeup_work, bam_dmux_tx_wakeup_work);
 	INIT_WORK(&dmux->register_netdev_work, bam_dmux_register_netdev_work);
 	INIT_DELAYED_WORK(&dmux->boot_work, bam_dmux_boot_work_fn);
+	INIT_DELAYED_WORK(&dmux->ack_work, bam_dmux_ack_work_fn);
 	timer_setup(&dmux->rx_poll_timer, bam_dmux_poll_timer_fn, 0);
 
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
@@ -1788,6 +1769,7 @@ static void bam_dmux_remove(struct platform_device *pdev)
 	int i;
 
 	cancel_delayed_work_sync(&dmux->boot_work);
+	cancel_delayed_work_sync(&dmux->ack_work);
 	cancel_work_sync(&dmux->register_netdev_work);
 	cancel_work_sync(&dmux->tx_wakeup_work);
 	timer_delete_sync(&dmux->rx_poll_timer);
