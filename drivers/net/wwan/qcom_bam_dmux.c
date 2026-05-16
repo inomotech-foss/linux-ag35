@@ -981,11 +981,32 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 {
 	struct bam_dmux *dmux = container_of(t, struct bam_dmux, rx_poll_timer);
 	static unsigned int poll_count;
+	bool modem_alive;
 
 	if (!dmux->pipes_active || !dmux->pc_state) {
 		if (dmux->pipes_active)
 			mod_timer(&dmux->rx_poll_timer,
 				  jiffies + msecs_to_jiffies(5));
+		return;
+	}
+
+	/*
+	 * Verify modem is still alive by reading SMSM state (in shared
+	 * memory, always accessible).  After modem crash, remoteproc
+	 * powers off the BAM clock domain — any MMIO to BAM registers
+	 * causes an external abort and kernel panic.
+	 *
+	 * The SMSM state word is in SMEM (not modem clock domain), so
+	 * it remains readable.  If modem bit 1 is cleared, the modem
+	 * has crashed or powered down — stop polling immediately.
+	 */
+	irq_get_irqchip_state(dmux->pc_irq, IRQCHIP_STATE_LINE_LEVEL,
+			      &modem_alive);
+	if (!modem_alive) {
+		dev_warn(dmux->dev,
+			 "poll: modem bit 1 cleared (crash?), stopping\n");
+		dmux->pipes_active = false;
+		dmux->pc_state = false;
 		return;
 	}
 
