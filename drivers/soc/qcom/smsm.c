@@ -185,10 +185,6 @@ static int smsm_update_bits(void *data, u32 mask, u32 value)
 	dev_info(smsm->dev, "smsm_update: 0x%08x -> 0x%08x (mask=0x%08x val=0x%08x)\n",
 		 orig, val, mask, value);
 
-	/* Catch unexpected clearing of A2_POWER_CONTROL (bit 1) */
-	if ((orig & BIT(1)) && !(val & BIT(1)))
-		WARN(1, "smsm: bit 1 (A2_POWER_CONTROL) cleared!\n");
-
 	/* Make sure the value update is ordered before any kicks */
 	wmb();
 
