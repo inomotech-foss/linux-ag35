@@ -394,8 +394,12 @@ static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 
 	/* Full reset path (local BAM management) */
 
-	/* Step 1: Software reset — clear all BAM state */
+	/* Step 1: Software reset — clear all BAM state.
+	 * Downstream does: write SW_RST, read (flush), clear SW_RST.
+	 * The read ensures the reset propagates before clearing.
+	 */
 	bam_writel(dmux, BAM_CTRL, BAM_SW_RST);
+	bam_readl(dmux, BAM_CTRL);  /* flush — ensures reset completes */
 	bam_writel(dmux, BAM_CTRL, 0);
 
 	/* Step 2+3+4: Enable BAM + set CTRL fields */
@@ -479,15 +483,14 @@ static int bam_pipe_hw_init(struct bam_dmux *dmux, struct bam_pipe *pipe,
 	/* Step 3: Enable pipe IRQ — P_TRNSFR_END_EN (matching 3.18: 0x20) */
 	bam_writel(dmux, BAM_P_IRQ_EN(pipe_index), P_TRNSFR_END_EN);
 
-	/* Step 4: Direction (NOT yet P_EN).
-	 * P_SYS_MODE (bit 5) is NOT set — on MDM9607 BAM v1.7.0,
-	 * the downstream SPS driver clears this bit for system-mode
-	 * pipes.  Setting it puts the pipe in BAM2BAM mode which
-	 * breaks the producer (RX) pipe.  P_CTRL values:
-	 *   Pipe 4 (TX consumer): 0x02 (P_EN only)
-	 *   Pipe 5 (RX producer): 0x0a (P_EN | P_DIRECTION)
+	/* Step 4: Direction + system mode (NOT yet P_EN).
+	 * P_SYS_MODE (bit 5) MUST be set for system-mode pipes.
+	 * BAM_PIPE_MODE_SYSTEM=1 in downstream SPS.
+	 * P_CTRL values:
+	 *   Pipe 4 (TX consumer): 0x22 (P_SYS_MODE | P_EN)
+	 *   Pipe 5 (RX producer): 0x2a (P_SYS_MODE | P_DIRECTION | P_EN)
 	 */
-	val = 0;
+	val = P_SYS_MODE;
 	if (producer)
 		val |= P_DIRECTION;
 	bam_writel(dmux, BAM_P_CTRL(pipe_index), val);
@@ -1550,11 +1553,15 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	}
 
 	if (dmux->pipes_active) {
-		/* Retoggle ACK — fallback for non-responsive modem */
-		dev_info(dmux->dev, "ack_work: retoggle ACK (APPS bit 11)\n");
-		bam_dmux_pc_ack(dmux);
+		/*
+		 * Already initialized — do NOT retoggle ACK.
+		 * Clearing ACK tells modem "BAM is down" which kills the
+		 * connection.  In attempt 12, the 30s retoggle caused
+		 * the modem to shut down A2 DMA and crash.
+		 * Just re-doorbell the RX pipe.
+		 */
+		dev_info(dmux->dev, "ack_work: already active, re-doorbell\n");
 		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
-		bam_dmux_dump_all_pipes(dmux, "RETOGGLE-ACK");
 		return;
 	}
 
@@ -1564,16 +1571,12 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	 * CRITICAL: This runs AFTER modem has set bit 1, matching the
 	 * downstream where bam_init() is called from bam_dmux_smsm_cb.
 	 *
-	 * In attempts 1-11, BAM init was done BEFORE modem set bit 1.
-	 * The 3.18 boot log proves the downstream NEVER touches BAM
-	 * hardware until modem says "I'm ready" (bit 1).
-	 *
 	 * Downstream order: SW_RST → BAM_EN → pipe4 → pipe5 →
-	 *                   toggle_apps_ack → queue_rx → doorbell
+	 *                   toggle_apps_ack → queue_rx → CMD_OPEN
 	 */
 	dev_info(dmux->dev,
 		 "ack_work: full BAM init AFTER modem set bit 1 "
-		 "(SW_RST + pipes + ACK + queue_rx)\n");
+		 "(SW_RST + pipes + ACK + queue_rx + CMD_OPEN)\n");
 
 	/* Step 1: BAM global init (SW_RST + BAM_EN + config) */
 	bam_hw_init(dmux, true);
@@ -1630,15 +1633,31 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	bam_dmux_dump_all_pipes(dmux, "POST-INIT");
 	bam_dmux_dump_rx_descs(dmux);
 
-	/* CMD_OPEN fallback after 15s */
-	dmux->cmd_open_retries = 0;
+	/*
+	 * Step 6: Send CMD_OPEN immediately.
+	 *
+	 * In the downstream, APPS sends CMD_OPEN first (from rmnet
+	 * channel open, triggered quickly after bam_init).  The modem
+	 * does NOT initiate CMD_OPEN — it waits for APPS.
+	 *
+	 * In attempts 1-12, we waited 15s before sending CMD_OPEN.
+	 * The modem timed out waiting and never sent data on RX pipe.
+	 */
+	pm_runtime_get_noresume(dmux->dev);
+	if (bam_dmux_send_open_cmd(dmux, 0)) {
+		dev_info(dmux->dev,
+			 "ack_work: CMD_OPEN sent immediately for ch 0\n");
+	} else {
+		dev_err(dmux->dev, "ack_work: CMD_OPEN send failed\n");
+		pm_runtime_put_noidle(dmux->dev);
+	}
+
+	/* CMD_OPEN retry after 5s if modem doesn't respond */
+	dmux->cmd_open_retries = 1;
 	dmux->cmd_open_acked = false;
-	dmux->cmd_open_next_retry = jiffies + 15 * HZ;
+	dmux->cmd_open_next_retry = jiffies + 5 * HZ;
 
-	/* Schedule ACK retoggle in 30s as fallback */
-	schedule_delayed_work(&dmux->ack_work, msecs_to_jiffies(30000));
-
-	/* Step 6: Start polling (20ms interval to reduce crash risk) */
+	/* Step 7: Start polling (20ms interval) */
 	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(20));
 }
 
