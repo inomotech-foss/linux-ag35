@@ -105,7 +105,15 @@
 /* P_CTRL bits */
 #define P_EN				BIT(1)
 #define P_DIRECTION			BIT(3)
-#define P_SYS_MODE			BIT(5)
+/*
+ * P_SYS_MODE (bit 5): On MDM9607 BAM v1.7.0, the downstream SPS driver
+ * CLEARS this bit for system-mode pipes (BAM_PIPE_MODE_SYSTEM = 0).
+ * Setting bit 5 puts the pipe in BAM2BAM mode, which breaks producer
+ * (RX) pipes since no peer pipe is configured.  This was the root
+ * cause of 12 failed attempts — the mainline bam_dma.c interpretation
+ * (BIT(5) = system mode) is WRONG for this BAM version.
+ */
+#define P_SYS_MODE			BIT(5)	/* DO NOT SET for system-mode pipes */
 
 /* P_SW_OFSTS */
 #define P_SW_OFSTS_MASK			0xFFFF
@@ -425,7 +433,9 @@ static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
  *   1. P_RST (set then clear) — resets pipe state
  *   2. IRQ_SRCS_MSK_EE — enable pipe IRQ at BAM level
  *   3. P_IRQ_EN — pipe interrupt mask
- *   4. P_CTRL — direction + system mode (NOT yet enabled)
+ *   4. P_CTRL — direction only (NOT yet enabled)
+ *      NOTE: P_SYS_MODE (bit 5) must NOT be set for system-mode pipes!
+ *      Downstream SPS writes 0 to P_SYS_MODE for system mode.
  *   5. P_EVNT_GEN_TRSHLD — event threshold
  *   6. P_DESC_FIFO_ADDR — descriptor FIFO physical address
  *   7. P_FIFO_SIZES — descriptor FIFO size
@@ -469,8 +479,15 @@ static int bam_pipe_hw_init(struct bam_dmux *dmux, struct bam_pipe *pipe,
 	/* Step 3: Enable pipe IRQ — P_TRNSFR_END_EN (matching 3.18: 0x20) */
 	bam_writel(dmux, BAM_P_IRQ_EN(pipe_index), P_TRNSFR_END_EN);
 
-	/* Step 4: Direction + system mode (NOT yet P_EN) */
-	val = P_SYS_MODE;
+	/* Step 4: Direction (NOT yet P_EN).
+	 * P_SYS_MODE (bit 5) is NOT set — on MDM9607 BAM v1.7.0,
+	 * the downstream SPS driver clears this bit for system-mode
+	 * pipes.  Setting it puts the pipe in BAM2BAM mode which
+	 * breaks the producer (RX) pipe.  P_CTRL values:
+	 *   Pipe 4 (TX consumer): 0x02 (P_EN only)
+	 *   Pipe 5 (RX producer): 0x0a (P_EN | P_DIRECTION)
+	 */
+	val = 0;
 	if (producer)
 		val |= P_DIRECTION;
 	bam_writel(dmux, BAM_P_CTRL(pipe_index), val);
@@ -512,8 +529,13 @@ static void bam_pipe_deinit(struct bam_dmux *dmux, struct bam_pipe *pipe)
 	if (!pipe->desc_fifo)
 		return;
 
-	/* Disable pipe */
-	bam_writel(dmux, BAM_P_CTRL(pipe->pipe_index), 0);
+	/*
+	 * Do NOT write BAM_P_CTRL here — this function is called from
+	 * bam_dmux_power_off() which runs when the modem has crashed or
+	 * powered down.  The BAM clock domain may already be gated;
+	 * any MMIO write would cause an external abort and kernel panic.
+	 * The next SW_RST on reconnect will clear all pipe state anyway.
+	 */
 
 	dma_free_coherent(dmux->dev, BAM_DESC_FIFO_SIZE,
 			  pipe->desc_fifo, pipe->desc_fifo_phys);
@@ -981,34 +1003,14 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 {
 	struct bam_dmux *dmux = container_of(t, struct bam_dmux, rx_poll_timer);
 	static unsigned int poll_count;
-	bool modem_alive;
-
-	if (!dmux->pipes_active || !dmux->pc_state) {
-		if (dmux->pipes_active)
-			mod_timer(&dmux->rx_poll_timer,
-				  jiffies + msecs_to_jiffies(5));
-		return;
-	}
 
 	/*
-	 * Verify modem is still alive by reading SMSM state (in shared
-	 * memory, always accessible).  After modem crash, remoteproc
-	 * powers off the BAM clock domain — any MMIO to BAM registers
-	 * causes an external abort and kernel panic.
-	 *
-	 * The SMSM state word is in SMEM (not modem clock domain), so
-	 * it remains readable.  If modem bit 1 is cleared, the modem
-	 * has crashed or powered down — stop polling immediately.
+	 * Check flags with READ_ONCE — bam_dmux_power_off() sets these
+	 * to false BEFORE canceling the timer.  This is our primary
+	 * guard against accessing BAM registers after modem crash.
 	 */
-	irq_get_irqchip_state(dmux->pc_irq, IRQCHIP_STATE_LINE_LEVEL,
-			      &modem_alive);
-	if (!modem_alive) {
-		dev_warn(dmux->dev,
-			 "poll: modem bit 1 cleared (crash?), stopping\n");
-		dmux->pipes_active = false;
-		dmux->pc_state = false;
+	if (!READ_ONCE(dmux->pipes_active) || !READ_ONCE(dmux->pc_state))
 		return;
-	}
 
 	bam_dmux_process_tx_completions(dmux);
 	bam_dmux_process_rx_completions(dmux);
@@ -1104,7 +1106,10 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 
 	poll_count++;
 
-	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
+	/* Re-check flags before rearming — modem may have gone down */
+	if (READ_ONCE(dmux->pipes_active))
+		mod_timer(&dmux->rx_poll_timer,
+			  jiffies + msecs_to_jiffies(20));
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -1399,9 +1404,16 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 {
 	int i;
 
-	timer_delete_sync(&dmux->rx_poll_timer);
-	dmux->pipes_active = false;
-	dmux->pc_state = false;
+	/* Set flags FIRST so poll timer won't access BAM registers */
+	WRITE_ONCE(dmux->pipes_active, false);
+	WRITE_ONCE(dmux->pc_state, false);
+
+	/*
+	 * Use timer_delete (not timer_delete_sync) — this may be
+	 * called from IRQ context (pc_irq) where sync would deadlock
+	 * on single-CPU systems if the timer callback is running.
+	 */
+	timer_delete(&dmux->rx_poll_timer);
 
 	bam_pipe_deinit(dmux, &dmux->tx_pipe);
 	bam_pipe_deinit(dmux, &dmux->rx_pipe);
@@ -1626,8 +1638,8 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	/* Schedule ACK retoggle in 30s as fallback */
 	schedule_delayed_work(&dmux->ack_work, msecs_to_jiffies(30000));
 
-	/* Step 6: Start polling */
-	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(1));
+	/* Step 6: Start polling (20ms interval to reduce crash risk) */
+	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(20));
 }
 
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
