@@ -351,27 +351,32 @@ static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 		/*
 		 * Remote BAM — modem owns the global BAM configuration.
 		 *
-		 * Downstream MDM9607 3.18 SPS driver with qcom,powered-remotely:
-		 *   sps_bam_device_init() → bam_check() (NOT bam_init()!)
-		 *   bam_check() only READS registers to verify BAM is alive.
-		 *   It does NOT write BAM_CTRL, CNFG_BITS, DESC_CNT_TRSHLD,
-		 *   or IRQ_EN.
+		 * Attempt 17 showed that BAM_EN (bit 1) MUST be set by APPS —
+		 * the modem leaves BAM_CTRL=0x00020000 (only LOCAL_CLK_GATING).
+		 * Without BAM_EN, the BAM hardware doesn't process any
+		 * descriptors at all (tx_hw stays at 0 forever).
 		 *
-		 * KEY INSIGHT: Attempts 1-16 wrote CNFG_BITS=0xFFFFF7FF which
-		 * includes BAM_REG_P_EN (BIT(24)), BAM_CD_ENABLE (BIT(27)),
-		 * and many other bits that the modem firmware does NOT expect.
-		 * The modem leaves CNFG_BITS=0x00000000.  Writing these bits
-		 * may change the pipe enable mechanism and break modem-side
-		 * BAM operation — explaining why TX works (our pipe → modem)
-		 * but RX never arrives (modem → our pipe).
+		 * However, attempts 1-16 wrote CNFG_BITS=0xFFFFF7FF which
+		 * includes BAM_REG_P_EN (BIT(24)) that changes the pipe enable
+		 * mechanism, and many other bits the modem doesn't expect.
+		 * The modem leaves CNFG_BITS=0x00000000.
 		 *
-		 * FIX: Do NOT touch any global BAM registers.  Only set up
-		 * our pipes.  Pipe bits in IRQ_SRCS_MSK_EE are set by
-		 * bam_pipe_hw_init().
+		 * FIX: Set ONLY BAM_EN in BAM_CTRL (read-modify-write to
+		 * preserve existing bits like LOCAL_CLK_GATING).
+		 * Do NOT touch CNFG_BITS, DESC_CNT_TRSHLD, or IRQ_EN.
+		 * Pipe bits in IRQ_SRCS_MSK_EE are set by bam_pipe_hw_init().
 		 */
-		dev_info(dmux->dev,
-			 "bam_hw_init: remote BAM — NOT writing global regs "
-			 "(matching downstream bam_check)\n");
+		val = bam_readl(dmux, BAM_CTRL);
+		if (!(val & BAM_EN)) {
+			val |= BAM_EN;
+			bam_writel(dmux, BAM_CTRL, val);
+			dev_info(dmux->dev,
+				 "bam_hw_init: set BAM_EN, BAM_CTRL=0x%08x\n",
+				 bam_readl(dmux, BAM_CTRL));
+		} else {
+			dev_info(dmux->dev,
+				 "bam_hw_init: BAM already enabled\n");
+		}
 		return;
 	}
 
