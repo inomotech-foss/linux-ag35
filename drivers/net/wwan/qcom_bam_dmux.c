@@ -4,17 +4,16 @@
  *
  * "Nuclear" rewrite: direct BAM register access, no DMA engine dependency.
  *
- * The upstream DMA engine (bam_dma.c) abstracts BAM pipes as DMA channels.
- * Unfortunately, the abstraction doesn't match the downstream SPS driver's
- * behavior closely enough for the modem's A2 DMA engine to work:
- *
- *  - The modem requires APPS to set SMSM_A2_POWER_CONTROL (bit 1) before
- *    it sets its own bit 1 and starts using BAM pipes.
- *  - After APPS sets bit 1, the modem's a2_apps_smsm_callback sets
- *    apps_bam_link_ready=true and begins servicing pipe 5.
- *  - The downstream kernel does SW_RST + BAM_EN + P_RST per-pipe, then
- *    ACK toggle, then queue_rx.  Our bam_dma.c skipped SW_RST/P_RST
- *    for powered-remotely BAMs, causing subtle pipe state mismatches.
+ * Attempt 20: Key changes from all previous attempts:
+ *  - Do NOT set APPS bit 1 to trigger modem (wait for modem's autonomous
+ *    bit 1 from a2_subsystem_boot).  Setting APPS bit 1 triggers the
+ *    modem's uplink wakeup path, not the initial connect path.
+ *  - Do BAM init directly in pc_irq handler (no workqueue delay).
+ *  - Fix LOCAL_CLK_GATING: BIT(16) not BIT(17) (2-bit field, value=1).
+ *  - Strip verbose diagnostic dumps for speed.
+ *  - Register BAM IRQ before pipe init (matching downstream order).
+ *  - 5s fallback timer: if modem doesn't set bit 1 autonomously,
+ *    set APPS bit 1 as last resort.
  *
  * This driver maps BAM registers directly (like downstream SPS bam.c)
  * and manages descriptor FIFOs in software (like downstream sps_bam.c).
@@ -109,14 +108,12 @@
 #define P_EN				BIT(1)
 #define P_DIRECTION			BIT(3)
 /*
- * P_SYS_MODE (bit 5): On MDM9607 BAM v1.7.0, the downstream SPS driver
- * CLEARS this bit for system-mode pipes (BAM_PIPE_MODE_SYSTEM = 0).
- * Setting bit 5 puts the pipe in BAM2BAM mode, which breaks producer
- * (RX) pipes since no peer pipe is configured.  This was the root
- * cause of 12 failed attempts — the mainline bam_dma.c interpretation
- * (BIT(5) = system mode) is WRONG for this BAM version.
+ * P_SYS_MODE (bit 5): BAM_PIPE_MODE_SYSTEM = 1 in the downstream SPS.
+ * The downstream does: bam_write_reg_field(P_CTRL, P_SYS_MODE, 1)
+ * which SETS bit 5 for system-mode pipes.
+ * BIT(5) clear = BAM2BAM mode (BAM_PIPE_MODE_BAM2BAM = 0).
  */
-#define P_SYS_MODE			BIT(5)	/* DO NOT SET for system-mode pipes */
+#define P_SYS_MODE			BIT(5)
 
 /* P_SW_OFSTS */
 #define P_SW_OFSTS_MASK			0xFFFF
@@ -305,94 +302,41 @@ static void bam_dmux_pc_ack(struct bam_dmux *dmux)
  *   1. SW_RST (set bit 0, then clear it)
  *   2. BAM_EN (set bit 1)
  *   3. CACHE_MISS_ERR_RESP_EN = 0 (clear bit 19)
- *   4. LOCAL_CLK_GATING = 1 (set bits 18:17 to 01 → bit 17 set)
+ *   4. LOCAL_CLK_GATING = 1 (field bits 17:16, value=1 → bit 16)
  *   5. DESC_CNT_TRSHLD = 0x1000 (A2_SUMMING_THRESHOLD)
  *   6. CNFG_BITS = 0xFFFFF7FF (all set except bit 11)
  *   7. IRQ_SRCS_MSK_EE: set BAM_IRQ bit (bit 31)
  *   8. IRQ_EN = 0x16 (TIMER | ERROR | HRESP_ERR)
  *
- * Result: BAM_CTRL = 0x00020002 (matching working 3.18 register dump)
+ * Result: BAM_CTRL = 0x00010002 (BAM_EN + LOCAL_CLK_GATING field=1)
  * ────────────────────────────────────────────────────────────────────────── */
 
 /* BAM_CTRL field masks (NDP BAM) */
 #define BAM_CACHE_MISS_ERR_RESP_EN	BIT(19)
-#define BAM_LOCAL_CLK_GATING_MASK	(BIT(18) | BIT(17))
+/*
+ * LOCAL_CLK_GATING is a 2-bit field at bits 17:16 of BAM_CTRL.
+ * Downstream: bam_write_reg_field(CTRL, LOCAL_CLK_GATING, 1)
+ *   mask=0x60000, shift=16, value=1 → writes BIT(16).
+ * Previous attempts wrote BIT(17) which is value=2 in the field.
+ */
+#define BAM_LOCAL_CLK_GATING		BIT(16)
 
-static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
+static void bam_hw_init(struct bam_dmux *dmux)
 {
 	u32 val;
-	u32 ctrl = bam_readl(dmux, BAM_CTRL);
-	int p;
 
 	dev_info(dmux->dev,
-		 "bam_hw_init: PRE BAM_CTRL=0x%08x REVISION=0x%08x "
-		 "NUM_PIPES=0x%08x CNFG=0x%08x PIPE_ATTR_EE0=0x%08x reset=%d\n",
-		 ctrl,
-		 bam_readl(dmux, BAM_REVISION),
-		 bam_readl(dmux, BAM_NUM_PIPES),
-		 bam_readl(dmux, BAM_CNFG_BITS),
-		 bam_readl(dmux, BAM_PIPE_ATTR_EE(BAM_DMUX_EE)),
-		 do_reset);
+		 "bam_hw_init: PRE BAM_CTRL=0x%08x CNFG=0x%08x\n",
+		 bam_readl(dmux, BAM_CTRL),
+		 bam_readl(dmux, BAM_CNFG_BITS));
 
-	/* Dump trust registers and pipe states before we touch anything */
-	dev_info(dmux->dev, "  TRUST_REG=0x%08x\n",
-		 bam_readl(dmux, BAM_TRUST_REG));
-	for (p = 0; p < 6; p++)
-		dev_info(dmux->dev,
-			 "  pipe %d: P_TRUST=0x%08x P_CTRL=0x%08x "
-			 "P_HALT=0x%08x SW_OFSTS=0x%08x\n",
-			 p,
-			 bam_readl(dmux, BAM_P_TRUST_REG(p)),
-			 bam_readl(dmux, BAM_P_CTRL(p)),
-			 bam_readl(dmux, BAM_P_HALT(p)),
-			 bam_readl(dmux, BAM_P_SW_OFSTS(p)));
-
-	if (!do_reset) {
-		/*
-		 * Remote BAM — modem owns the global BAM configuration.
-		 *
-		 * Attempt 17 showed that BAM_EN (bit 1) MUST be set by APPS —
-		 * the modem leaves BAM_CTRL=0x00020000 (only LOCAL_CLK_GATING).
-		 * Without BAM_EN, the BAM hardware doesn't process any
-		 * descriptors at all (tx_hw stays at 0 forever).
-		 *
-		 * However, attempts 1-16 wrote CNFG_BITS=0xFFFFF7FF which
-		 * includes BAM_REG_P_EN (BIT(24)) that changes the pipe enable
-		 * mechanism, and many other bits the modem doesn't expect.
-		 * The modem leaves CNFG_BITS=0x00000000.
-		 *
-		 * FIX: Set ONLY BAM_EN in BAM_CTRL (read-modify-write to
-		 * preserve existing bits like LOCAL_CLK_GATING).
-		 * Do NOT touch CNFG_BITS, DESC_CNT_TRSHLD, or IRQ_EN.
-		 * Pipe bits in IRQ_SRCS_MSK_EE are set by bam_pipe_hw_init().
-		 */
-		val = bam_readl(dmux, BAM_CTRL);
-		if (!(val & BAM_EN)) {
-			val |= BAM_EN;
-			bam_writel(dmux, BAM_CTRL, val);
-			dev_info(dmux->dev,
-				 "bam_hw_init: set BAM_EN, BAM_CTRL=0x%08x\n",
-				 bam_readl(dmux, BAM_CTRL));
-		} else {
-			dev_info(dmux->dev,
-				 "bam_hw_init: BAM already enabled\n");
-		}
-		return;
-	}
-
-	/* Full reset path (local BAM management) */
-
-	/* Step 1: Software reset — clear all BAM state.
-	 * Downstream does: write SW_RST, read (flush), clear SW_RST.
-	 * The read ensures the reset propagates before clearing.
-	 */
+	/* Step 1: Software reset */
 	bam_writel(dmux, BAM_CTRL, BAM_SW_RST);
 	bam_readl(dmux, BAM_CTRL);  /* flush — ensures reset completes */
 	bam_writel(dmux, BAM_CTRL, 0);
 
-	/* Step 2+3+4: Enable BAM + set CTRL fields */
-	val = BAM_EN | BIT(17);  /* BAM_EN + LOCAL_CLK_GATING=1 */
-	/* CACHE_MISS_ERR_RESP_EN (bit 19) left clear */
+	/* Step 2+3+4: BAM_EN + LOCAL_CLK_GATING=1 (bit 16) */
+	val = BAM_EN | BAM_LOCAL_CLK_GATING;
 	bam_writel(dmux, BAM_CTRL, val);
 
 	/* Step 5: Descriptor count threshold */
@@ -409,29 +353,16 @@ static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 		   BAM_IRQ_TIMER_EN | BAM_IRQ_ERROR_EN | BAM_IRQ_HRESP_ERR_EN);
 
 	dev_info(dmux->dev,
-		 "bam_hw_init: POST BAM_CTRL=0x%08x CNFG=0x%08x "
-		 "IRQ_EN=0x%08x IRQ_SRCS_MSK=0x%08x DESC_CNT=0x%08x\n",
+		 "bam_hw_init: POST BAM_CTRL=0x%08x CNFG=0x%08x\n",
 		 bam_readl(dmux, BAM_CTRL),
-		 bam_readl(dmux, BAM_CNFG_BITS),
-		 bam_readl(dmux, BAM_IRQ_EN),
-		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)),
-		 bam_readl(dmux, BAM_DESC_CNT_TRSHLD));
+		 bam_readl(dmux, BAM_CNFG_BITS));
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Pipe Init — matching downstream SPS bam_pipe_init()
  *
- * Sequence:
- *   1. P_RST (set then clear) — resets pipe state
- *   2. IRQ_SRCS_MSK_EE — enable pipe IRQ at BAM level
- *   3. P_IRQ_EN — pipe interrupt mask
- *   4. P_CTRL — direction only (NOT yet enabled)
- *      NOTE: P_SYS_MODE (bit 5) must NOT be set for system-mode pipes!
- *      Downstream SPS writes 0 to P_SYS_MODE for system mode.
- *   5. P_EVNT_GEN_TRSHLD — event threshold
- *   6. P_DESC_FIFO_ADDR — descriptor FIFO physical address
- *   7. P_FIFO_SIZES — descriptor FIFO size
- *   8. P_CTRL |= P_EN — enable pipe (LAST!)
+ * Sequence: P_RST → IRQ_SRCS_MSK → P_IRQ_EN → P_CTRL(dir+sys) →
+ *           P_EVNT_GEN_TRSHLD → P_DESC_FIFO_ADDR → P_FIFO_SIZES → P_EN
  * ────────────────────────────────────────────────────────────────────────── */
 
 static int bam_pipe_hw_init(struct bam_dmux *dmux, struct bam_pipe *pipe,
@@ -446,71 +377,45 @@ static int bam_pipe_hw_init(struct bam_dmux *dmux, struct bam_pipe *pipe,
 	/* Allocate descriptor FIFO (DMA coherent memory) */
 	pipe->desc_fifo = dma_alloc_coherent(dmux->dev, BAM_DESC_FIFO_SIZE,
 					     &pipe->desc_fifo_phys, GFP_KERNEL);
-	if (!pipe->desc_fifo) {
-		dev_err(dmux->dev,
-			"Failed to alloc desc FIFO for pipe %u\n", pipe_index);
+	if (!pipe->desc_fifo)
 		return -ENOMEM;
-	}
 
 	memset(pipe->desc_fifo, 0, BAM_DESC_FIFO_SIZE);
 
-	dev_info(dmux->dev,
-		 "pipe%u_init: desc_fifo phys=0x%pad virt=%px size=%u\n",
-		 pipe_index, &pipe->desc_fifo_phys, pipe->desc_fifo,
-		 BAM_DESC_FIFO_SIZE);
-
-	/* Step 1: Reset pipe */
+	/* Reset pipe */
 	bam_writel_sync(dmux, BAM_P_RST(pipe_index), 1);
 	bam_writel_sync(dmux, BAM_P_RST(pipe_index), 0);
 
-	/* Step 2: Unmask this pipe in EE 0's IRQ sources */
+	/* Unmask this pipe in EE 0's IRQ sources */
 	val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE));
 	val |= BIT(pipe_index);
 	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), val);
 
-	/* Step 3: Enable pipe IRQ — P_TRNSFR_END_EN (matching 3.18: 0x20) */
+	/* Enable pipe IRQ — P_TRNSFR_END_EN = 0x20 (EOT) */
 	bam_writel(dmux, BAM_P_IRQ_EN(pipe_index), P_TRNSFR_END_EN);
 
-	/* Step 4: Direction + system mode (NOT yet P_EN).
-	 * P_SYS_MODE (bit 5) MUST be set for system-mode pipes.
-	 * BAM_PIPE_MODE_SYSTEM=1 in downstream SPS.
-	 * P_CTRL values:
-	 *   Pipe 4 (TX consumer): 0x22 (P_SYS_MODE | P_EN)
-	 *   Pipe 5 (RX producer): 0x2a (P_SYS_MODE | P_DIRECTION | P_EN)
-	 */
+	/* Direction + system mode (NOT yet P_EN) */
 	val = P_SYS_MODE;
 	if (producer)
 		val |= P_DIRECTION;
 	bam_writel(dmux, BAM_P_CTRL(pipe_index), val);
 
-	/* Step 5: Event threshold */
+	/* Event threshold */
 	bam_writel(dmux, BAM_P_EVNT_GEN_TRSHLD(pipe_index), 0x10);
 
-	/* Step 6: Descriptor FIFO address */
+	/* Descriptor FIFO address + size */
 	bam_writel(dmux, BAM_P_DESC_FIFO_ADDR(pipe_index),
 		   lower_32_bits(pipe->desc_fifo_phys));
-
-	/* Step 7: Descriptor FIFO size */
 	bam_writel(dmux, BAM_P_FIFO_SIZES(pipe_index), BAM_DESC_FIFO_SIZE);
 
-	/* Step 8: Enable pipe (LAST) */
+	/* Enable pipe (LAST) */
 	val = bam_readl(dmux, BAM_P_CTRL(pipe_index));
 	val |= P_EN;
 	bam_writel_sync(dmux, BAM_P_CTRL(pipe_index), val);
 
-	dev_info(dmux->dev,
-		 "pipe%u_init: DONE P_CTRL=0x%08x DESC_ADDR=0x%08x "
-		 "FIFO_SZ=0x%08x SW_OFSTS=0x%08x EVNT_REG=0x%08x "
-		 "P_TRUST=0x%08x P_HALT=0x%08x P_IRQ_STTS=0x%08x\n",
-		 pipe_index,
-		 bam_readl(dmux, BAM_P_CTRL(pipe_index)),
-		 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(pipe_index)),
-		 bam_readl(dmux, BAM_P_FIFO_SIZES(pipe_index)),
-		 bam_readl(dmux, BAM_P_SW_OFSTS(pipe_index)),
-		 bam_readl(dmux, BAM_P_EVNT_REG(pipe_index)),
-		 bam_readl(dmux, BAM_P_TRUST_REG(pipe_index)),
-		 bam_readl(dmux, BAM_P_HALT(pipe_index)),
-		 bam_readl(dmux, BAM_P_IRQ_STTS(pipe_index)));
+	dev_info(dmux->dev, "pipe%u_init: P_CTRL=0x%08x phys=0x%pad\n",
+		 pipe_index, bam_readl(dmux, BAM_P_CTRL(pipe_index)),
+		 &pipe->desc_fifo_phys);
 
 	return 0;
 }
@@ -1387,56 +1292,8 @@ static void bam_dmux_register_netdev_work(struct work_struct *work)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * Power On / Off — full BAM init sequence
+ * Power Off
  * ────────────────────────────────────────────────────────────────────────── */
-
-static bool bam_dmux_power_on(struct bam_dmux *dmux, bool do_reset)
-{
-	int i, ret;
-
-	/* Step 1: BAM hardware init (optionally with SW_RST) */
-	bam_hw_init(dmux, do_reset);
-
-	/* Step 2: Initialize TX pipe (pipe 4, consumer) */
-	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe, BAM_DMUX_TX_PIPE, false);
-	if (ret)
-		return false;
-
-	/* Step 3: Initialize RX pipe (pipe 5, producer) */
-	ret = bam_pipe_hw_init(dmux, &dmux->rx_pipe, BAM_DMUX_RX_PIPE, true);
-	if (ret) {
-		bam_pipe_deinit(dmux, &dmux->tx_pipe);
-		return false;
-	}
-
-	/*
-	 * Step 4: Queue RX descriptors (32 buffers)
-	 *
-	 * No CMD_OPEN here — downstream doesn't send CMD_OPEN during init.
-	 * CMD_OPEN is sent later from ndo_open when the modem has opened
-	 * channels (CMD_OPEN from modem on pipe 5).
-	 */
-	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
-		if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i], GFP_KERNEL)) {
-			dev_err(dmux->dev,
-				"Failed to queue RX buffer %d\n", i);
-			goto err_pipes;
-		}
-	}
-
-	dmux->pipes_active = true;
-
-	dev_info(dmux->dev,
-		 "power_on: BAM + pipes initialized, %d RX buffers queued\n",
-		 BAM_DMUX_NUM_SKB);
-
-	return true;
-
-err_pipes:
-	bam_pipe_deinit(dmux, &dmux->rx_pipe);
-	bam_pipe_deinit(dmux, &dmux->tx_pipe);
-	return false;
-}
 
 static void bam_dmux_power_off(struct bam_dmux *dmux)
 {
@@ -1480,176 +1337,81 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * SMSM IRQ Handlers + Boot Sequence
+ * SMSM IRQ Handlers + Boot Sequence (Attempt 20)
  *
- * Attempt 12: ALL BAM init AFTER modem sets bit 1.
+ * Downstream flow (from bam_dmux.c + modem pseudocode):
+ *   1. Modem's a2_subsystem_boot() sets SMSM_A2_POWER_CONTROL autonomously
+ *   2. APPS bam_dmux_smsm_cb fires synchronously
+ *   3. APPS does: SW_RST → BAM_EN → pipe4 → pipe5 → toggle_ack → queue_rx
+ *   4. Modem's a2_apps_smsm_ack_callback fires → apps_bam_link_ready=true
+ *   5. Modem sends CMD_OPEN on pipe 5
  *
- * ROOT CAUSE OF ATTEMPTS 1-11:
- *   In ALL previous attempts, BAM hardware programming (SW_RST, BAM_EN,
- *   pipe init, etc.) was done BEFORE the modem set bit 1.  Analysis of
- *   the working 3.18 kernel boot log + downstream source proves this is
- *   WRONG.  In the downstream:
+ * Key insight: APPS NEVER sets bit 1 during the initial handshake.
+ * APPS bit 1 is for uplink wakeup only (separate state machine path).
+ * All 19 previous attempts set APPS bit 1 to trigger the modem, which
+ * activated the modem's uplink wakeup path instead of the initial
+ * connect path.  This may explain why the modem never cycled
+ * disconnect/reconnect (stuck in uplink wakeup state).
  *
- *     - The driver does NO BAM hardware access until modem sets bit 1
- *     - When modem sets bit 1, bam_dmux_smsm_cb fires:
- *         sps_connect TX → triggers sps_bam_enable → bam_init()
- *           → SW_RST + BAM_EN + config + pipe 4 init
- *         sps_connect RX → pipe 5 init
- *         toggle_apps_ack() → set APPS bit 11 (ACK)
- *         queue_rx() → 32 descriptors + doorbell
- *
- *   ALL of this happens AFTER modem set bit 1, in the SMSM callback
- *   context (workqueue).
- *
- * OUR FLOW (matching downstream exactly):
- *   1. boot_work (1s after SMDINIT):
- *      - Set APPS bit 1 to trigger modem (no BAM access!)
- *
- *   2. pc_irq (modem responds with bit 1):
- *      - Schedule ack_work immediately
- *
- *   3. ack_work (workqueue context, AFTER modem set bit 1):
- *      - SW_RST + BAM_EN + config
- *      - Pipe 4 (TX) init
- *      - Pipe 5 (RX) init
- *      - toggle ACK (set APPS bit 11) — BEFORE queue_rx!
- *      - queue 32 RX descriptors + doorbell
- *      - Start polling
- *
- * The key ordering change: ACK before queue_rx (downstream does
- * toggle_apps_ack before queue_rx in bam_init).
+ * Attempt 20 changes:
+ *   - Wait for modem's autonomous bit 1 (5s fallback to APPS bit 1)
+ *   - Do BAM init inline in pc_irq (no workqueue delay)
+ *   - Fix LOCAL_CLK_GATING to BIT(16)
+ *   - Strip diagnostic dumps for speed
  * ────────────────────────────────────────────────────────────────────────── */
 
-static void bam_dmux_dump_all_pipes(struct bam_dmux *dmux, const char *label)
+/* ──────────────────────────────────────────────────────────────────────────
+ * First-connect: BAM init + SMSM ACK + queue RX
+ *
+ * Called from pc_irq handler (threaded) when modem sets bit 1.
+ * Does everything inline for minimum latency — matching the downstream's
+ * synchronous bam_dmux_smsm_cb → bam_init → toggle_ack → queue_rx flow.
+ *
+ * Attempt 20 key changes vs. previous attempts:
+ *  - Called directly from pc_irq (no workqueue delay)
+ *  - Stripped verbose diagnostic dumps (~85ms saved)
+ *  - LOCAL_CLK_GATING fixed to BIT(16) (was BIT(17))
+ *  - BAM IRQ registered BEFORE pipe init (matching downstream)
+ *  - APPS bit 1 NOT set by default (wait for modem's autonomous bit 1)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+static void bam_dmux_first_connect(struct bam_dmux *dmux)
 {
-	int p;
-
-	dev_info(dmux->dev,
-		 "%s: BAM_CTRL=0x%08x CNFG=0x%08x IRQ_STTS=0x%08x "
-		 "IRQ_EN=0x%08x PIPE_ATTR_EE0=0x%08x\n",
-		 label,
-		 bam_readl(dmux, BAM_CTRL),
-		 bam_readl(dmux, BAM_CNFG_BITS),
-		 bam_readl(dmux, BAM_IRQ_STTS),
-		 bam_readl(dmux, BAM_IRQ_EN),
-		 bam_readl(dmux, BAM_PIPE_ATTR_EE(BAM_DMUX_EE)));
-
-	for (p = 0; p < 4; p++)
-		dev_info(dmux->dev,
-			 "%s: EE%d IRQ_SRCS=0x%08x MSK=0x%08x\n",
-			 label, p,
-			 bam_readl(dmux, BAM_IRQ_SRCS_EE(p)),
-			 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(p)));
-
-	for (p = 0; p < 6; p++)
-		dev_info(dmux->dev,
-			 "%s: P%d CTRL=0x%08x HALT=0x%08x IRQ_STTS=0x%08x "
-			 "IRQ_EN=0x%08x SW=0x%08x EVNT=0x%08x "
-			 "DESC=0x%08x FIFO_SZ=0x%08x "
-			 "PRDCR_SB=0x%08x CNSMR_SB=0x%08x\n",
-			 label, p,
-			 bam_readl(dmux, BAM_P_CTRL(p)),
-			 bam_readl(dmux, BAM_P_HALT(p)),
-			 bam_readl(dmux, BAM_P_IRQ_STTS(p)),
-			 bam_readl(dmux, BAM_P_IRQ_EN(p)),
-			 bam_readl(dmux, BAM_P_SW_OFSTS(p)),
-			 bam_readl(dmux, BAM_P_EVNT_REG(p)),
-			 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(p)),
-			 bam_readl(dmux, BAM_P_FIFO_SIZES(p)),
-			 bam_readl(dmux, BAM_P_PRDCR_SDBND(p)),
-			 bam_readl(dmux, BAM_P_CNSMR_SDBND(p)));
-}
-
-static void bam_dmux_dump_rx_descs(struct bam_dmux *dmux)
-{
-	struct bam_pipe *pipe = &dmux->rx_pipe;
-	int i;
-
-	if (!pipe->desc_fifo)
-		return;
-
-	for (i = 0; i < min((u32)8, BAM_NUM_DESCS); i++) {
-		struct bam_desc_hw *d = &pipe->desc_fifo[i];
-
-		dev_info(dmux->dev,
-			 "RX_DESC[%d]: addr=0x%08x size=0x%04x flags=0x%04x\n",
-			 i, le32_to_cpu(d->addr), le16_to_cpu(d->size),
-			 le16_to_cpu(d->flags));
-	}
-}
-
-static void bam_dmux_ack_work_fn(struct work_struct *work)
-{
-	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
-					     ack_work.work);
 	int i, ret;
 
-	if (!dmux->pc_state) {
-		dev_warn(dmux->dev, "ack_work: modem bit 1 not set, skip\n");
-		return;
-	}
-
-	if (dmux->pipes_active) {
-		/*
-		 * Already initialized — do NOT retoggle ACK.
-		 * Clearing ACK tells modem "BAM is down" which kills the
-		 * connection.  In attempt 12, the 30s retoggle caused
-		 * the modem to shut down A2 DMA and crash.
-		 * Just re-doorbell the RX pipe.
-		 */
-		dev_info(dmux->dev, "ack_work: already active, re-doorbell\n");
-		bam_pipe_doorbell(dmux, &dmux->rx_pipe);
-		return;
-	}
-
-	/*
-	 * Full BAM init — matching downstream bam_init() exactly.
-	 *
-	 * CRITICAL: This runs AFTER modem has set bit 1, matching the
-	 * downstream where bam_init() is called from bam_dmux_smsm_cb.
-	 *
-	 * Downstream order: SW_RST → BAM_EN → pipe4 → pipe5 →
-	 *                   toggle_apps_ack → queue_rx → CMD_OPEN
-	 */
 	dev_info(dmux->dev,
-		 "ack_work: full BAM init AFTER modem set bit 1 "
-		 "(SW_RST + pipes + clear_bit1 + ACK + queue_rx — attempt 19b)\n");
+		 "first_connect: BAM init (attempt 20: fast inline, "
+		 "LOCAL_CLK_GATING=BIT(16), no APPS bit 1 trigger)\n");
 
-	/*
-	 * Step 1: Full BAM global init WITH SW_RST.
-	 *
-	 * On MDM9607, satellite_mode=false (no qcom,satellite-mode in DTS).
-	 * The downstream SPS layer calls bam_init() which does:
-	 *   SW_RST → BAM_EN → LOCAL_CLK_GATING → DESC_CNT_TRSHLD(0x1000) →
-	 *   CNFG_BITS(0xFFFFF7FF) → IRQ_SRCS_MSK_EE.BAM_IRQ → IRQ_EN(0x16)
-	 *
-	 * The modem expects APPS to fully initialize the BAM (including reset)
-	 * when it signals readiness via SMSM bit 1.  The modem configures its
-	 * A2 DMA pipes AFTER seeing the SMSM ACK from APPS.
-	 *
-	 * Previous attempts used do_reset=false (only BAM_EN), which left the
-	 * BAM in a half-configured state.  The modem consumed TX (CMD_OPEN on
-	 * pipe 4) but never wrote to RX pipe 5 — likely because the BAM was
-	 * missing CNFG_BITS, DESC_CNT_TRSHLD, IRQ configuration, and the
-	 * initial SW_RST that clears stale state from the modem's prior setup.
-	 */
-	bam_hw_init(dmux, true);
+	/* Step 1: Full BAM global init with SW_RST */
+	bam_hw_init(dmux);
 
-	/* Step 2: Init TX pipe (pipe 4, consumer) */
+	/* Step 2: Register BAM IRQ BEFORE pipes (matching downstream) */
+	if (dmux->bam_irq > 0 && !dmux->bam_irq_registered) {
+		ret = devm_request_irq(dmux->dev, dmux->bam_irq,
+				       bam_dmux_bam_isr,
+				       IRQF_TRIGGER_HIGH | IRQF_SHARED,
+				       "bam-dmux-bam", dmux);
+		if (!ret) {
+			dmux->bam_irq_registered = true;
+			dev_info(dmux->dev,
+				 "BAM IRQ %d registered\n", dmux->bam_irq);
+		}
+	}
+
+	/* Step 3: Init TX pipe (pipe 4, consumer) */
 	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
 			       BAM_DMUX_TX_PIPE, false);
 	if (ret) {
-		dev_err(dmux->dev, "ack_work: TX pipe init failed: %d\n",
-			ret);
+		dev_err(dmux->dev, "TX pipe init failed: %d\n", ret);
 		return;
 	}
 
-	/* Step 3: Init RX pipe (pipe 5, producer) */
+	/* Step 4: Init RX pipe (pipe 5, producer) */
 	ret = bam_pipe_hw_init(dmux, &dmux->rx_pipe,
 			       BAM_DMUX_RX_PIPE, true);
 	if (ret) {
-		dev_err(dmux->dev, "ack_work: RX pipe init failed: %d\n",
-			ret);
+		dev_err(dmux->dev, "RX pipe init failed: %d\n", ret);
 		bam_pipe_deinit(dmux, &dmux->tx_pipe);
 		return;
 	}
@@ -1665,99 +1427,63 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	pm_runtime_get_noresume(dmux->dev);
 
 	/*
-	 * Step 4a: CLEAR APPS bit 1 (A2_POWER_CONTROL) before ACK.
+	 * Step 5: Clear APPS bit 1 (if set by fallback boot_work).
 	 *
-	 * CRITICAL FIX (attempt 19b): In the downstream 3.18 kernel, APPS
-	 * NEVER has bit 1 set during the initial handshake.  APPS bit 1
-	 * is only used for "uplink wakeup" — when APPS needs to transmit
-	 * data and the modem is in low-power mode.
-	 *
-	 * Our boot_work sets APPS bit 1 to trigger the modem to set its
-	 * own bit 1.  But we must CLEAR it before ACK, otherwise the
-	 * modem sees APPS state = 0x182b (bit1 + bit11) instead of the
-	 * expected 0x1829 (bit11 only).  The modem's A2 state machine
-	 * interprets APPS bit 1 as an uplink wakeup request, which
-	 * conflicts with the initial handshake and causes the modem to
-	 * stall (never cycle disconnect/reconnect, never write to RX).
-	 *
-	 * After clearing: APPS = 0x1029 (same as downstream baseline).
-	 * After ACK toggle: APPS = 0x1829 (matching downstream exactly).
+	 * In the downstream, APPS never has bit 1 set during initial
+	 * handshake.  APPS bit 1 is for uplink wakeup only.
+	 * If boot_work set it as a fallback trigger, clear it now.
+	 * If modem connected autonomously, this is a no-op.
 	 */
-	dev_info(dmux->dev, "ack_work: clearing APPS bit 1 before ACK\n");
 	bam_dmux_pc_vote(dmux, false);
 
-	/* Step 4b: ACK (toggle APPS bit 11) — BEFORE queue_rx!
-	 * Downstream: toggle_apps_ack() is called before queue_rx()
-	 * in bam_init().  This tells modem "APPS is ready."
+	/* Step 6: Toggle ACK (APPS bit 11) — BEFORE queue_rx!
+	 * Downstream: toggle_apps_ack() before queue_rx() in bam_init().
 	 */
-	dev_info(dmux->dev, "ack_work: toggling APPS bit 11 (ACK)\n");
+	dev_info(dmux->dev, "first_connect: toggling APPS bit 11 (ACK)\n");
 	bam_dmux_pc_ack(dmux);
 
-	/* Step 5: Queue 32 RX descriptors + doorbell */
+	/* Step 7: Queue 32 RX descriptors + doorbell */
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i], GFP_KERNEL))
-			dev_err(dmux->dev,
-				"ack_work: RX queue %d failed\n", i);
+			dev_err(dmux->dev, "RX queue %d failed\n", i);
 	}
 	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 
-	/*
-	 * Clear all pending IRQ status IMMEDIATELY after doorbell.
-	 *
-	 * The doorbell generates P_WAKE (IRQ_STTS bit 2) on the RX pipe.
-	 * The downstream SPS ISR clears this via P_IRQ_CLR.  Without
-	 * clearing, the BAM DMA engine may not begin processing
-	 * producer pipe descriptors.  This was not done in attempts 1-14.
-	 */
+	/* Step 8: Clear all pending IRQ status */
 	bam_clear_irqs(dmux);
 
-	/* Register BAM IRQ handler — matching downstream SPS bam_isr().
-	 * The ISR clears IRQ status which may unblock producer pipe DMA.
-	 * Request it AFTER BAM init (BAM must be powered and enabled).
-	 */
-	if (dmux->bam_irq > 0 && !dmux->bam_irq_registered) {
-		ret = devm_request_irq(dmux->dev, dmux->bam_irq,
-				       bam_dmux_bam_isr,
-				       IRQF_TRIGGER_HIGH | IRQF_SHARED,
-				       "bam-dmux-bam", dmux);
-		if (ret)
-			dev_warn(dmux->dev,
-				 "BAM IRQ %d request failed: %d (continuing without ISR)\n",
-				 dmux->bam_irq, ret);
-		else {
-			dmux->bam_irq_registered = true;
-			dev_info(dmux->dev,
-				 "BAM IRQ %d registered\n", dmux->bam_irq);
-		}
-	}
-
 	dev_info(dmux->dev,
-		 "ack_work: BAM init complete, %d RX queued\n",
-		 BAM_DMUX_NUM_SKB);
+		 "first_connect: done, P4_CTRL=0x%08x P5_CTRL=0x%08x "
+		 "IRQ_SRCS_MSK=0x%08x\n",
+		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
+		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
+		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
 
-	/* Full diagnostic dump */
-	bam_dmux_dump_all_pipes(dmux, "POST-INIT");
-	bam_dmux_dump_rx_descs(dmux);
-
-	/*
-	 * Step 6: Wait for modem-initiated CMD_OPEN.
-	 *
-	 * In the downstream protocol, APPS does NOT send CMD_OPEN
-	 * from bam_init(). The modem sends CMD_OPEN first on pipe 5
-	 * (modem→APPS), then APPS responds with CMD_OPEN on pipe 4.
-	 * Attempts 1-15 sent CMD_OPEN immediately, but the modem
-	 * never responded — possibly because the modem expects to
-	 * initiate and our premature CMD_OPEN confuses the A2 DMA.
-	 *
-	 * Now we wait 15s for modem CMD_OPEN. If nothing arrives,
-	 * we send CMD_OPEN as fallback (same as before but delayed).
-	 */
+	/* Step 9: Set up CMD_OPEN fallback timer + start polling */
 	dmux->cmd_open_retries = 0;
 	dmux->cmd_open_acked = false;
 	dmux->cmd_open_next_retry = jiffies + 15 * HZ;
 
-	/* Step 7: Start polling (20ms interval) */
 	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(20));
+}
+
+static void bam_dmux_ack_work_fn(struct work_struct *work)
+{
+	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
+					     ack_work.work);
+
+	/* ack_work is now only used as a fallback; main path is pc_irq. */
+	if (dmux->pipes_active) {
+		dev_info(dmux->dev, "ack_work: already active, skip\n");
+		return;
+	}
+
+	if (!dmux->pc_state) {
+		dev_warn(dmux->dev, "ack_work: modem bit 1 not set, skip\n");
+		return;
+	}
+
+	bam_dmux_first_connect(dmux);
 }
 
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
@@ -1771,18 +1497,23 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	dev_info(dmux->dev, "pc_irq: modem_bit1=%d pc_state=%d pipes=%d\n",
 		 new_state, dmux->pc_state, dmux->pipes_active);
 
-	if (new_state && !dmux->pc_state) {
+	if (new_state && !dmux->pipes_active) {
 		/*
-		 * Modem set A2_POWER_CONTROL (bit 1).
+		 * Modem set A2_POWER_CONTROL (bit 1) — first connect.
 		 *
-		 * In the downstream 3.18 kernel, this triggers bam_init()
-		 * which does ALL BAM hardware programming. We schedule
-		 * ack_work to do the same in workqueue context.
+		 * Do BAM init DIRECTLY here for minimum latency.
+		 * The downstream bam_dmux_smsm_cb runs synchronously in
+		 * the SMSM callback context (<1ms total).  Previous
+		 * attempts used workqueue scheduling (ack_work) which
+		 * added 34ms+ of scheduling delay on top of ~85ms of
+		 * diagnostic dumps.
+		 *
+		 * Cancel boot_work — modem responded (autonomously or
+		 * to our fallback APPS bit 1 trigger).
 		 */
-		dev_info(dmux->dev,
-			 "pc_irq: modem A2 ready! Scheduling BAM init\n");
 		dmux->pc_state = true;
-		schedule_delayed_work(&dmux->ack_work, 0);
+		cancel_delayed_work(&dmux->boot_work);
+		bam_dmux_first_connect(dmux);
 
 	} else if (new_state && dmux->pc_state) {
 		if (dmux->pipes_active)
@@ -1857,19 +1588,22 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * ONLY set APPS bit 1 to trigger modem — do NO BAM hardware access.
+	 * Fallback: modem didn't set bit 1 autonomously within 5 seconds.
 	 *
-	 * This matches the downstream 3.18 kernel exactly: the driver
-	 * touches NO BAM registers until the modem sets its own bit 1.
-	 * All BAM init (SW_RST + BAM_EN + pipes + ACK + queue_rx) happens
-	 * in ack_work, triggered by pc_irq when modem responds.
+	 * In the downstream, the modem sets SMSM_A2_POWER_CONTROL on its
+	 * own during a2_subsystem_boot() — APPS never sets bit 1 for the
+	 * initial handshake.  APPS bit 1 is only for uplink wakeup.
 	 *
-	 * ROOT CAUSE OF ATTEMPTS 1-11: BAM init was done BEFORE modem
-	 * set bit 1.  The downstream does it AFTER.
+	 * Setting APPS bit 1 triggers modem's a2_apps_smsm_callback which
+	 * is the "uplink wakeup" path, NOT the "initial connect" path.
+	 * This may cause the modem to enter a different state machine.
+	 *
+	 * Attempt 20: Wait 5s for modem's autonomous bit 1.  If it
+	 * doesn't come, set APPS bit 1 as a last resort.
 	 */
 	dev_info(dmux->dev,
-		 "boot_work: setting APPS bit 1 to trigger modem "
-		 "(NO BAM access — matching downstream)\n");
+		 "boot_work: modem didn't set bit 1 in 5s, "
+		 "setting APPS bit 1 as fallback trigger\n");
 
 	bam_dmux_pc_vote(dmux, true);
 }
@@ -1879,8 +1613,8 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 	struct bam_dmux *dmux = data;
 
 	dev_info(dmux->dev,
-		 "remote ready (SMDINIT), scheduling boot_work in 1s\n");
-	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(1000));
+		 "remote ready (SMDINIT), scheduling boot_work in 5s\n");
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(5000));
 
 	return IRQ_HANDLED;
 }
