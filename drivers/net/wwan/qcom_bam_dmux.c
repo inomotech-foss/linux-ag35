@@ -1625,10 +1625,18 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	 */
 	dev_info(dmux->dev,
 		 "ack_work: full BAM init AFTER modem set bit 1 "
-		 "(SW_RST + pipes + ACK + queue_rx + CMD_OPEN)\n");
+		 "(NO SW_RST + pipes + ACK + queue_rx — wait for modem CMD_OPEN)\n");
 
-	/* Step 1: BAM global init (SW_RST + BAM_EN + config) */
-	bam_hw_init(dmux, true);
+	/*
+	 * Step 1: BAM global init WITHOUT SW_RST.
+	 *
+	 * The PRE state shows BAM_CTRL=0x00020000 (CLK_GATING set,
+	 * but BAM_EN=0). The modem may have initialized internal state
+	 * that SW_RST would destroy. Attempts 1-15 all did SW_RST
+	 * and the modem never wrote to pipe 5. Let's try preserving
+	 * whatever state exists and just enabling BAM + configuring.
+	 */
+	bam_hw_init(dmux, false);
 
 	/* Step 2: Init TX pipe (pipe 4, consumer) */
 	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
@@ -1713,28 +1721,21 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	bam_dmux_dump_rx_descs(dmux);
 
 	/*
-	 * Step 6: Send CMD_OPEN immediately.
+	 * Step 6: Wait for modem-initiated CMD_OPEN.
 	 *
-	 * In the downstream, APPS sends CMD_OPEN first (from rmnet
-	 * channel open, triggered quickly after bam_init).  The modem
-	 * does NOT initiate CMD_OPEN — it waits for APPS.
+	 * In the downstream protocol, APPS does NOT send CMD_OPEN
+	 * from bam_init(). The modem sends CMD_OPEN first on pipe 5
+	 * (modem→APPS), then APPS responds with CMD_OPEN on pipe 4.
+	 * Attempts 1-15 sent CMD_OPEN immediately, but the modem
+	 * never responded — possibly because the modem expects to
+	 * initiate and our premature CMD_OPEN confuses the A2 DMA.
 	 *
-	 * In attempts 1-12, we waited 15s before sending CMD_OPEN.
-	 * The modem timed out waiting and never sent data on RX pipe.
+	 * Now we wait 15s for modem CMD_OPEN. If nothing arrives,
+	 * we send CMD_OPEN as fallback (same as before but delayed).
 	 */
-	pm_runtime_get_noresume(dmux->dev);
-	if (bam_dmux_send_open_cmd(dmux, 0)) {
-		dev_info(dmux->dev,
-			 "ack_work: CMD_OPEN sent immediately for ch 0\n");
-	} else {
-		dev_err(dmux->dev, "ack_work: CMD_OPEN send failed\n");
-		pm_runtime_put_noidle(dmux->dev);
-	}
-
-	/* CMD_OPEN retry after 5s if modem doesn't respond */
-	dmux->cmd_open_retries = 1;
+	dmux->cmd_open_retries = 0;
 	dmux->cmd_open_acked = false;
-	dmux->cmd_open_next_retry = jiffies + 5 * HZ;
+	dmux->cmd_open_next_retry = jiffies + 15 * HZ;
 
 	/* Step 7: Start polling (20ms interval) */
 	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(20));
