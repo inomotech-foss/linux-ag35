@@ -64,6 +64,7 @@
 #define BAM_CNFG_BITS			0x0007C
 #define BAM_IRQ_SRCS_EE(ee)		(0x03000 + (ee) * 0x1000)
 #define BAM_IRQ_SRCS_MSK_EE(ee)	(0x03004 + (ee) * 0x1000)
+#define BAM_PIPE_ATTR_EE(ee)		(0x0300C + (ee) * 0x1000)
 
 /* Per-pipe registers — pipe offset = 0x13000 + pipe * 0x1000 */
 #define BAM_P_CTRL(p)			(0x13000 + (p) * 0x1000)
@@ -325,11 +326,12 @@ static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 
 	dev_info(dmux->dev,
 		 "bam_hw_init: PRE BAM_CTRL=0x%08x REVISION=0x%08x "
-		 "NUM_PIPES=0x%08x CNFG=0x%08x reset=%d\n",
+		 "NUM_PIPES=0x%08x CNFG=0x%08x PIPE_ATTR_EE0=0x%08x reset=%d\n",
 		 ctrl,
 		 bam_readl(dmux, BAM_REVISION),
 		 bam_readl(dmux, BAM_NUM_PIPES),
 		 bam_readl(dmux, BAM_CNFG_BITS),
+		 bam_readl(dmux, BAM_PIPE_ATTR_EE(BAM_DMUX_EE)),
 		 do_reset);
 
 	/* Dump trust registers and pipe states before we touch anything */
@@ -347,52 +349,29 @@ static void bam_hw_init(struct bam_dmux *dmux, bool do_reset)
 
 	if (!do_reset) {
 		/*
-		 * Remote BAM — modem owns the hardware.
-		 * Downstream uses bam_check() (verify BAM_EN only) instead
-		 * of bam_init() (SW_RST).  However, we MUST still configure
-		 * CNFG_BITS, DESC_CNT_TRSHLD, and IRQ_EN — the bam_dmux_dma
-		 * node is disabled so bam_dma.c never runs, and the modem
-		 * may not have set these to the values APPS-side pipes need.
+		 * Remote BAM — modem owns the global BAM configuration.
 		 *
-		 * The downstream MDM9607 3.18 kernel sets these in
-		 * bam_init()/bam_init_powered_remotely().  Without correct
-		 * CNFG_BITS (hardware workarounds), the BAM DMA data path
-		 * may not function — P_SW_OFSTS stays at 0 forever.
+		 * Downstream MDM9607 3.18 SPS driver with qcom,powered-remotely:
+		 *   sps_bam_device_init() → bam_check() (NOT bam_init()!)
+		 *   bam_check() only READS registers to verify BAM is alive.
+		 *   It does NOT write BAM_CTRL, CNFG_BITS, DESC_CNT_TRSHLD,
+		 *   or IRQ_EN.
+		 *
+		 * KEY INSIGHT: Attempts 1-16 wrote CNFG_BITS=0xFFFFF7FF which
+		 * includes BAM_REG_P_EN (BIT(24)), BAM_CD_ENABLE (BIT(27)),
+		 * and many other bits that the modem firmware does NOT expect.
+		 * The modem leaves CNFG_BITS=0x00000000.  Writing these bits
+		 * may change the pipe enable mechanism and break modem-side
+		 * BAM operation — explaining why TX works (our pipe → modem)
+		 * but RX never arrives (modem → our pipe).
+		 *
+		 * FIX: Do NOT touch any global BAM registers.  Only set up
+		 * our pipes.  Pipe bits in IRQ_SRCS_MSK_EE are set by
+		 * bam_pipe_hw_init().
 		 */
-		if (!(ctrl & BAM_EN)) {
-			dev_warn(dmux->dev,
-				 "bam_hw_init: BAM not enabled by modem!\n");
-			val = BAM_EN | BIT(17);
-			bam_writel(dmux, BAM_CTRL, val);
-		}
-
-		/* Descriptor count threshold (downstream A2_SUMMING_THRESHOLD) */
-		bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
-
-		/*
-		 * CNFG_BITS — enable all hardware workarounds except
-		 * BAM_FULL_PIPE (bit 11).  Matches downstream 0xFFFFF7FF.
-		 * Without these, the producer pipe (modem→APPS) DMA path
-		 * may not connect properly.
-		 */
-		bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
-
-		/* BAM-level IRQ enable (TIMER | ERROR | HRESP_ERR) */
-		bam_writel(dmux, BAM_IRQ_EN,
-			   BAM_IRQ_TIMER_EN | BAM_IRQ_ERROR_EN |
-			   BAM_IRQ_HRESP_ERR_EN);
-
-		/* Unmask BAM-level IRQ in EE 0's IRQ sources */
-		bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
-
 		dev_info(dmux->dev,
-			 "bam_hw_init: POST BAM_CTRL=0x%08x CNFG=0x%08x "
-			 "IRQ_EN=0x%08x IRQ_SRCS_MSK=0x%08x DESC_CNT=0x%08x\n",
-			 bam_readl(dmux, BAM_CTRL),
-			 bam_readl(dmux, BAM_CNFG_BITS),
-			 bam_readl(dmux, BAM_IRQ_EN),
-			 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)),
-			 bam_readl(dmux, BAM_DESC_CNT_TRSHLD));
+			 "bam_hw_init: remote BAM — NOT writing global regs "
+			 "(matching downstream bam_check)\n");
 		return;
 	}
 
@@ -1041,11 +1020,13 @@ static void bam_dmux_dump_pipes(struct bam_dmux *dmux, const char *label)
 	int p;
 
 	dev_info(dmux->dev,
-		 "%s: BAM_CTRL=0x%08x CNFG=0x%08x IRQ_EN=0x%08x\n",
+		 "%s: BAM_CTRL=0x%08x CNFG=0x%08x IRQ_EN=0x%08x "
+		 "PIPE_ATTR_EE0=0x%08x\n",
 		 label,
 		 bam_readl(dmux, BAM_CTRL),
 		 bam_readl(dmux, BAM_CNFG_BITS),
-		 bam_readl(dmux, BAM_IRQ_EN));
+		 bam_readl(dmux, BAM_IRQ_EN),
+		 bam_readl(dmux, BAM_PIPE_ATTR_EE(BAM_DMUX_EE)));
 
 	for (p = 0; p < 4; p++)
 		dev_info(dmux->dev,
@@ -1539,12 +1520,14 @@ static void bam_dmux_dump_all_pipes(struct bam_dmux *dmux, const char *label)
 	int p;
 
 	dev_info(dmux->dev,
-		 "%s: BAM_CTRL=0x%08x CNFG=0x%08x IRQ_STTS=0x%08x IRQ_EN=0x%08x\n",
+		 "%s: BAM_CTRL=0x%08x CNFG=0x%08x IRQ_STTS=0x%08x "
+		 "IRQ_EN=0x%08x PIPE_ATTR_EE0=0x%08x\n",
 		 label,
 		 bam_readl(dmux, BAM_CTRL),
 		 bam_readl(dmux, BAM_CNFG_BITS),
 		 bam_readl(dmux, BAM_IRQ_STTS),
-		 bam_readl(dmux, BAM_IRQ_EN));
+		 bam_readl(dmux, BAM_IRQ_EN),
+		 bam_readl(dmux, BAM_PIPE_ATTR_EE(BAM_DMUX_EE)));
 
 	for (p = 0; p < 4; p++)
 		dev_info(dmux->dev,
