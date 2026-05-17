@@ -1613,18 +1613,27 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	 */
 	dev_info(dmux->dev,
 		 "ack_work: full BAM init AFTER modem set bit 1 "
-		 "(NO SW_RST + pipes + ACK + queue_rx — wait for modem CMD_OPEN)\n");
+		 "(SW_RST + pipes + ACK + queue_rx — attempt 19)\n");
 
 	/*
-	 * Step 1: BAM global init WITHOUT SW_RST.
+	 * Step 1: Full BAM global init WITH SW_RST.
 	 *
-	 * The PRE state shows BAM_CTRL=0x00020000 (CLK_GATING set,
-	 * but BAM_EN=0). The modem may have initialized internal state
-	 * that SW_RST would destroy. Attempts 1-15 all did SW_RST
-	 * and the modem never wrote to pipe 5. Let's try preserving
-	 * whatever state exists and just enabling BAM + configuring.
+	 * On MDM9607, satellite_mode=false (no qcom,satellite-mode in DTS).
+	 * The downstream SPS layer calls bam_init() which does:
+	 *   SW_RST → BAM_EN → LOCAL_CLK_GATING → DESC_CNT_TRSHLD(0x1000) →
+	 *   CNFG_BITS(0xFFFFF7FF) → IRQ_SRCS_MSK_EE.BAM_IRQ → IRQ_EN(0x16)
+	 *
+	 * The modem expects APPS to fully initialize the BAM (including reset)
+	 * when it signals readiness via SMSM bit 1.  The modem configures its
+	 * A2 DMA pipes AFTER seeing the SMSM ACK from APPS.
+	 *
+	 * Previous attempts used do_reset=false (only BAM_EN), which left the
+	 * BAM in a half-configured state.  The modem consumed TX (CMD_OPEN on
+	 * pipe 4) but never wrote to RX pipe 5 — likely because the BAM was
+	 * missing CNFG_BITS, DESC_CNT_TRSHLD, IRQ configuration, and the
+	 * initial SW_RST that clears stale state from the modem's prior setup.
 	 */
-	bam_hw_init(dmux, false);
+	bam_hw_init(dmux, true);
 
 	/* Step 2: Init TX pipe (pipe 4, consumer) */
 	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
