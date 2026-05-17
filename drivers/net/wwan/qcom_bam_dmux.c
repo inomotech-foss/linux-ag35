@@ -1613,7 +1613,7 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	 */
 	dev_info(dmux->dev,
 		 "ack_work: full BAM init AFTER modem set bit 1 "
-		 "(SW_RST + pipes + ACK + queue_rx — attempt 19)\n");
+		 "(SW_RST + pipes + clear_bit1 + ACK + queue_rx — attempt 19b)\n");
 
 	/*
 	 * Step 1: Full BAM global init WITH SW_RST.
@@ -1664,7 +1664,29 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	pm_runtime_get_noresume(dmux->dev);
 	pm_runtime_get_noresume(dmux->dev);
 
-	/* Step 4: ACK (toggle APPS bit 11) — BEFORE queue_rx!
+	/*
+	 * Step 4a: CLEAR APPS bit 1 (A2_POWER_CONTROL) before ACK.
+	 *
+	 * CRITICAL FIX (attempt 19b): In the downstream 3.18 kernel, APPS
+	 * NEVER has bit 1 set during the initial handshake.  APPS bit 1
+	 * is only used for "uplink wakeup" — when APPS needs to transmit
+	 * data and the modem is in low-power mode.
+	 *
+	 * Our boot_work sets APPS bit 1 to trigger the modem to set its
+	 * own bit 1.  But we must CLEAR it before ACK, otherwise the
+	 * modem sees APPS state = 0x182b (bit1 + bit11) instead of the
+	 * expected 0x1829 (bit11 only).  The modem's A2 state machine
+	 * interprets APPS bit 1 as an uplink wakeup request, which
+	 * conflicts with the initial handshake and causes the modem to
+	 * stall (never cycle disconnect/reconnect, never write to RX).
+	 *
+	 * After clearing: APPS = 0x1029 (same as downstream baseline).
+	 * After ACK toggle: APPS = 0x1829 (matching downstream exactly).
+	 */
+	dev_info(dmux->dev, "ack_work: clearing APPS bit 1 before ACK\n");
+	bam_dmux_pc_vote(dmux, false);
+
+	/* Step 4b: ACK (toggle APPS bit 11) — BEFORE queue_rx!
 	 * Downstream: toggle_apps_ack() is called before queue_rx()
 	 * in bam_init().  This tells modem "APPS is ready."
 	 */
