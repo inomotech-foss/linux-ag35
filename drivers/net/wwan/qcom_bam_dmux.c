@@ -1411,41 +1411,48 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 29: init AFTER modem "
-		 "responds, then toggle bit 11 separately)\n");
+		 "first_connect: BAM init (attempt 30: FULL SW_RST matching "
+		 "downstream SPS_BAM_MGR_LOCAL behavior)\n");
 
 	/*
 	 * At this point the modem has ALREADY responded to our SMSM bits
 	 * (modem set bits 1+11), which means the modem has already done
-	 * its a2_bam_init() including SW_RST.  Now it's safe to configure
-	 * our pipes — the modem won't reset the BAM again.
+	 * its a2_bam_init() including SW_RST.  Now it's safe for APPS to
+	 * do its OWN SW_RST.
+	 *
+	 * KEY INSIGHT from downstream analysis:
+	 *   - MDM9607 DTS has NO "qcom,satellite-mode" property
+	 *   - Downstream SPS uses SPS_BAM_MGR_LOCAL (manage=0)
+	 *   - APPS does FULL SW_RST even AFTER modem's init
+	 *   - The modem pushes data via A2 DMA hardware → pipe 5 producer
+	 *     endpoint; it does NOT use BAM descriptors from its side
+	 *   - Therefore SW_RST from APPS side is safe and REQUIRED
+	 *   - LOCAL_CLK_GATING must be 1 (not modem's 2)
+	 *
+	 * Attempts 22-29 preserved modem's BAM_CTRL (no SW_RST) because we
+	 * wrongly assumed the modem's pipe config was needed.  The modem
+	 * uses A2 DMA hardware to feed pipe 5, not BAM pipe registers.
 	 */
 
-	/* Step 1: NO global SW_RST!
-	 *
-	 * The modem already did SW_RST during its a2_bam_init().
-	 * BAM_CTRL is currently 0x00020000 (LOCAL_CLK_GATING=2, modem's
-	 * setting).  Just add BAM_EN and configure APPS-side registers.
-	 */
+	/* Step 1: Full SW_RST — matching downstream bam_init() */
 	dev_info(dmux->dev,
 		 "bam_hw_init: PRE BAM_CTRL=0x%08x CNFG=0x%08x\n",
 		 bam_readl(dmux, BAM_CTRL),
 		 bam_readl(dmux, BAM_CNFG_BITS));
 
-	/* Preserve modem's BAM_CTRL, just ensure BAM_EN is set */
-	{
-		u32 ctrl = bam_readl(dmux, BAM_CTRL);
-		ctrl |= BAM_EN;
-		bam_writel(dmux, BAM_CTRL, ctrl);
-	}
+	bam_writel_sync(dmux, BAM_CTRL, BAM_SW_RST);
+	bam_writel_sync(dmux, BAM_CTRL, 0);
 
-	/* Config bits — all workarounds enabled */
+	/* BAM_EN + LOCAL_CLK_GATING=1 (matching downstream exactly) */
+	bam_writel(dmux, BAM_CTRL, BAM_EN | BIT(16));
+
+	/* Config bits — all workarounds enabled except bit 11 */
 	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
 
 	/* Descriptor count threshold */
 	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
 
-	/* Global IRQ mask for EE 0 */
+	/* Global IRQ mask for EE 0 — set BAM_IRQ bit */
 	{
 		u32 val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE));
 		val |= BAM_IRQ_MSK;
