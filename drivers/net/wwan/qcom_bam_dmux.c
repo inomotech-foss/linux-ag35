@@ -855,7 +855,7 @@ static bool bam_dmux_queue_rx(struct bam_dmux *dmux,
 		return false;
 
 	ret = bam_pipe_submit_desc(dmux, &dmux->rx_pipe, skb_dma->addr,
-				   skb_dma->len, 0, skb_dma);
+				   skb_dma->len, DESC_FLAG_INT, skb_dma);
 	if (ret) {
 		bam_dmux_skb_dma_unmap(skb_dma, DMA_FROM_DEVICE);
 		return false;
@@ -1337,7 +1337,7 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * SMSM IRQ Handlers + Boot Sequence (Attempt 20)
+ * SMSM IRQ Handlers + Boot Sequence (Attempt 21)
  *
  * Downstream flow (from bam_dmux.c + modem pseudocode):
  *   1. Modem's a2_subsystem_boot() sets SMSM_A2_POWER_CONTROL autonomously
@@ -1346,18 +1346,21 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
  *   4. Modem's a2_apps_smsm_ack_callback fires → apps_bam_link_ready=true
  *   5. Modem sends CMD_OPEN on pipe 5
  *
- * Key insight: APPS NEVER sets bit 1 during the initial handshake.
- * APPS bit 1 is for uplink wakeup only (separate state machine path).
- * All 19 previous attempts set APPS bit 1 to trigger the modem, which
- * activated the modem's uplink wakeup path instead of the initial
- * connect path.  This may explain why the modem never cycled
- * disconnect/reconnect (stuck in uplink wakeup state).
+ * Key insight from attempt 20 failure analysis:
+ *   - The modem on this firmware does NOT set bit 1 autonomously.
+ *     It only responds when APPS sets bit 1 (the UL wakeup path).
+ *   - In the downstream UL wakeup flow, power_vote(1) sets APPS bit 1,
+ *     and it stays SET throughout reconnect → toggle_ack → queue_rx.
+ *     It is only cleared much later by ul_powerdown() when the link idles.
+ *   - Clearing APPS bit 1 BEFORE the ACK toggle causes the modem's
+ *     a2_apps_smsm_callback to interpret it as "APPS wants to power down,"
+ *     shutting down A2 DMA before the ACK arrives.
  *
- * Attempt 20 changes:
- *   - Wait for modem's autonomous bit 1 (5s fallback to APPS bit 1)
- *   - Do BAM init inline in pc_irq (no workqueue delay)
- *   - Fix LOCAL_CLK_GATING to BIT(16)
- *   - Strip diagnostic dumps for speed
+ * Attempt 21 changes:
+ *   - Keep APPS bit 1 SET throughout first_connect (don't clear it)
+ *   - Add DESC_FLAG_INT to RX descriptors (matching downstream)
+ *   - Keep LOCAL_CLK_GATING = BIT(16) from attempt 20
+ *   - Keep fast inline init from attempt 20
  * ────────────────────────────────────────────────────────────────────────── */
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -1367,12 +1370,15 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
  * Does everything inline for minimum latency — matching the downstream's
  * synchronous bam_dmux_smsm_cb → bam_init → toggle_ack → queue_rx flow.
  *
- * Attempt 20 key changes vs. previous attempts:
- *  - Called directly from pc_irq (no workqueue delay)
- *  - Stripped verbose diagnostic dumps (~85ms saved)
- *  - LOCAL_CLK_GATING fixed to BIT(16) (was BIT(17))
- *  - BAM IRQ registered BEFORE pipe init (matching downstream)
- *  - APPS bit 1 NOT set by default (wait for modem's autonomous bit 1)
+ * Attempt 21 key changes vs. attempt 20:
+ *  - DO NOT clear APPS bit 1 before ACK!  In the downstream, APPS bit 1
+ *    stays SET throughout the reconnect flow.  Clearing it triggers the
+ *    modem's a2_apps_smsm_callback with bit 1 = 0, which the modem
+ *    interprets as "APPS wants to power down A2" — causing it to shut
+ *    down the A2 DMA engine right before our ACK arrives.
+ *  - Add DESC_FLAG_INT to RX descriptors (matching downstream
+ *    SPS_IOVEC_FLAG_INT on every sps_transfer_one for RX).
+ *  - Keep: LOCAL_CLK_GATING=BIT(16), fast inline init, BAM IRQ before pipes
  * ────────────────────────────────────────────────────────────────────────── */
 
 static void bam_dmux_first_connect(struct bam_dmux *dmux)
@@ -1380,8 +1386,8 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 20: fast inline, "
-		 "LOCAL_CLK_GATING=BIT(16), no APPS bit 1 trigger)\n");
+		 "first_connect: BAM init (attempt 21: keep APPS bit 1 set, "
+		 "INT flag on RX descs, LOCAL_CLK_GATING=BIT(16))\n");
 
 	/* Step 1: Full BAM global init with SW_RST */
 	bam_hw_init(dmux);
@@ -1427,14 +1433,22 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	pm_runtime_get_noresume(dmux->dev);
 
 	/*
-	 * Step 5: Clear APPS bit 1 (if set by fallback boot_work).
+	 * Step 5: DO NOT clear APPS bit 1!
 	 *
-	 * In the downstream, APPS never has bit 1 set during initial
-	 * handshake.  APPS bit 1 is for uplink wakeup only.
-	 * If boot_work set it as a fallback trigger, clear it now.
-	 * If modem connected autonomously, this is a no-op.
+	 * In the downstream, APPS bit 1 stays SET throughout the entire
+	 * reconnect flow (reconnect_to_bam → toggle_ack → queue_rx).
+	 * It is only cleared later by ul_powerdown() when the link idles.
+	 *
+	 * Clearing APPS bit 1 here triggers the modem's a2_apps_smsm_callback
+	 * with bit 1 = 0, which the modem interprets as "APPS wants to power
+	 * down A2."  This causes the modem to shut down its A2 DMA engine
+	 * right before our ACK arrives, so the modem never sets
+	 * apps_bam_link_ready and never writes to pipe 5.
+	 *
+	 * Previous attempts 1-19 had wrong LOCAL_CLK_GATING (BIT(17)),
+	 * attempt 20 cleared bit 1 here.  This is the first attempt with
+	 * both fixes correct simultaneously.
 	 */
-	bam_dmux_pc_vote(dmux, false);
 
 	/* Step 6: Toggle ACK (APPS bit 11) — BEFORE queue_rx!
 	 * Downstream: toggle_apps_ack() before queue_rx() in bam_init().
