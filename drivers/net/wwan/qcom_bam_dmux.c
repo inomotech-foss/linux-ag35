@@ -1399,8 +1399,8 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	u32 val;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 32: NO SW_RST, CNFG_BITS, "
-		 "matching bam_dma.c powered-remotely path)\n");
+		 "first_connect: BAM init (attempt 33: 500ms delay before ACK, "
+		 "CNFG_BITS, no SW_RST/P_RST on pipe 5)\n");
 
 	/*
 	 * KEY INSIGHT (attempt 32):
@@ -1540,13 +1540,25 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	 * It compares APPS bit 11 with its internal modem_ack_state:
 	 *   if (apps_ack != modem_ack_state) → apps_bam_link_ready = true
 	 *
-	 * modem_ack_state starts as false (0).  We toggle bit 11 from 0→1.
-	 * The modem sees 1 != 0 → link ready → modem can write to pipe 5.
+	 * TIMING ISSUE (attempts 1-32):
+	 *   The modem's response to APPS bit 1 (setting modem bits 1+11)
+	 *   triggers our pc_irq.  But the modem's A2 task may still be
+	 *   registering its a2_apps_smsm_ack_callback in a separate thread
+	 *   context AFTER setting those SMSM bits.  If we toggle bit 11
+	 *   before that registration completes, the modem never sees it.
 	 *
-	 * This MUST happen AFTER BAM init (pipes ready) and AFTER modem's
-	 * bit-1 callback has completed (which is guaranteed since pc_irq
-	 * already fired).
+	 *   Evidence: in 32 attempts, the modem fires exactly 2 SMSM
+	 *   interrupts and NEVER responds to our bit 11 toggle.
+	 *   Downstream takes 200-500ms for SPS library operations between
+	 *   receiving pc_irq and toggling ACK, providing implicit delay.
+	 *
+	 *   Attempt 33: add 500ms delay before toggling bit 11 to allow
+	 *   the modem's A2 task to complete callback registration.
 	 */
+	dev_info(dmux->dev,
+		 "first_connect: waiting 500ms before ACK (modem A2 task init)\n");
+	msleep(500);
+
 	dev_info(dmux->dev, "first_connect: toggling APPS bit 11 (ACK)\n");
 	bam_dmux_pc_ack(dmux);
 
