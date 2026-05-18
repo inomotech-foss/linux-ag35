@@ -320,7 +320,7 @@ static void bam_dmux_pc_ack(struct bam_dmux *dmux)
 #define BAM_CACHE_MISS_ERR_RESP_EN	BIT(19)
 #define BAM_LOCAL_CLK_GATING_MASK	(BIT(17) | BIT(16))
 
-static void bam_hw_init(struct bam_dmux *dmux)
+static void __maybe_unused bam_hw_init(struct bam_dmux *dmux)
 {
 	u32 val;
 
@@ -1411,13 +1411,57 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 27: simultaneous "
-		 "bits 1+11 — single IPC to modem)\n");
+		 "first_connect: BAM init (attempt 28: init AFTER modem "
+		 "responds — modem does SW_RST during its a2_bam_init)\n");
 
-	/* Step 1: Full BAM global init with SW_RST */
-	bam_hw_init(dmux);
+	/*
+	 * At this point the modem has ALREADY responded to our SMSM bits
+	 * (modem set bits 1+11), which means the modem has already done
+	 * its a2_bam_init() including SW_RST.  Now it's safe to configure
+	 * our pipes — the modem won't reset the BAM again.
+	 */
 
-	/* Step 2: Register BAM IRQ BEFORE pipes (matching downstream) */
+	/* Step 1: NO global SW_RST!
+	 *
+	 * The modem already did SW_RST during its a2_bam_init().
+	 * BAM_CTRL is currently 0x00020000 (LOCAL_CLK_GATING=2, modem's
+	 * setting).  Just add BAM_EN and configure APPS-side registers.
+	 */
+	dev_info(dmux->dev,
+		 "bam_hw_init: PRE BAM_CTRL=0x%08x CNFG=0x%08x\n",
+		 bam_readl(dmux, BAM_CTRL),
+		 bam_readl(dmux, BAM_CNFG_BITS));
+
+	/* Preserve modem's BAM_CTRL, just ensure BAM_EN is set */
+	{
+		u32 ctrl = bam_readl(dmux, BAM_CTRL);
+		ctrl |= BAM_EN;
+		bam_writel(dmux, BAM_CTRL, ctrl);
+	}
+
+	/* Config bits — all workarounds enabled */
+	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
+
+	/* Descriptor count threshold */
+	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
+
+	/* Global IRQ mask for EE 0 */
+	{
+		u32 val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE));
+		val |= BAM_IRQ_MSK;
+		bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), val);
+	}
+
+	/* BAM-level IRQ enable */
+	bam_writel(dmux, BAM_IRQ_EN,
+		   BAM_IRQ_TIMER_EN | BAM_IRQ_ERROR_EN | BAM_IRQ_HRESP_ERR_EN);
+
+	dev_info(dmux->dev,
+		 "bam_hw_init: POST BAM_CTRL=0x%08x CNFG=0x%08x\n",
+		 bam_readl(dmux, BAM_CTRL),
+		 bam_readl(dmux, BAM_CNFG_BITS));
+
+	/* Step 2: Register BAM IRQ */
 	if (dmux->bam_irq > 0 && !dmux->bam_irq_registered) {
 		ret = devm_request_irq(dmux->dev, dmux->bam_irq,
 				       bam_dmux_bam_isr,
@@ -1430,7 +1474,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		}
 	}
 
-	/* Step 3: Init TX pipe (pipe 4, consumer) */
+	/* Step 3: Init TX pipe (pipe 4, consumer) — NO P_RST */
 	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
 			       BAM_DMUX_TX_PIPE, false);
 	if (ret) {
@@ -1438,7 +1482,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		return;
 	}
 
-	/* Step 4: Init RX pipe (pipe 5, producer) — dump PRE state */
+	/* Step 4: Init RX pipe (pipe 5, producer) */
 	dev_info(dmux->dev,
 		 "P5 PRE: CTRL=0x%08x DESC=0x%08x FIFO_SZ=0x%08x SW=0x%08x EVNT=0x%08x\n",
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
@@ -1464,10 +1508,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	pm_runtime_get_noresume(dmux->dev);
 	pm_runtime_get_noresume(dmux->dev);
 
-	/* Step 5: Queue 32 RX descriptors + doorbell FIRST.
-	 *
-	 * Ensure pipe 5 has available buffers BEFORE signaling modem.
-	 */
+	/* Step 5: Queue 32 RX descriptors + doorbell */
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i], GFP_KERNEL))
 			dev_err(dmux->dev, "RX queue %d failed\n", i);
@@ -1484,46 +1525,10 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
 
-	/*
-	 * Step 7: Set APPS bits 1 AND 11 SIMULTANEOUSLY.
-	 *
-	 * CRITICAL CHANGE from all previous attempts: instead of setting
-	 * bit 1 first (triggering modem's power callback) and then bit 11
-	 * separately (triggering modem's ACK callback via a second IPC),
-	 * we set BOTH bits in a SINGLE SMSM update.
-	 *
-	 * This sends ONE IPC to the modem.  The modem's SMSM ISR fires
-	 * once, reads APPS state, sees BOTH bits changed, and dispatches
-	 * BOTH callbacks in the same ISR invocation:
-	 *   1. bit 1 callback (a2_apps_smsm_callback): powers on A2,
-	 *      sets modem bits 1+11
-	 *   2. bit 11 callback (a2_apps_smsm_ack_callback): sees APPS
-	 *      bit 11 = 1 != modem_ack_state (false), sets
-	 *      apps_bam_link_ready = true
-	 *
-	 * This eliminates the race where a second IPC might be lost,
-	 * filtered, or processed in an incompatible modem state.
-	 *
-	 * In the downstream initial-connect flow, APPS never sets bit 1
-	 * (modem sets modem bit 1 autonomously), but in the downstream
-	 * RECONNECT flow, APPS sets bit 1 and then toggles bit 11 — we
-	 * combine both into one operation.
-	 */
-	dev_info(dmux->dev,
-		 "first_connect: setting APPS bits 1+11 simultaneously\n");
-	qcom_smem_state_update_bits(dmux->pc,
-				    dmux->pc_mask | dmux->pc_ack_mask,
-				    dmux->pc_mask | dmux->pc_ack_mask);
-	dmux->pc_ack_state = true;  /* bit 11 is now SET */
-
-	/* Step 8: Set up CMD_OPEN fallback timer + start polling.
-	 *
-	 * Start CMD_OPEN retries after 5s (modem needs time to process
-	 * both SMSM callbacks, power on A2, and be ready for data).
-	 */
+	/* Step 7: Start CMD_OPEN immediately (modem is ready) */
 	dmux->cmd_open_retries = 0;
 	dmux->cmd_open_acked = false;
-	dmux->cmd_open_next_retry = jiffies + 5 * HZ;
+	dmux->cmd_open_next_retry = jiffies;  /* send NOW */
 
 	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(20));
 }
@@ -1560,28 +1565,14 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state && !dmux->pipes_active) {
 		/*
-		 * Modem set A2_POWER_CONTROL (bit 1) BEFORE our boot_work
-		 * ran (unlikely on AG35 but handle for robustness).
-		 * Do BAM init here.
+		 * Modem set A2_POWER_CONTROL (bit 1) — first connect.
+		 *
+		 * The modem has finished its a2_bam_init() (including SW_RST)
+		 * and is ready for APPS to configure pipes.  Do BAM init now.
 		 */
 		dmux->pc_state = true;
 		cancel_delayed_work(&dmux->boot_work);
 		bam_dmux_first_connect(dmux);
-
-	} else if (new_state && !dmux->pc_state) {
-		/*
-		 * Modem set bit 1 AFTER our boot_work already initialized
-		 * pipes and set APPS bits 1+11.  This is the expected path
-		 * for attempt 27: modem responds to our simultaneous bits.
-		 * Just confirm connection and start CMD_OPEN immediately.
-		 */
-		dmux->pc_state = true;
-		cancel_delayed_work(&dmux->boot_work);
-		dev_info(dmux->dev,
-			 "pc_irq: modem confirmed (pipes already active), "
-			 "starting CMD_OPEN now\n");
-		/* Trigger immediate CMD_OPEN retry */
-		dmux->cmd_open_next_retry = jiffies;
 
 	} else if (new_state && dmux->pc_state) {
 		/* Already connected — re-issue doorbell */
@@ -1658,22 +1649,25 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Attempt 27: instead of just setting APPS bit 1 and waiting for
-	 * modem to respond (which triggers a separate ACK toggle later),
-	 * do the FULL initialization here:
-	 *   1. BAM init (SW_RST, pipes, RX queue, doorbell)
-	 *   2. Set APPS bits 1 AND 11 simultaneously
+	 * Attempt 28: Set SMSM bits 1+11 simultaneously, but do NOT init
+	 * BAM yet.  The modem's a2_bam_init() does SW_RST when it processes
+	 * our bit 1, which wipes ALL BAM state.  We must wait for the modem
+	 * to finish (respond with its own bits 1+11 via pc_irq) before
+	 * configuring our pipes.
 	 *
-	 * This ensures:
-	 *   - Pipes are ready BEFORE modem is signaled
-	 *   - Modem receives BOTH bits in one IPC, dispatching both
-	 *     callbacks in a single ISR invocation
-	 *   - No second IPC that might be lost/ignored
+	 * Flow:
+	 *   1. boot_work sets APPS bits 1+11  (HERE)
+	 *   2. Modem sees bits → a2_bam_init() → SW_RST → pipe config
+	 *   3. Modem sets modem bits 1+11 → pc_irq fires
+	 *   4. pc_irq calls bam_dmux_first_connect() → BAM init AFTER modem
 	 */
 	dev_info(dmux->dev,
-		 "boot_work: initializing BAM and setting bits 1+11\n");
+		 "boot_work: setting APPS bits 1+11 (no BAM init yet)\n");
 
-	bam_dmux_first_connect(dmux);
+	qcom_smem_state_update_bits(dmux->pc,
+				    dmux->pc_mask | dmux->pc_ack_mask,
+				    dmux->pc_mask | dmux->pc_ack_mask);
+	dmux->pc_ack_state = true;  /* bit 11 is now SET */
 }
 
 static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
