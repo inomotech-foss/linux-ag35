@@ -1399,31 +1399,36 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	u32 val;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 31: NO SW_RST, NO P_RST on "
-		 "pipe 5 — modem is BAM primary controller)\n");
+		 "first_connect: BAM init (attempt 32: NO SW_RST, CNFG_BITS, "
+		 "matching bam_dma.c powered-remotely path)\n");
 
 	/*
-	 * KEY INSIGHT (attempt 31):
+	 * KEY INSIGHT (attempt 32):
 	 *
-	 * The modem is the BAM primary controller.  It did SW_RST + full BAM
-	 * init + pipe configuration during a2_bam_dmux_init() at modem boot
-	 * and again in a2_apps_smsm_callback → a2_power_vote → a2_hw_power_on
-	 * when we set APPS bit 1.
+	 * Attempt 31 had the right approach (no SW_RST, no P_RST on pipe 5)
+	 * but was MISSING CNFG_BITS.  The attempt 31 log showed CNFG=0x00000000.
 	 *
-	 * The modem feeds data into pipe 5 via A2 DMA hardware which connects
-	 * to the BAM pipe 5 producer input port.  P_RST on pipe 5 destroys
-	 * the modem's pipe state machine and descriptor tracking.  The modem
-	 * does NOT re-initialize after our reset because it already set
-	 * apps_bam_link_ready=true.
+	 * CNFG_BITS (0xFFFFF7FF) are hardware workaround enables that the
+	 * downstream MDM9607 SPS driver ALWAYS sets.  The bam_dma.c
+	 * powered-remotely path also sets them.  Without these bits, the
+	 * BAM's internal data path for producer pipes may not function,
+	 * explaining why P_SW_OFSTS stays at 0 across all attempts that
+	 * lacked CNFG_BITS.
 	 *
-	 * Therefore:
-	 *   - NO global SW_RST (would wipe ALL modem BAM config)
-	 *   - NO P_RST on pipe 5 (would kill modem's producer state machine)
-	 *   - P_RST on pipe 4 is OK (APPS-owned consumer pipe)
-	 *   - Just configure our descriptor FIFO for pipe 5 and enable it
+	 * Attempt 31 also overwrote BAM_CTRL (changing LOCAL_CLK_GATING
+	 * from modem's value 2 to 1).  This attempt preserves the modem's
+	 * BAM_CTRL and only adds BAM_EN via RMW.
 	 *
-	 * This matches the upstream bam_dma.c behavior for powered_remotely
-	 * BAMs: skip P_RST, just write DESC_FIFO_ADDR/SIZES/CTRL.
+	 * Attempt 30 had CNFG_BITS but also did SW_RST.  SW_RST resets the
+	 * BAM's internal state machine and may require specific re-init
+	 * timing that we don't match.  This attempt avoids SW_RST.
+	 *
+	 * Summary of this attempt:
+	 *   - NO SW_RST (preserve BAM internal state)
+	 *   - Preserve modem's BAM_CTRL (RMW: just add BAM_EN)
+	 *   - SET CNFG_BITS = 0xFFFFF7FF (critical hardware workarounds)
+	 *   - NO P_RST on pipe 5 (preserve any modem state)
+	 *   - P_RST on pipe 4 (APPS-owned consumer pipe)
 	 */
 
 	/* Verify BAM is enabled by modem */
@@ -1435,11 +1440,23 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
 
 	if (!(val & BAM_EN)) {
-		dev_err(dmux->dev,
-			"BAM_EN not set! Modem may not have initialized BAM\n");
-		/* Try enabling it ourselves */
-		bam_writel(dmux, BAM_CTRL, BAM_EN | BIT(16));
+		dev_info(dmux->dev,
+			 "BAM_EN not set (BAM_CTRL=0x%08x), enabling\n", val);
+		/* Preserve modem's LOCAL_CLK_GATING, just add BAM_EN */
+		val |= BAM_EN;
+		bam_writel(dmux, BAM_CTRL, val);
 	}
+
+	/*
+	 * CNFG_BITS: hardware workaround enables.  Downstream MDM9607
+	 * always sets 0xFFFFF7FF (all bits except bit 11 = BAM_FULL_PIPE).
+	 * The bam_dma.c powered-remotely path also sets this.
+	 *
+	 * Without CNFG_BITS, the BAM's internal data path for producer
+	 * pipes (modem→APPS) may not function correctly, causing
+	 * P_SW_OFSTS to stay at 0 (attempt 31 symptom).
+	 */
+	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
 
 	/* Descriptor count threshold (harmless to set even if modem set it) */
 	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
