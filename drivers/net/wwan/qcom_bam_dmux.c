@@ -395,9 +395,18 @@ static int bam_pipe_hw_init(struct bam_dmux *dmux, struct bam_pipe *pipe,
 
 	memset(pipe->desc_fifo, 0, BAM_DESC_FIFO_SIZE);
 
-	/* Reset pipe */
-	bam_writel_sync(dmux, BAM_P_RST(pipe_index), 1);
-	bam_writel_sync(dmux, BAM_P_RST(pipe_index), 0);
+	/*
+	 * Reset pipe — but SKIP for the RX/producer pipe (pipe 5).
+	 *
+	 * The modem's a2_bam_init() configured the internal A2 DMA → pipe 5
+	 * connection before we run.  P_RST destroys that internal connection
+	 * and the modem never re-establishes it.  For pipe 4 (consumer/TX),
+	 * P_RST is safe because we are the producer writing descriptors.
+	 */
+	if (!producer) {
+		bam_writel_sync(dmux, BAM_P_RST(pipe_index), 1);
+		bam_writel_sync(dmux, BAM_P_RST(pipe_index), 0);
+	}
 
 	/* Unmask this pipe in EE 0's IRQ sources */
 	val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE));
@@ -1400,8 +1409,8 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 22: no SW_RST, preserve "
-		 "modem BAM_CTRL, CNFG_BITS, keep APPS bit 1, RX flags=0)\n");
+		 "first_connect: BAM init (attempt 23: no SW_RST, no P_RST on "
+		 "pipe 5, preserve modem BAM_CTRL)\n");
 
 	/* Step 1: Full BAM global init with SW_RST */
 	bam_hw_init(dmux);
@@ -1427,7 +1436,14 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		return;
 	}
 
-	/* Step 4: Init RX pipe (pipe 5, producer) */
+	/* Step 4: Init RX pipe (pipe 5, producer) — dump PRE state */
+	dev_info(dmux->dev,
+		 "P5 PRE: CTRL=0x%08x DESC=0x%08x FIFO_SZ=0x%08x SW=0x%08x EVNT=0x%08x\n",
+		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
+		 bam_readl(dmux, BAM_P_DESC_FIFO_ADDR(BAM_DMUX_RX_PIPE)),
+		 bam_readl(dmux, BAM_P_FIFO_SIZES(BAM_DMUX_RX_PIPE)),
+		 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
+		 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)));
 	ret = bam_pipe_hw_init(dmux, &dmux->rx_pipe,
 			       BAM_DMUX_RX_PIPE, true);
 	if (ret) {
