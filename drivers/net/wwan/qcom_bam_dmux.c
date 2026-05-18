@@ -324,30 +324,29 @@ static void bam_hw_init(struct bam_dmux *dmux)
 {
 	u32 val;
 
-	val = bam_readl(dmux, BAM_CTRL);
-
 	dev_info(dmux->dev,
 		 "bam_hw_init: PRE BAM_CTRL=0x%08x CNFG=0x%08x\n",
-		 val, bam_readl(dmux, BAM_CNFG_BITS));
+		 bam_readl(dmux, BAM_CTRL),
+		 bam_readl(dmux, BAM_CNFG_BITS));
 
 	/*
-	 * Step 1: NO SW_RST — preserve modem's BAM state.
+	 * Step 1: SW_RST — matching downstream sps_bam_enable() → bam_init().
 	 *
-	 * The modem's a2_bam_init() has already configured the BAM
-	 * (including internal A2 DMA connections to pipes 4 and 5).
-	 * SW_RST destroys all of that, and the modem never re-initializes
-	 * because it doesn't know we reset.
+	 * MDM9607 DTS has no "qcom,satellite-mode" so downstream SPS treats
+	 * this BAM as locally managed and does full SW_RST on every reconnect.
+	 * The modem's P5 PRE state is all zeros — modem never configures the
+	 * APPS-side pipe registers.  SW_RST is safe and expected.
 	 */
+	bam_writel_sync(dmux, BAM_CTRL, BAM_SW_RST);
+	bam_writel_sync(dmux, BAM_CTRL, 0);
 
 	/*
-	 * Step 2: Enable BAM, preserve modem's LOCAL_CLK_GATING value.
+	 * Step 2: BAM_EN + LOCAL_CLK_GATING=1 (matching downstream bam_init).
 	 *
-	 * The modem had BAM_CTRL=0x00020000 (LOCAL_CLK_GATING=2, BAM_EN=0).
-	 * We add BAM_EN and clear CACHE_MISS_ERR_RESP_EN, but keep the
-	 * modem's LOCAL_CLK_GATING setting intact.
+	 * Downstream: bam_write_reg_field(CTRL, LOCAL_CLK_GATING, 1) sets
+	 * bits[17:16] = 1 (= BIT(16)).  Clear CACHE_MISS_ERR_RESP_EN.
 	 */
-	val |= BAM_EN;
-	val &= ~BAM_CACHE_MISS_ERR_RESP_EN;
+	val = BAM_EN | BIT(16);  /* LOCAL_CLK_GATING = 1 */
 	bam_writel(dmux, BAM_CTRL, val);
 
 	/* Step 3: Descriptor count threshold */
@@ -396,17 +395,12 @@ static int bam_pipe_hw_init(struct bam_dmux *dmux, struct bam_pipe *pipe,
 	memset(pipe->desc_fifo, 0, BAM_DESC_FIFO_SIZE);
 
 	/*
-	 * Reset pipe — but SKIP for the RX/producer pipe (pipe 5).
-	 *
-	 * The modem's a2_bam_init() configured the internal A2 DMA → pipe 5
-	 * connection before we run.  P_RST destroys that internal connection
-	 * and the modem never re-establishes it.  For pipe 4 (consumer/TX),
-	 * P_RST is safe because we are the producer writing descriptors.
+	 * Reset pipe — downstream SPS does P_RST for every sps_connect().
+	 * Since we do global SW_RST in bam_hw_init(), individual P_RST here
+	 * is technically redundant but matches downstream exactly.
 	 */
-	if (!producer) {
-		bam_writel_sync(dmux, BAM_P_RST(pipe_index), 1);
-		bam_writel_sync(dmux, BAM_P_RST(pipe_index), 0);
-	}
+	bam_writel_sync(dmux, BAM_P_RST(pipe_index), 1);
+	bam_writel_sync(dmux, BAM_P_RST(pipe_index), 0);
 
 	/* Unmask this pipe in EE 0's IRQ sources */
 	val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE));
@@ -1409,8 +1403,8 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 23: no SW_RST, no P_RST on "
-		 "pipe 5, preserve modem BAM_CTRL)\n");
+		 "first_connect: BAM init (attempt 24: SW_RST + LOCAL_CLK_GATING=1 "
+		 "matching downstream exactly)\n");
 
 	/* Step 1: Full BAM global init with SW_RST */
 	bam_hw_init(dmux);
