@@ -1403,8 +1403,8 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 25: SW_RST + CLK_GATING=1 + "
-		 "force ipc_regmap kick)\n");
+		 "first_connect: BAM init (attempt 26: 2s ACK delay — "
+		 "give modem time to finish A2 DMA init)\n");
 
 	/* Step 1: Full BAM global init with SW_RST */
 	bam_hw_init(dmux);
@@ -1474,30 +1474,51 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	 * both fixes correct simultaneously.
 	 */
 
-	/* Step 6: Toggle ACK (APPS bit 11) — BEFORE queue_rx!
-	 * Downstream: toggle_apps_ack() before queue_rx() in bam_init().
+	/* Step 6: Queue 32 RX descriptors + doorbell FIRST.
+	 *
+	 * Critical change from previous attempts: queue RX descriptors and
+	 * ring doorbell BEFORE toggling ACK.  This ensures pipe 5 has
+	 * available buffers BEFORE the modem is told "APPS is ready."
 	 */
-	dev_info(dmux->dev, "first_connect: toggling APPS bit 11 (ACK)\n");
-	bam_dmux_pc_ack(dmux);
-
-	/* Step 7: Queue 32 RX descriptors + doorbell */
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i], GFP_KERNEL))
 			dev_err(dmux->dev, "RX queue %d failed\n", i);
 	}
 	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 
-	/* Step 8: Clear all pending IRQ status */
+	/* Step 7: Clear all pending IRQ status */
 	bam_clear_irqs(dmux);
 
 	dev_info(dmux->dev,
-		 "first_connect: done, P4_CTRL=0x%08x P5_CTRL=0x%08x "
-		 "IRQ_SRCS_MSK=0x%08x\n",
+		 "first_connect: pipes ready, P4_CTRL=0x%08x P5_CTRL=0x%08x "
+		 "IRQ_SRCS_MSK=0x%08x — delaying ACK by 2s\n",
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
 
-	/* Step 9: Set up CMD_OPEN fallback timer + start polling */
+	/*
+	 * Step 8: Delay ACK toggle by 2 seconds.
+	 *
+	 * Critical timing fix: the modem's a2_apps_smsm_callback (triggered
+	 * by our APPS bit 1) starts the modem's A2 DMA initialization.  The
+	 * modem quickly sets MODEM bits 1+11 (~47ms) as acknowledgment, but
+	 * its A2 DMA may NOT be fully initialized yet.  If we toggle ACK
+	 * (APPS bit 11) too quickly, the modem's SMSM handler may still be
+	 * in the middle of processing the bit 1 change and drops or ignores
+	 * the bit 11 notification.
+	 *
+	 * By waiting 2 seconds, we give the modem ample time to:
+	 *   - Complete A2 DMA initialization
+	 *   - Return from the bit 1 callback to idle
+	 *   - Be ready to process the next SMSM change (bit 11)
+	 *
+	 * Schedule ack_work to toggle ACK after the delay.
+	 */
+	schedule_delayed_work(&dmux->ack_work, msecs_to_jiffies(2000));
+
+	/* Step 9: Set up CMD_OPEN fallback timer + start polling
+	 * (polling starts now but CMD_OPEN won't be sent until after ACK)
+	 */
 	dmux->cmd_open_retries = 0;
 	dmux->cmd_open_acked = false;
 	dmux->cmd_open_next_retry = jiffies + 15 * HZ;
@@ -1510,9 +1531,8 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
 					     ack_work.work);
 
-	/* ack_work is now only used as a fallback; main path is pc_irq. */
-	if (dmux->pipes_active) {
-		dev_info(dmux->dev, "ack_work: already active, skip\n");
+	if (!dmux->pipes_active) {
+		dev_warn(dmux->dev, "ack_work: pipes not active, skip\n");
 		return;
 	}
 
@@ -1521,7 +1541,12 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 		return;
 	}
 
-	bam_dmux_first_connect(dmux);
+	/*
+	 * Toggle APPS bit 11 (ACK) — the modem's a2_apps_smsm_ack_callback
+	 * fires when this bit changes, setting apps_bam_link_ready = true.
+	 */
+	dev_info(dmux->dev, "ack_work: toggling APPS bit 11 (ACK) now\n");
+	bam_dmux_pc_ack(dmux);
 }
 
 static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
