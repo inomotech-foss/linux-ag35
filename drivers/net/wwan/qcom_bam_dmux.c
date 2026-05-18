@@ -1403,8 +1403,8 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 26: 2s ACK delay — "
-		 "give modem time to finish A2 DMA init)\n");
+		 "first_connect: BAM init (attempt 27: simultaneous "
+		 "bits 1+11 — single IPC to modem)\n");
 
 	/* Step 1: Full BAM global init with SW_RST */
 	bam_hw_init(dmux);
@@ -1456,29 +1456,9 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	pm_runtime_get_noresume(dmux->dev);
 	pm_runtime_get_noresume(dmux->dev);
 
-	/*
-	 * Step 5: DO NOT clear APPS bit 1!
+	/* Step 5: Queue 32 RX descriptors + doorbell FIRST.
 	 *
-	 * In the downstream, APPS bit 1 stays SET throughout the entire
-	 * reconnect flow (reconnect_to_bam → toggle_ack → queue_rx).
-	 * It is only cleared later by ul_powerdown() when the link idles.
-	 *
-	 * Clearing APPS bit 1 here triggers the modem's a2_apps_smsm_callback
-	 * with bit 1 = 0, which the modem interprets as "APPS wants to power
-	 * down A2."  This causes the modem to shut down its A2 DMA engine
-	 * right before our ACK arrives, so the modem never sets
-	 * apps_bam_link_ready and never writes to pipe 5.
-	 *
-	 * Previous attempts 1-19 had wrong LOCAL_CLK_GATING (BIT(17)),
-	 * attempt 20 cleared bit 1 here.  This is the first attempt with
-	 * both fixes correct simultaneously.
-	 */
-
-	/* Step 6: Queue 32 RX descriptors + doorbell FIRST.
-	 *
-	 * Critical change from previous attempts: queue RX descriptors and
-	 * ring doorbell BEFORE toggling ACK.  This ensures pipe 5 has
-	 * available buffers BEFORE the modem is told "APPS is ready."
+	 * Ensure pipe 5 has available buffers BEFORE signaling modem.
 	 */
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i], GFP_KERNEL))
@@ -1486,42 +1466,56 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	}
 	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 
-	/* Step 7: Clear all pending IRQ status */
+	/* Step 6: Clear all pending IRQ status */
 	bam_clear_irqs(dmux);
 
 	dev_info(dmux->dev,
 		 "first_connect: pipes ready, P4_CTRL=0x%08x P5_CTRL=0x%08x "
-		 "IRQ_SRCS_MSK=0x%08x — delaying ACK by 2s\n",
+		 "IRQ_SRCS_MSK=0x%08x\n",
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
 
 	/*
-	 * Step 8: Delay ACK toggle by 2 seconds.
+	 * Step 7: Set APPS bits 1 AND 11 SIMULTANEOUSLY.
 	 *
-	 * Critical timing fix: the modem's a2_apps_smsm_callback (triggered
-	 * by our APPS bit 1) starts the modem's A2 DMA initialization.  The
-	 * modem quickly sets MODEM bits 1+11 (~47ms) as acknowledgment, but
-	 * its A2 DMA may NOT be fully initialized yet.  If we toggle ACK
-	 * (APPS bit 11) too quickly, the modem's SMSM handler may still be
-	 * in the middle of processing the bit 1 change and drops or ignores
-	 * the bit 11 notification.
+	 * CRITICAL CHANGE from all previous attempts: instead of setting
+	 * bit 1 first (triggering modem's power callback) and then bit 11
+	 * separately (triggering modem's ACK callback via a second IPC),
+	 * we set BOTH bits in a SINGLE SMSM update.
 	 *
-	 * By waiting 2 seconds, we give the modem ample time to:
-	 *   - Complete A2 DMA initialization
-	 *   - Return from the bit 1 callback to idle
-	 *   - Be ready to process the next SMSM change (bit 11)
+	 * This sends ONE IPC to the modem.  The modem's SMSM ISR fires
+	 * once, reads APPS state, sees BOTH bits changed, and dispatches
+	 * BOTH callbacks in the same ISR invocation:
+	 *   1. bit 1 callback (a2_apps_smsm_callback): powers on A2,
+	 *      sets modem bits 1+11
+	 *   2. bit 11 callback (a2_apps_smsm_ack_callback): sees APPS
+	 *      bit 11 = 1 != modem_ack_state (false), sets
+	 *      apps_bam_link_ready = true
 	 *
-	 * Schedule ack_work to toggle ACK after the delay.
+	 * This eliminates the race where a second IPC might be lost,
+	 * filtered, or processed in an incompatible modem state.
+	 *
+	 * In the downstream initial-connect flow, APPS never sets bit 1
+	 * (modem sets modem bit 1 autonomously), but in the downstream
+	 * RECONNECT flow, APPS sets bit 1 and then toggles bit 11 — we
+	 * combine both into one operation.
 	 */
-	schedule_delayed_work(&dmux->ack_work, msecs_to_jiffies(2000));
+	dev_info(dmux->dev,
+		 "first_connect: setting APPS bits 1+11 simultaneously\n");
+	qcom_smem_state_update_bits(dmux->pc,
+				    dmux->pc_mask | dmux->pc_ack_mask,
+				    dmux->pc_mask | dmux->pc_ack_mask);
+	dmux->pc_ack_state = true;  /* bit 11 is now SET */
 
-	/* Step 9: Set up CMD_OPEN fallback timer + start polling
-	 * (polling starts now but CMD_OPEN won't be sent until after ACK)
+	/* Step 8: Set up CMD_OPEN fallback timer + start polling.
+	 *
+	 * Start CMD_OPEN retries after 5s (modem needs time to process
+	 * both SMSM callbacks, power on A2, and be ready for data).
 	 */
 	dmux->cmd_open_retries = 0;
 	dmux->cmd_open_acked = false;
-	dmux->cmd_open_next_retry = jiffies + 15 * HZ;
+	dmux->cmd_open_next_retry = jiffies + 5 * HZ;
 
 	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(20));
 }
@@ -1536,16 +1530,12 @@ static void bam_dmux_ack_work_fn(struct work_struct *work)
 		return;
 	}
 
-	if (!dmux->pc_state) {
-		dev_warn(dmux->dev, "ack_work: modem bit 1 not set, skip\n");
-		return;
-	}
-
 	/*
-	 * Toggle APPS bit 11 (ACK) — the modem's a2_apps_smsm_ack_callback
-	 * fires when this bit changes, setting apps_bam_link_ready = true.
+	 * Attempt 27: ack_work is no longer used for initial connect
+	 * (bits 1+11 are set simultaneously in first_connect).
+	 * This function is kept for potential reconnect flows.
 	 */
-	dev_info(dmux->dev, "ack_work: toggling APPS bit 11 (ACK) now\n");
+	dev_info(dmux->dev, "ack_work: toggling APPS bit 11 (ACK)\n");
 	bam_dmux_pc_ack(dmux);
 }
 
@@ -1562,27 +1552,36 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state && !dmux->pipes_active) {
 		/*
-		 * Modem set A2_POWER_CONTROL (bit 1) — first connect.
-		 *
-		 * Do BAM init DIRECTLY here for minimum latency.
-		 * The downstream bam_dmux_smsm_cb runs synchronously in
-		 * the SMSM callback context (<1ms total).  Previous
-		 * attempts used workqueue scheduling (ack_work) which
-		 * added 34ms+ of scheduling delay on top of ~85ms of
-		 * diagnostic dumps.
-		 *
-		 * Cancel boot_work — modem responded (autonomously or
-		 * to our fallback APPS bit 1 trigger).
+		 * Modem set A2_POWER_CONTROL (bit 1) BEFORE our boot_work
+		 * ran (unlikely on AG35 but handle for robustness).
+		 * Do BAM init here.
 		 */
 		dmux->pc_state = true;
 		cancel_delayed_work(&dmux->boot_work);
 		bam_dmux_first_connect(dmux);
 
+	} else if (new_state && !dmux->pc_state) {
+		/*
+		 * Modem set bit 1 AFTER our boot_work already initialized
+		 * pipes and set APPS bits 1+11.  This is the expected path
+		 * for attempt 27: modem responds to our simultaneous bits.
+		 * Just confirm connection and start CMD_OPEN immediately.
+		 */
+		dmux->pc_state = true;
+		cancel_delayed_work(&dmux->boot_work);
+		dev_info(dmux->dev,
+			 "pc_irq: modem confirmed (pipes already active), "
+			 "starting CMD_OPEN now\n");
+		/* Trigger immediate CMD_OPEN retry */
+		dmux->cmd_open_next_retry = jiffies;
+
 	} else if (new_state && dmux->pc_state) {
+		/* Already connected — re-issue doorbell */
 		if (dmux->pipes_active)
 			bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 		dev_info(dmux->dev,
 			 "pc_irq: already up, re-issued doorbell\n");
+
 	} else if (!new_state) {
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
 		cancel_delayed_work(&dmux->ack_work);
@@ -1651,24 +1650,22 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Fallback: modem didn't set bit 1 autonomously within 5 seconds.
+	 * Attempt 27: instead of just setting APPS bit 1 and waiting for
+	 * modem to respond (which triggers a separate ACK toggle later),
+	 * do the FULL initialization here:
+	 *   1. BAM init (SW_RST, pipes, RX queue, doorbell)
+	 *   2. Set APPS bits 1 AND 11 simultaneously
 	 *
-	 * In the downstream, the modem sets SMSM_A2_POWER_CONTROL on its
-	 * own during a2_subsystem_boot() — APPS never sets bit 1 for the
-	 * initial handshake.  APPS bit 1 is only for uplink wakeup.
-	 *
-	 * Setting APPS bit 1 triggers modem's a2_apps_smsm_callback which
-	 * is the "uplink wakeup" path, NOT the "initial connect" path.
-	 * This may cause the modem to enter a different state machine.
-	 *
-	 * Attempt 20: Wait 5s for modem's autonomous bit 1.  If it
-	 * doesn't come, set APPS bit 1 as a last resort.
+	 * This ensures:
+	 *   - Pipes are ready BEFORE modem is signaled
+	 *   - Modem receives BOTH bits in one IPC, dispatching both
+	 *     callbacks in a single ISR invocation
+	 *   - No second IPC that might be lost/ignored
 	 */
 	dev_info(dmux->dev,
-		 "boot_work: modem didn't set bit 1 in 5s, "
-		 "setting APPS bit 1 as fallback trigger\n");
+		 "boot_work: initializing BAM and setting bits 1+11\n");
 
-	bam_dmux_pc_vote(dmux, true);
+	bam_dmux_first_connect(dmux);
 }
 
 static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
