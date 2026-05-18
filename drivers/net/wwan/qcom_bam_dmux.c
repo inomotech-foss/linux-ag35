@@ -296,59 +296,72 @@ static void bam_dmux_pc_ack(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * BAM Hardware Init — matching downstream SPS bam_init() exactly
+ * BAM Hardware Init — Attempt 22: NO SW_RST, preserve modem's BAM state
  *
- * Downstream 3.18 kernel (satellite_mode=0) does:
- *   1. SW_RST (set bit 0, then clear it)
- *   2. BAM_EN (set bit 1)
- *   3. CACHE_MISS_ERR_RESP_EN = 0 (clear bit 19)
- *   4. LOCAL_CLK_GATING = 1 (field bits 17:16, value=1 → bit 16)
- *   5. DESC_CNT_TRSHLD = 0x1000 (A2_SUMMING_THRESHOLD)
- *   6. CNFG_BITS = 0xFFFFF7FF (all set except bit 11)
- *   7. IRQ_SRCS_MSK_EE: set BAM_IRQ bit (bit 31)
- *   8. IRQ_EN = 0x16 (TIMER | ERROR | HRESP_ERR)
+ * Previous attempts all did SW_RST which wipes the ENTIRE BAM including
+ * whatever the modem configured during a2_bam_init().  While the downstream
+ * SPS also does SW_RST, something about our re-initialization is different
+ * enough that the modem's producer side of pipe 5 never works afterward.
  *
- * Result: BAM_CTRL = 0x00010002 (BAM_EN + LOCAL_CLK_GATING field=1)
+ * New approach: preserve the modem's BAM_CTRL (including its
+ * LOCAL_CLK_GATING=2 setting), just add BAM_EN and set CNFG_BITS +
+ * DESC_CNT_TRSHLD + IRQ config.  The individual pipe P_RSTs in
+ * bam_pipe_hw_init() are still performed since the downstream also
+ * does those.
+ *
+ * Key difference from attempt 18 (which also skipped SW_RST):
+ *   - Attempt 18 was MISSING CNFG_BITS (left at 0)
+ *   - Attempt 18 cleared APPS bit 1 before ACK
+ *   - Attempt 18 had wrong LOCAL_CLK_GATING (forced BIT(17))
+ *   This attempt preserves modem's BAM_CTRL and adds CNFG_BITS.
  * ────────────────────────────────────────────────────────────────────────── */
 
 /* BAM_CTRL field masks (NDP BAM) */
 #define BAM_CACHE_MISS_ERR_RESP_EN	BIT(19)
-/*
- * LOCAL_CLK_GATING is a 2-bit field at bits 17:16 of BAM_CTRL.
- * Downstream: bam_write_reg_field(CTRL, LOCAL_CLK_GATING, 1)
- *   mask=0x60000, shift=16, value=1 → writes BIT(16).
- * Previous attempts wrote BIT(17) which is value=2 in the field.
- */
-#define BAM_LOCAL_CLK_GATING		BIT(16)
+#define BAM_LOCAL_CLK_GATING_MASK	(BIT(17) | BIT(16))
 
 static void bam_hw_init(struct bam_dmux *dmux)
 {
 	u32 val;
 
+	val = bam_readl(dmux, BAM_CTRL);
+
 	dev_info(dmux->dev,
 		 "bam_hw_init: PRE BAM_CTRL=0x%08x CNFG=0x%08x\n",
-		 bam_readl(dmux, BAM_CTRL),
-		 bam_readl(dmux, BAM_CNFG_BITS));
+		 val, bam_readl(dmux, BAM_CNFG_BITS));
 
-	/* Step 1: Software reset */
-	bam_writel(dmux, BAM_CTRL, BAM_SW_RST);
-	bam_readl(dmux, BAM_CTRL);  /* flush — ensures reset completes */
-	bam_writel(dmux, BAM_CTRL, 0);
+	/*
+	 * Step 1: NO SW_RST — preserve modem's BAM state.
+	 *
+	 * The modem's a2_bam_init() has already configured the BAM
+	 * (including internal A2 DMA connections to pipes 4 and 5).
+	 * SW_RST destroys all of that, and the modem never re-initializes
+	 * because it doesn't know we reset.
+	 */
 
-	/* Step 2+3+4: BAM_EN + LOCAL_CLK_GATING=1 (bit 16) */
-	val = BAM_EN | BAM_LOCAL_CLK_GATING;
+	/*
+	 * Step 2: Enable BAM, preserve modem's LOCAL_CLK_GATING value.
+	 *
+	 * The modem had BAM_CTRL=0x00020000 (LOCAL_CLK_GATING=2, BAM_EN=0).
+	 * We add BAM_EN and clear CACHE_MISS_ERR_RESP_EN, but keep the
+	 * modem's LOCAL_CLK_GATING setting intact.
+	 */
+	val |= BAM_EN;
+	val &= ~BAM_CACHE_MISS_ERR_RESP_EN;
 	bam_writel(dmux, BAM_CTRL, val);
 
-	/* Step 5: Descriptor count threshold */
+	/* Step 3: Descriptor count threshold */
 	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
 
-	/* Step 6: Config bits */
+	/* Step 4: Config bits — all workarounds enabled except bit 11 */
 	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
 
-	/* Step 7: Global IRQ mask for EE 0 — set BAM_IRQ bit */
-	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), BAM_IRQ_MSK);
+	/* Step 5: Global IRQ mask for EE 0 — set BAM_IRQ bit */
+	val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE));
+	val |= BAM_IRQ_MSK;
+	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), val);
 
-	/* Step 8: BAM-level IRQ enable */
+	/* Step 6: BAM-level IRQ enable */
 	bam_writel(dmux, BAM_IRQ_EN,
 		   BAM_IRQ_TIMER_EN | BAM_IRQ_ERROR_EN | BAM_IRQ_HRESP_ERR_EN);
 
@@ -855,7 +868,7 @@ static bool bam_dmux_queue_rx(struct bam_dmux *dmux,
 		return false;
 
 	ret = bam_pipe_submit_desc(dmux, &dmux->rx_pipe, skb_dma->addr,
-				   skb_dma->len, DESC_FLAG_INT, skb_dma);
+				   skb_dma->len, 0, skb_dma);
 	if (ret) {
 		bam_dmux_skb_dma_unmap(skb_dma, DMA_FROM_DEVICE);
 		return false;
@@ -1337,7 +1350,7 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * SMSM IRQ Handlers + Boot Sequence (Attempt 21)
+ * SMSM IRQ Handlers + Boot Sequence (Attempt 22)
  *
  * Downstream flow (from bam_dmux.c + modem pseudocode):
  *   1. Modem's a2_subsystem_boot() sets SMSM_A2_POWER_CONTROL autonomously
@@ -1346,20 +1359,19 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
  *   4. Modem's a2_apps_smsm_ack_callback fires → apps_bam_link_ready=true
  *   5. Modem sends CMD_OPEN on pipe 5
  *
- * Key insight from attempt 20 failure analysis:
+ * Key insight from attempt 20-21 failure analysis:
  *   - The modem on this firmware does NOT set bit 1 autonomously.
  *     It only responds when APPS sets bit 1 (the UL wakeup path).
- *   - In the downstream UL wakeup flow, power_vote(1) sets APPS bit 1,
- *     and it stays SET throughout reconnect → toggle_ack → queue_rx.
- *     It is only cleared much later by ul_powerdown() when the link idles.
- *   - Clearing APPS bit 1 BEFORE the ACK toggle causes the modem's
- *     a2_apps_smsm_callback to interpret it as "APPS wants to power down,"
- *     shutting down A2 DMA before the ACK arrives.
+ *   - APPS bit 1 must stay SET throughout the reconnect flow.
+ *   - SW_RST destroys the modem's a2_bam_init() BAM configuration.
+ *     Even though the downstream also does SW_RST, something about our
+ *     re-initialization differs.  Attempt 22 skips SW_RST.
  *
- * Attempt 21 changes:
- *   - Keep APPS bit 1 SET throughout first_connect (don't clear it)
- *   - Add DESC_FLAG_INT to RX descriptors (matching downstream)
- *   - Keep LOCAL_CLK_GATING = BIT(16) from attempt 20
+ * Attempt 22 changes:
+ *   - NO SW_RST: preserve modem's BAM_CTRL (LOCAL_CLK_GATING=2) and
+ *     internal A2 DMA connections.  Just add BAM_EN + CNFG_BITS.
+ *   - RX descriptor flags=0 (matching downstream sps_transfer_one)
+ *   - Keep APPS bit 1 SET from attempt 21
  *   - Keep fast inline init from attempt 20
  * ────────────────────────────────────────────────────────────────────────── */
 
@@ -1370,15 +1382,17 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
  * Does everything inline for minimum latency — matching the downstream's
  * synchronous bam_dmux_smsm_cb → bam_init → toggle_ack → queue_rx flow.
  *
- * Attempt 21 key changes vs. attempt 20:
- *  - DO NOT clear APPS bit 1 before ACK!  In the downstream, APPS bit 1
- *    stays SET throughout the reconnect flow.  Clearing it triggers the
- *    modem's a2_apps_smsm_callback with bit 1 = 0, which the modem
- *    interprets as "APPS wants to power down A2" — causing it to shut
- *    down the A2 DMA engine right before our ACK arrives.
- *  - Add DESC_FLAG_INT to RX descriptors (matching downstream
- *    SPS_IOVEC_FLAG_INT on every sps_transfer_one for RX).
- *  - Keep: LOCAL_CLK_GATING=BIT(16), fast inline init, BAM IRQ before pipes
+ * Attempt 22 key changes vs. attempt 21:
+ *  - NO SW_RST in bam_hw_init() — preserve modem's BAM state including
+ *    its LOCAL_CLK_GATING=2 and A2 DMA pipe connections.
+ *    All previous attempts (17-21) did SW_RST which wipes the modem's
+ *    a2_bam_init() configuration.  Attempt 18 skipped SW_RST but missed
+ *    CNFG_BITS.  This is the first attempt with no-SW_RST + CNFG_BITS +
+ *    keep-bit-1 all combined.
+ *  - RX descriptor flags=0 (matching downstream sps_transfer_one flags=0).
+ *    Attempt 21 wrongly added DESC_FLAG_INT; downstream passes 0.
+ *  - Keep APPS bit 1 SET from attempt 21.
+ *  - Keep inline init, BAM IRQ before pipes
  * ────────────────────────────────────────────────────────────────────────── */
 
 static void bam_dmux_first_connect(struct bam_dmux *dmux)
@@ -1386,8 +1400,8 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 21: keep APPS bit 1 set, "
-		 "INT flag on RX descs, LOCAL_CLK_GATING=BIT(16))\n");
+		 "first_connect: BAM init (attempt 22: no SW_RST, preserve "
+		 "modem BAM_CTRL, CNFG_BITS, keep APPS bit 1, RX flags=0)\n");
 
 	/* Step 1: Full BAM global init with SW_RST */
 	bam_hw_init(dmux);
