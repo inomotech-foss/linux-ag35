@@ -990,9 +990,16 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 	 * Check flags with READ_ONCE — bam_dmux_power_off() sets these
 	 * to false BEFORE canceling the timer.  This is our primary
 	 * guard against accessing BAM registers after modem crash.
+	 *
+	 * If pc_state is not yet set (modem hasn't responded), still
+	 * re-arm the timer so we don't lose it.  Only skip the BAM
+	 * register accesses.
 	 */
-	if (!READ_ONCE(dmux->pipes_active) || !READ_ONCE(dmux->pc_state))
+	if (!READ_ONCE(dmux->pipes_active))
 		return;
+
+	if (!READ_ONCE(dmux->pc_state))
+		goto rearm;
 
 	/*
 	 * Clear accumulated IRQ status at every poll iteration.
@@ -1066,6 +1073,7 @@ static void bam_dmux_poll_timer_fn(struct timer_list *t)
 	poll_count++;
 
 	/* Re-check flags before rearming — modem may have gone down */
+rearm:
 	if (READ_ONCE(dmux->pipes_active))
 		mod_timer(&dmux->rx_poll_timer,
 			  jiffies + msecs_to_jiffies(20));
