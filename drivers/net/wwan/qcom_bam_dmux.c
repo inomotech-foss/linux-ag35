@@ -1411,8 +1411,8 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 28: init AFTER modem "
-		 "responds — modem does SW_RST during its a2_bam_init)\n");
+		 "first_connect: BAM init (attempt 29: init AFTER modem "
+		 "responds, then toggle bit 11 separately)\n");
 
 	/*
 	 * At this point the modem has ALREADY responded to our SMSM bits
@@ -1525,10 +1525,29 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
 
-	/* Step 7: Start CMD_OPEN immediately (modem is ready) */
+	/* Step 7: Toggle APPS bit 11 (ACK) — CRITICAL for link ready.
+	 *
+	 * The modem's a2_apps_smsm_ack_callback fires when this bit CHANGES.
+	 * It compares APPS bit 11 with its internal modem_ack_state:
+	 *   if (apps_ack != modem_ack_state) → apps_bam_link_ready = true
+	 *
+	 * modem_ack_state starts as false (0).  We toggle bit 11 from 0→1.
+	 * The modem sees 1 != 0 → link ready → modem can write to pipe 5.
+	 *
+	 * This MUST happen AFTER BAM init (pipes ready) and AFTER modem's
+	 * bit-1 callback has completed (which is guaranteed since pc_irq
+	 * already fired).
+	 */
+	dev_info(dmux->dev, "first_connect: toggling APPS bit 11 (ACK)\n");
+	bam_dmux_pc_ack(dmux);
+
+	/* Step 8: Delay CMD_OPEN by 1s to give modem time to process
+	 * the bit 11 toggle, enable its pipe 5 transmit path, and
+	 * potentially send its own CMD_OPEN for its channels.
+	 */
 	dmux->cmd_open_retries = 0;
 	dmux->cmd_open_acked = false;
-	dmux->cmd_open_next_retry = jiffies;  /* send NOW */
+	dmux->cmd_open_next_retry = jiffies + HZ;  /* 1s delay */
 
 	mod_timer(&dmux->rx_poll_timer, jiffies + msecs_to_jiffies(20));
 }
@@ -1649,25 +1668,24 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Attempt 28: Set SMSM bits 1+11 simultaneously, but do NOT init
-	 * BAM yet.  The modem's a2_bam_init() does SW_RST when it processes
-	 * our bit 1, which wipes ALL BAM state.  We must wait for the modem
-	 * to finish (respond with its own bits 1+11 via pc_irq) before
-	 * configuring our pipes.
+	 * Attempt 29: Set ONLY APPS bit 1 (power control).
 	 *
-	 * Flow:
-	 *   1. boot_work sets APPS bits 1+11  (HERE)
-	 *   2. Modem sees bits → a2_bam_init() → SW_RST → pipe config
-	 *   3. Modem sets modem bits 1+11 → pc_irq fires
-	 *   4. pc_irq calls bam_dmux_first_connect() → BAM init AFTER modem
+	 * DO NOT set bit 11 here!  The modem's ACK callback tracks toggle
+	 * state: it sets apps_bam_link_ready only when APPS bit 11 CHANGES
+	 * relative to modem_ack_state.  If we set bit 11 simultaneously with
+	 * bit 1, the modem's bit-1 callback runs first, may update
+	 * modem_ack_state to match APPS bit 11, and then the ACK callback
+	 * sees no change → link never becomes ready.
+	 *
+	 * Correct sequence:
+	 *   1. Set APPS bit 1 → modem powers A2, does SW_RST, sets its bits
+	 *   2. pc_irq fires → do BAM init (after modem's SW_RST)
+	 *   3. Toggle APPS bit 11 → modem sees ACK change → link ready
 	 */
 	dev_info(dmux->dev,
-		 "boot_work: setting APPS bits 1+11 (no BAM init yet)\n");
+		 "boot_work: setting APPS bit 1 only (no bit 11 yet)\n");
 
-	qcom_smem_state_update_bits(dmux->pc,
-				    dmux->pc_mask | dmux->pc_ack_mask,
-				    dmux->pc_mask | dmux->pc_ack_mask);
-	dmux->pc_ack_state = true;  /* bit 11 is now SET */
+	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
 }
 
 static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
