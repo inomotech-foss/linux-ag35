@@ -1403,8 +1403,8 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 24: SW_RST + LOCAL_CLK_GATING=1 "
-		 "matching downstream exactly)\n");
+		 "first_connect: BAM init (attempt 25: SW_RST + CLK_GATING=1 + "
+		 "force ipc_regmap kick)\n");
 
 	/* Step 1: Full BAM global init with SW_RST */
 	bam_hw_init(dmux);

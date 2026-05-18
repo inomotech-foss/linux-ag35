@@ -222,7 +222,13 @@ static int smsm_update_bits(void *data, u32 mask, u32 value)
 		if (hostp->mbox_chan) {
 			mbox_send_message(hostp->mbox_chan, NULL);
 			mbox_client_txdone(hostp->mbox_chan, 0);
-		} else if (hostp->ipc_regmap) {
+		}
+		/*
+		 * Always do ipc_regmap write if available — belt-and-suspenders.
+		 * On MDM9607, mbox_send_message may not reliably trigger the
+		 * modem interrupt.  The direct register write is guaranteed.
+		 */
+		if (hostp->ipc_regmap) {
 			regmap_write(hostp->ipc_regmap,
 				     hostp->ipc_offset,
 				     BIT(hostp->ipc_bit));
@@ -679,14 +685,16 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 
 	/* Parse the host properties */
 	for (id = 0; id < smsm->num_hosts; id++) {
-		/* Try using mbox interface first, otherwise fall back to syscon */
-		ret = smsm_parse_mbox(smsm, id);
-		if (!ret)
-			continue;
+		/*
+		 * Always parse ipc (syscon) path — used as belt-and-suspenders
+		 * alongside mbox.  On MDM9607, mbox_send_message() may silently
+		 * fail if the apcs-ipc-mailbox driver hasn't fully initialized
+		 * its channel, but the direct regmap write always works.
+		 */
+		smsm_parse_ipc(smsm, id);
 
-		ret = smsm_parse_ipc(smsm, id);
-		if (ret < 0)
-			goto out_put;
+		/* Also try mbox — some platforms only have mbox */
+		smsm_parse_mbox(smsm, id);
 	}
 
 	/* Acquire the main SMSM state vector */
