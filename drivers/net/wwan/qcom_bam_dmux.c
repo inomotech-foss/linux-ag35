@@ -395,12 +395,15 @@ static int bam_pipe_hw_init(struct bam_dmux *dmux, struct bam_pipe *pipe,
 	memset(pipe->desc_fifo, 0, BAM_DESC_FIFO_SIZE);
 
 	/*
-	 * Reset pipe — but SKIP for producer pipe (pipe 5) when the modem
-	 * is the BAM primary controller.  P_RST destroys the modem's pipe
-	 * state machine and the modem does NOT re-initialize after our reset
-	 * because it already set apps_bam_link_ready=true.
+	 * Reset pipe — P_RST initializes the pipe's internal state machine.
+	 * Without it, the pipe hardware cannot process DMA transfers.
 	 *
-	 * Reference: upstream bam_dma.c skips P_RST for powered_remotely BAMs.
+	 * Attempts 1-33 skipped P_RST on pipe 5 (producer/RX), thinking it
+	 * would destroy modem state.  But P5 PRE was always all-zeros (modem
+	 * uses peripheral DMA interface, not register access).  Result: pipe 5
+	 * HALT=0, SW_OFSTS stuck at 0, no DMA ever processed.
+	 *
+	 * Attempt 34: P_RST on both pipes, matching downstream sps_connect().
 	 */
 	if (!skip_rst) {
 		bam_writel_sync(dmux, BAM_P_RST(pipe_index), 1);
@@ -1370,27 +1373,29 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * SMSM IRQ Handlers + Boot Sequence (Attempt 31)
+ * SMSM IRQ Handlers + Boot Sequence (Attempt 34)
  *
- * Root cause of pipe 5 RX failure in attempts 1-30:
- *   Both SW_RST and P_RST on pipe 5 destroy the modem's pipe state machine.
- *   The modem initializes its BAM and pipes during a2_bam_dmux_init() at
- *   modem boot.  When APPS sets bit 1, modem's a2_apps_smsm_callback calls
- *   a2_power_vote → a2_hw_power_on which re-inits BAM pipes.  The modem
- *   then sets apps_bam_link_ready=true and responds.
+ * Root cause of pipe 5 RX failure in attempts 1-33:
+ *   Pipe 5 was NEVER properly initialized with P_RST.  Without P_RST,
+ *   the pipe's internal state machine stays in reset/undefined state and
+ *   cannot process incoming peripheral DMA from the modem.
  *
- *   When our pc_irq fires and we do SW_RST or P_RST on pipe 5, we destroy
- *   the modem's pipe 5 state machine.  The modem never re-initializes
- *   because it already set apps_bam_link_ready=true.  The modem tries to
- *   push data via A2 DMA into pipe 5, but the pipe's internal state is
- *   reset and nothing flows.
+ *   Evidence across 33 attempts:
+ *   - P5 PRE state is ALL ZEROS (modem never configures pipe 5 registers
+ *     from our address space — it uses the peripheral DMA interface)
+ *   - P4 (with P_RST): HALT=0x8, SW advances, DMA works perfectly
+ *   - P5 (without P_RST): HALT=0x0, SW=0 forever, no DMA activity
+ *   - Downstream sps_connect() ALWAYS does P_RST on EVERY pipe (bam.c
+ *     bam_pipe_connect → P_RST 1→0 toggle), including the RX pipe
  *
- * Fix (attempt 31):
+ *   The assumption that P_RST would "destroy modem state" was WRONG:
+ *   the modem has NO state in pipe 5 registers to destroy.
+ *
+ * Fix (attempt 34):
+ *   - P_RST on BOTH pipe 4 AND pipe 5 (proper hardware initialization)
  *   - NO global SW_RST (modem is BAM primary controller)
- *   - NO P_RST on pipe 5 (preserve modem's producer pipe state machine)
- *   - P_RST on pipe 4 is safe (APPS-owned consumer pipe)
- *   - Just configure APPS's descriptor FIFO for pipe 5 and enable it
- *   - This matches upstream bam_dma.c behavior for powered_remotely BAMs
+ *   - 500ms delay before ACK toggle (belt-and-suspenders for timing)
+ *   - CNFG_BITS workarounds enabled
  * ────────────────────────────────────────────────────────────────────────── */
 
 static void bam_dmux_first_connect(struct bam_dmux *dmux)
@@ -1399,36 +1404,30 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	u32 val;
 
 	dev_info(dmux->dev,
-		 "first_connect: BAM init (attempt 33: 500ms delay before ACK, "
-		 "CNFG_BITS, no SW_RST/P_RST on pipe 5)\n");
+		 "first_connect: BAM init (attempt 34: P_RST on BOTH pipes, "
+		 "500ms ACK delay, CNFG_BITS, no SW_RST)\n");
 
 	/*
-	 * KEY INSIGHT (attempt 32):
+	 * KEY INSIGHT (attempt 34):
 	 *
-	 * Attempt 31 had the right approach (no SW_RST, no P_RST on pipe 5)
-	 * but was MISSING CNFG_BITS.  The attempt 31 log showed CNFG=0x00000000.
+	 * Attempts 1-33 all failed with pipe 5 SW_OFSTS stuck at 0.
+	 * The common thread: pipe 5 was NEVER given P_RST.
 	 *
-	 * CNFG_BITS (0xFFFFF7FF) are hardware workaround enables that the
-	 * downstream MDM9607 SPS driver ALWAYS sets.  The bam_dma.c
-	 * powered-remotely path also sets them.  Without these bits, the
-	 * BAM's internal data path for producer pipes may not function,
-	 * explaining why P_SW_OFSTS stays at 0 across all attempts that
-	 * lacked CNFG_BITS.
+	 * Evidence from 33 attempts:
+	 *   - P5 PRE state is all zeros (modem hasn't configured it)
+	 *   - P4 (with P_RST): HALT=0x8, DMA works, SW advances
+	 *   - P5 (without P_RST): HALT=0x0, DMA dead, SW=0 forever
+	 *   - Downstream sps_connect() ALWAYS resets every pipe
+	 *   - The modem uses peripheral DMA interface, not register access
 	 *
-	 * Attempt 31 also overwrote BAM_CTRL (changing LOCAL_CLK_GATING
-	 * from modem's value 2 to 1).  This attempt preserves the modem's
-	 * BAM_CTRL and only adds BAM_EN via RMW.
+	 * P_RST initializes the pipe's internal state machine.  Without it,
+	 * the hardware cannot process incoming peripheral DMA transfers.
 	 *
-	 * Attempt 30 had CNFG_BITS but also did SW_RST.  SW_RST resets the
-	 * BAM's internal state machine and may require specific re-init
-	 * timing that we don't match.  This attempt avoids SW_RST.
-	 *
-	 * Summary of this attempt:
-	 *   - NO SW_RST (preserve BAM internal state)
-	 *   - Preserve modem's BAM_CTRL (RMW: just add BAM_EN)
-	 *   - SET CNFG_BITS = 0xFFFFF7FF (critical hardware workarounds)
-	 *   - NO P_RST on pipe 5 (preserve any modem state)
-	 *   - P_RST on pipe 4 (APPS-owned consumer pipe)
+	 * Other settings preserved from attempt 32/33:
+	 *   - NO SW_RST (modem is BAM primary controller)
+	 *   - BAM_CTRL via RMW (preserve modem's LOCAL_CLK_GATING)
+	 *   - CNFG_BITS = 0xFFFFF7FF (TZ filters to 0xEFFFF004)
+	 *   - 500ms delay before ACK (belt-and-suspenders for timing)
 	 */
 
 	/* Verify BAM is enabled by modem */
@@ -1483,7 +1482,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		}
 	}
 
-	/* Step 3: Init TX pipe (pipe 4, consumer) — with P_RST (APPS-owned) */
+	/* Step 3: Init TX pipe (pipe 4, consumer) — with P_RST */
 	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
 			       BAM_DMUX_TX_PIPE, false, false);
 	if (ret) {
@@ -1491,7 +1490,21 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		return;
 	}
 
-	/* Step 4: Init RX pipe (pipe 5, producer) — NO P_RST (modem-owned) */
+	/* Step 4: Init RX pipe (pipe 5, producer) — WITH P_RST
+	 *
+	 * Attempts 1-33 skipped P_RST on pipe 5, thinking it would
+	 * destroy modem state.  But P5 PRE state is ALL ZEROS in every
+	 * attempt — the modem never configures pipe 5 from our register
+	 * space.  The modem uses the BAM peripheral DMA interface.
+	 *
+	 * Meanwhile P4 (with P_RST) works perfectly: HALT=0x8, SW advances.
+	 * P5 (without P_RST) is stuck: HALT=0x0, SW=0 forever.
+	 *
+	 * Downstream sps_connect() ALWAYS does P_RST on every pipe
+	 * including RX (bam_pipe_connect → P_RST toggle).
+	 * The P_RST initializes the pipe's internal state machine.
+	 * Without it, pipe 5 cannot process incoming peripheral DMA.
+	 */
 	dev_info(dmux->dev,
 		 "P5 PRE: CTRL=0x%08x DESC=0x%08x FIFO_SZ=0x%08x SW=0x%08x EVNT=0x%08x\n",
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
@@ -1500,7 +1513,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_P_SW_OFSTS(BAM_DMUX_RX_PIPE)),
 		 bam_readl(dmux, BAM_P_EVNT_REG(BAM_DMUX_RX_PIPE)));
 	ret = bam_pipe_hw_init(dmux, &dmux->rx_pipe,
-			       BAM_DMUX_RX_PIPE, true, true);
+			       BAM_DMUX_RX_PIPE, true, false);
 	if (ret) {
 		dev_err(dmux->dev, "RX pipe init failed: %d\n", ret);
 		bam_pipe_deinit(dmux, &dmux->tx_pipe);
