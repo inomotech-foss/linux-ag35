@@ -4,19 +4,26 @@
  *
  * "Nuclear" rewrite: direct BAM register access, no DMA engine dependency.
  *
- * Attempt 36: Two critical fixes for pipe 5 RX failure:
- *  1. REGISTER ORDERING: Set P_DIRECTION and P_SYS_MODE in P_CTRL BEFORE
- *     configuring DESC_FIFO_ADDR, and set P_EN LAST.  The downstream
- *     bam_pipe_init() does exactly this.  Previous attempts wrote all
- *     P_CTRL bits (including P_EN) in one shot AFTER FIFO config.
- *     The hardware may interpret FIFO addresses differently depending
- *     on the current direction setting (producer vs consumer).
- *  2. TIMING: Set APPS bit 1 at the START of first_connect (before
- *     SW_RST + pipe init).  The IPC to modem takes ~1-5ms, our pipe
- *     config takes <100μs.  This ensures modem's apps_bam_link_ready
- *     transitions 0→1 AFTER pipes are configured and RX descriptors
- *     submitted.  Matches downstream timing where grab_wakelock()
- *     (sets bit 1) is called immediately before initialize_bam_dmux().
+ * Attempt 37: Fix double first_connect race (modem crash + kernel panic):
+ *
+ *  Attempt 36 proved that register ordering + timing are correct:
+ *    P5 CTRL=0x2a, P4 CTRL=0x22, SW_RST+P_RST work, modem responds.
+ *  BUT modem crashed with "a2_power.c:2556:A2 Assertion Failed" because
+ *  first_connect was called TWICE (boot_work + pc_irq race).
+ *
+ *  The bug: boot_work fires → calls first_connect → sets APPS bit 1 →
+ *  modem responds in ~70ms → pc_irq (threaded, RT priority) preempts
+ *  workqueue → sees pipes_active=false → calls first_connect AGAIN →
+ *  double SW_RST + double APPS bit 11 toggle → modem asserts.
+ *
+ *  Then: modem crash → power domain down → poll timer reads BAM →
+ *  external abort → kernel panic.
+ *
+ *  Fix: Set pipes_active=true at the VERY START of first_connect as
+ *  a re-entry guard.  pc_irq checks !pipes_active before calling
+ *  first_connect, so the second call is prevented.  Use boot_done
+ *  for doorbell safety (pipes may not be configured yet when
+ *  pipes_active is true early).
  *
  * This driver maps BAM registers directly (like downstream SPS bam.c)
  * and manages descriptor FIFOs in software (like downstream sps_bam.c).
@@ -1355,6 +1362,7 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 	/* Set flags FIRST so poll timer won't access BAM registers */
 	WRITE_ONCE(dmux->pipes_active, false);
 	WRITE_ONCE(dmux->pc_state, false);
+	dmux->boot_done = false;
 
 	/*
 	 * Use timer_delete (not timer_delete_sync) — this may be
@@ -1390,41 +1398,33 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * SMSM IRQ Handlers + Boot Sequence (Attempt 36)
+ * SMSM IRQ Handlers + Boot Sequence (Attempt 37)
  *
- * Root cause analysis from attempts 1-35:
- *   All 35 attempts had pipe 5 RX stuck at 0.  Two issues identified:
+ * Root cause analysis from attempts 1-36:
+ *   Attempts 1-35: pipe 5 RX stuck at 0 (register ordering + timing bugs).
+ *   Attempt 36: Register ordering and timing FIXED (P5 CTRL=0x2a works!)
+ *     BUT modem crashed due to double first_connect race condition.
  *
- *   1. REGISTER ORDERING BUG (all attempts):
- *      We set P_DIRECTION + P_SYS_MODE + P_EN in one P_CTRL write AFTER
- *      configuring DESC_FIFO_ADDR.  Downstream writes P_DIRECTION first
- *      (without P_EN), then P_SYS_MODE, then configures FIFO, then P_EN
- *      last.  The BAM hardware may interpret FIFO configuration differently
- *      based on the current direction setting.  When we wrote FIFO config
- *      while P_CTRL=0 (consumer/BAM2BAM mode), the hardware set up pipe 5
- *      as a consumer data path instead of producer.
+ *   The race (attempt 36):
+ *     boot_work (workqueue, CFS priority) calls first_connect.
+ *     first_connect sets APPS bit 1 → IPC to modem → modem responds
+ *     in ~70ms by setting modem bits 1+11.  The SMSM interrupt wakes
+ *     pc_irq (threaded IRQ, SCHED_FIFO prio 50) which PREEMPTS the
+ *     workqueue.  pc_irq sees pipes_active=false (set late in first_connect)
+ *     and calls first_connect AGAIN.  Second call does another SW_RST +
+ *     pipe init + bit 11 toggle.  When first call resumes, it ALSO
+ *     toggles bit 11.  Modem sees rapid double bit 11 toggle and asserts
+ *     (a2_power.c:2556).  Then BAM clock domain dies → poll timer faults.
  *
- *   2. TIMING BUG (all attempts):
- *      Our flow: boot_work sets APPS bit 1 → modem callback fires
- *      (apps_bam_link_ready=true) → 45ms later pc_irq → first_connect.
- *      Downstream flow: pc_irq (modem bit 1) → APPS sets bit 1 + BAM init
- *      simultaneously → modem callback fires AFTER BAM init.
- *
- *      In downstream, modem's apps_bam_link_ready transitions 0→1 AFTER
- *      APPS has configured pipes + submitted RX descriptors.  The modem's
- *      first attempt to use pipe 5 sees APPS's complete configuration.
- *
- *      In our flow, apps_bam_link_ready=true BEFORE our SW_RST.  If the
- *      modem's A2 DMA latches any configuration at link_ready time, it
- *      would see the pre-init state.
- *
- * Fix (attempt 36):
- *   - Set APPS bit 1 at START of first_connect (IPC takes ~1-5ms to
- *     reach modem, we finish pipe config in <100μs, so modem callback
- *     fires AFTER our pipe config is complete)
- *   - Fix pipe init register ordering: DIR → SYS_MODE → FIFO → P_EN
- *   - Keep SW_RST (matching downstream sps_device_reset)
- *   - Keep P_RST (matching downstream bam_pipe_init)
+ * Fix (attempt 37):
+ *   - Set pipes_active=true at the VERY START of first_connect (before
+ *     APPS bit 1 or any BAM access).  This is the re-entry guard.
+ *   - pc_irq's condition `!dmux->pipes_active` prevents the second call.
+ *   - Use boot_done flag for doorbell safety in pc_irq's else-if branch
+ *     (pipes_active is now true before pipes are actually configured).
+ *   - Reset pipes_active=false on init failure (enables retry/reconnect).
+ *   - Keep register ordering fix from attempt 36 (proven correct).
+ *   - Keep timing fix from attempt 36 (set APPS bit 1 before SW_RST).
  * ────────────────────────────────────────────────────────────────────────── */
 
 static void bam_dmux_first_connect(struct bam_dmux *dmux)
@@ -1432,8 +1432,23 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	int i, ret;
 	u32 val;
 
+	/*
+	 * Re-entry guard: On single-core MDM9607, the threaded pc_irq
+	 * (SCHED_FIFO prio 50) can preempt this workqueue function after
+	 * we set APPS bit 1 and modem responds (~70ms).  Without this
+	 * guard, pc_irq sees pipes_active=false and calls first_connect
+	 * again, causing double SW_RST + double bit 11 toggle which
+	 * crashes the modem (a2_power.c assertion).
+	 */
+	if (dmux->pipes_active) {
+		dev_info(dmux->dev,
+			 "first_connect: already active/connecting, skip\n");
+		return;
+	}
+	dmux->pipes_active = true;
+
 	dev_info(dmux->dev,
-		 "first_connect: attempt 36 — set bit1 first, fix reg order\n");
+		 "first_connect: attempt 37 — re-entry guard + reg order fix\n");
 
 	/*
 	 * Step 1: Set APPS bit 1 (A2_POWER_CONTROL) FIRST.
@@ -1505,6 +1520,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 			       BAM_DMUX_TX_PIPE, false);
 	if (ret) {
 		dev_err(dmux->dev, "TX pipe init failed: %d\n", ret);
+		dmux->pipes_active = false;
 		return;
 	}
 
@@ -1523,6 +1539,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	if (ret) {
 		dev_err(dmux->dev, "RX pipe init failed: %d\n", ret);
 		bam_pipe_deinit(dmux, &dmux->tx_pipe);
+		dmux->pipes_active = false;
 		return;
 	}
 
@@ -1532,7 +1549,6 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_P_HALT(BAM_DMUX_RX_PIPE)),
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)));
 
-	dmux->pipes_active = true;
 	dmux->boot_done = true;
 
 	/* PM setup */
@@ -1628,11 +1644,19 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		bam_dmux_first_connect(dmux);
 
 	} else if (new_state && dmux->pc_state) {
-		/* Already connected — re-issue doorbell */
-		if (dmux->pipes_active)
+		/* Already connected or connecting — re-issue doorbell
+		 * only if pipes are fully configured (boot_done).
+		 * During first_connect, pipes_active is true but boot_done
+		 * is false — rx_pipe isn't configured yet.
+		 */
+		if (dmux->boot_done) {
 			bam_pipe_doorbell(dmux, &dmux->rx_pipe);
-		dev_info(dmux->dev,
-			 "pc_irq: already up, re-issued doorbell\n");
+			dev_info(dmux->dev,
+				 "pc_irq: already up, re-issued doorbell\n");
+		} else {
+			dev_info(dmux->dev,
+				 "pc_irq: init in progress, skip\n");
+		}
 
 	} else if (!new_state) {
 		dev_info(dmux->dev, "pc_irq: modem powering down\n");
@@ -1702,19 +1726,12 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Attempt 36: Trigger first_connect directly from boot_work.
+	 * Attempt 37: Trigger first_connect directly from boot_work.
 	 *
-	 * In the downstream 3.18 kernel, the APPS sets bit 1 AND does
-	 * BAM init in the SAME callback (bam_dmux_smsm_cb calls
-	 * grab_wakelock → ul_wakeup → set bit 1, then initialize_bam_dmux).
-	 *
-	 * This ensures the modem's apps_bam_link_ready transitions 0→1
-	 * AFTER APPS has fully configured pipes + submitted RX descriptors.
-	 *
-	 * We do the same: first_connect sets APPS bit 1 as its first
-	 * operation, then immediately configures pipes.  The IPC to modem
-	 * takes ~1-5ms, pipe config takes <100μs, so modem processes
-	 * our bit 1 AFTER pipes are ready.
+	 * first_connect has its own re-entry guard (sets pipes_active=true
+	 * at the top).  If pc_irq preempts us after first_connect sets
+	 * APPS bit 1 and modem responds, pc_irq will see pipes_active=true
+	 * and skip the redundant call.
 	 */
 	dev_info(dmux->dev,
 		 "boot_work: triggering first_connect directly\n");
