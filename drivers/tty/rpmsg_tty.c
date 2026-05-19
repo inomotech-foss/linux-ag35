@@ -217,7 +217,7 @@ static void rpmsg_tty_remove(struct rpmsg_device *rpdev)
 static struct rpmsg_device_id rpmsg_driver_tty_id_table[] = {
 	{ .name	= "rpmsg-tty" },
 	/* Qualcomm SMD data channel used for PPP */
-	{ .name	= "DATA1" },
+	{ .name	= "DATA4" },
 	{ },
 };
 MODULE_DEVICE_TABLE(rpmsg, rpmsg_driver_tty_id_table);
