@@ -46,9 +46,12 @@
 	status = "okay";
 };
 
-/* BAM-DMUX: modem data path (modem is pre-loaded by SBL1) */
-/* bam_dmux_dma kept disabled — nuclear bam_dmux accesses BAM registers directly */
-&bam_dmux { status = "okay"; };
+/*
+ * BAM-DMUX removed: AG35EVD OCPU firmware does not register modem data
+ * channels on the A2 BAM transport.  Data plane uses SMD via the modem
+ * edge in qcom-mdm9607.dtsi (DATA1/DATA4 -> AT, DS -> QMI) consumed by
+ * the rpmsg_wwan_ctrl driver.
+ */
 
 /* &blsp1_i2c2 { status = "okay"; }; */
 /* &blsp1_i2c4 { status = "okay"; }; */
