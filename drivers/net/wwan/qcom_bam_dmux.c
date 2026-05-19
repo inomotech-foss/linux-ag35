@@ -10,20 +10,27 @@
  *    P5 CTRL=0x2a, P4 CTRL=0x22, SW_RST+P_RST work, modem responds.
  *  BUT modem crashed with "a2_power.c:2556:A2 Assertion Failed" because
  *  first_connect was called TWICE (boot_work + pc_irq race).
+ *  Fixed with pipes_active re-entry guard at top of first_connect.
  *
- *  The bug: boot_work fires → calls first_connect → sets APPS bit 1 →
- *  modem responds in ~70ms → pc_irq (threaded, RT priority) preempts
- *  workqueue → sees pipes_active=false → calls first_connect AGAIN →
- *  double SW_RST + double APPS bit 11 toggle → modem asserts.
+ * Attempt 38: Fix APPS bit 1 timing (pipe 5 RX stuck at 0):
  *
- *  Then: modem crash → power domain down → poll timer reads BAM →
- *  external abort → kernel panic.
+ *  Attempt 37 fixed the crash.  TX works (CMD_OPENs consumed by modem).
+ *  But pipe 5 RX stayed at SW=0 — modem never sends data back.
  *
- *  Fix: Set pipes_active=true at the VERY START of first_connect as
- *  a re-entry guard.  pc_irq checks !pipes_active before calling
- *  first_connect, so the second call is prevented.  Use boot_done
- *  for doorbell safety (pipes may not be configured yet when
- *  pipes_active is true early).
+ *  Root cause: APPS bit 1 was set BEFORE pipe 5 was configured.
+ *  The IPC to modem takes ~70ms (not 1-5ms as assumed).  Modem's
+ *  a2_apps_smsm_callback fires, sets apps_bam_link_ready=true, and
+ *  modem immediately sends CMD_OPEN response on pipe 5.  But pipe 5
+ *  was still being configured (P_EN=0 until 136ms after bit 1 set).
+ *  Data hitting a disabled producer pipe is LOST.
+ *
+ *  The modem's a2_sio_channel_open() only responds to the FIRST
+ *  CMD_OPEN per channel (subsequent ones just increment open_count).
+ *  So our CMD_OPEN retries never get a response either.
+ *
+ *  Fix: Set APPS bit 1 as the LAST step, after pipes are configured
+ *  and 32 RX descriptors are queued.  By the time modem receives the
+ *  IPC (70ms later), pipe 5 has been ready for 70ms+.
  *
  * This driver maps BAM registers directly (like downstream SPS bam.c)
  * and manages descriptor FIFOs in software (like downstream sps_bam.c).
@@ -1398,33 +1405,35 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * SMSM IRQ Handlers + Boot Sequence (Attempt 37)
+ * SMSM IRQ Handlers + Boot Sequence (Attempt 38)
  *
- * Root cause analysis from attempts 1-36:
+ * Root cause analysis from attempts 1-37:
  *   Attempts 1-35: pipe 5 RX stuck at 0 (register ordering + timing bugs).
  *   Attempt 36: Register ordering and timing FIXED (P5 CTRL=0x2a works!)
  *     BUT modem crashed due to double first_connect race condition.
+ *   Attempt 37: Double-entry fixed (pipes_active guard works!).
+ *     No crash.  TX works (CMD_OPENs consumed by modem).
+ *     BUT pipe 5 RX still stuck at 0 — modem never sends data back.
  *
- *   The race (attempt 36):
- *     boot_work (workqueue, CFS priority) calls first_connect.
- *     first_connect sets APPS bit 1 → IPC to modem → modem responds
- *     in ~70ms by setting modem bits 1+11.  The SMSM interrupt wakes
- *     pc_irq (threaded IRQ, SCHED_FIFO prio 50) which PREEMPTS the
- *     workqueue.  pc_irq sees pipes_active=false (set late in first_connect)
- *     and calls first_connect AGAIN.  Second call does another SW_RST +
- *     pipe init + bit 11 toggle.  When first call resumes, it ALSO
- *     toggles bit 11.  Modem sees rapid double bit 11 toggle and asserts
- *     (a2_power.c:2556).  Then BAM clock domain dies → poll timer faults.
+ *   The timing bug (attempt 37 analysis):
+ *     We set APPS bit 1 at [33.156] — BEFORE pipe 5 init.
+ *     Modem receives it at [33.226] (70ms IPC delivery, NOT 1-5ms!).
+ *     Modem's a2_apps_smsm_callback fires → apps_bam_link_ready=true.
+ *     Modem may immediately send CMD_OPEN response on pipe 5.
+ *     But pipe 5 isn't configured until [33.292] (136ms after bit 1).
+ *     Data hitting disabled pipe 5 (P_EN=0) is LOST permanently.
+ *     Modem's channel_open() only responds to FIRST CMD_OPEN per channel
+ *     (subsequent ones just increment open_count → no response).
+ *     Our CMD_OPEN retries therefore never get a response.
  *
- * Fix (attempt 37):
- *   - Set pipes_active=true at the VERY START of first_connect (before
- *     APPS bit 1 or any BAM access).  This is the re-entry guard.
- *   - pc_irq's condition `!dmux->pipes_active` prevents the second call.
- *   - Use boot_done flag for doorbell safety in pc_irq's else-if branch
- *     (pipes_active is now true before pipes are actually configured).
- *   - Reset pipes_active=false on init failure (enables retry/reconnect).
- *   - Keep register ordering fix from attempt 36 (proven correct).
- *   - Keep timing fix from attempt 36 (set APPS bit 1 before SW_RST).
+ * Fix (attempt 38):
+ *   - Do ALL init (SW_RST + pipe config + queue RX) BEFORE setting bit 1.
+ *   - Set APPS bit 1 as the LAST operation (step 11 of 13).
+ *   - When modem receives IPC 70ms later, pipe 5 has been ready for 70ms+
+ *     with 32 empty buffers queued.  Modem's CMD_OPEN response goes
+ *     directly into our empty-buffer descriptors.
+ *   - Keep pipes_active re-entry guard from attempt 37.
+ *   - Keep register ordering fix from attempt 36.
  * ────────────────────────────────────────────────────────────────────────── */
 
 static void bam_dmux_first_connect(struct bam_dmux *dmux)
@@ -1448,30 +1457,25 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	dmux->pipes_active = true;
 
 	dev_info(dmux->dev,
-		 "first_connect: attempt 37 — re-entry guard + reg order fix\n");
+		 "first_connect: attempt 38 — set bit1 LAST (after pipe ready)\n");
 
 	/*
-	 * Step 1: Set APPS bit 1 (A2_POWER_CONTROL) FIRST.
+	 * Step 1: SW_RST — matching downstream sps_device_reset → bam_init.
 	 *
-	 * This matches downstream's grab_wakelock() → ul_wakeup() which
-	 * sets APPS bit 1 BEFORE calling initialize_bam_dmux().
+	 * CRITICAL: Do ALL BAM/pipe init BEFORE setting APPS bit 1.
 	 *
-	 * The IPC to modem takes ~1-5ms to deliver.  Our BAM init below
-	 * completes in <100μs.  So modem's a2_apps_smsm_callback (which
-	 * sets apps_bam_link_ready=true) fires AFTER our pipe config is
-	 * complete and RX descriptors are submitted.
+	 * When APPS bit 1 arrives at the modem (~70ms IPC delivery), the
+	 * modem's a2_apps_smsm_callback fires which sets apps_bam_link_ready
+	 * = true.  The modem may then IMMEDIATELY send CMD_OPEN on pipe 5.
 	 *
-	 * This ensures the modem's first attempt to use pipe 5 sees our
-	 * fully configured pipe with empty-buffer descriptors ready.
-	 */
-	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
-	dev_info(dmux->dev, "first_connect: APPS bit 1 set\n");
-
-	/*
-	 * Step 2: SW_RST — matching downstream sps_device_reset → bam_init.
-	 * The modem's a2_bam_init (which includes modem's own SW_RST) ran
-	 * during modem boot BEFORE pc_irq fired.  Our SW_RST here matches
-	 * what the downstream APPS does on every reconnect.
+	 * If pipe 5 isn't configured (P_EN=0) when this data arrives at the
+	 * BAM peripheral port, the data is LOST.  The modem's channel_open()
+	 * only responds to the FIRST CMD_OPEN (subsequent ones just increment
+	 * open_count), so the lost response is never retried.
+	 *
+	 * Fix: Configure pipes + queue RX descriptors FIRST, then set
+	 * APPS bit 1 as the LAST step.  This ensures pipe 5 has 32 empty
+	 * buffers ready before modem's callback fires.
 	 */
 	val = bam_readl(dmux, BAM_CTRL);
 	dev_info(dmux->dev,
@@ -1481,17 +1485,17 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	bam_writel_sync(dmux, BAM_CTRL, BAM_SW_RST);
 	bam_writel_sync(dmux, BAM_CTRL, 0);
 
-	/* Step 3: BAM_EN + LOCAL_CLK_GATING=1 */
+	/* Step 2: BAM_EN + LOCAL_CLK_GATING=1 */
 	val = BAM_EN | BIT(16);
 	bam_writel(dmux, BAM_CTRL, val);
 
-	/* Step 4: CNFG_BITS */
+	/* Step 3: CNFG_BITS */
 	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
 
-	/* Step 5: Descriptor count threshold */
+	/* Step 4: Descriptor count threshold */
 	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
 
-	/* Step 6: Global IRQ mask + BAM IRQ enable */
+	/* Step 5: Global IRQ mask + BAM IRQ enable */
 	val = BAM_IRQ_MSK;
 	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), val);
 	bam_writel(dmux, BAM_IRQ_EN,
@@ -1502,7 +1506,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_CTRL),
 		 bam_readl(dmux, BAM_CNFG_BITS));
 
-	/* Step 7: Register BAM IRQ */
+	/* Step 6: Register BAM IRQ */
 	if (dmux->bam_irq > 0 && !dmux->bam_irq_registered) {
 		ret = devm_request_irq(dmux->dev, dmux->bam_irq,
 				       bam_dmux_bam_isr,
@@ -1515,7 +1519,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		}
 	}
 
-	/* Step 8: Init TX pipe (pipe 4, consumer) */
+	/* Step 7: Init TX pipe (pipe 4, consumer) */
 	ret = bam_pipe_hw_init(dmux, &dmux->tx_pipe,
 			       BAM_DMUX_TX_PIPE, false);
 	if (ret) {
@@ -1524,7 +1528,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		return;
 	}
 
-	/* Step 9: Init RX pipe (pipe 5, producer) */
+	/* Step 8: Init RX pipe (pipe 5, producer) */
 	dev_info(dmux->dev,
 		 "P5 PRE: CTRL=0x%08x DESC=0x%08x FIFO_SZ=0x%08x "
 		 "SW=0x%08x EVNT=0x%08x HALT=0x%08x\n",
@@ -1558,12 +1562,11 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	pm_runtime_get_noresume(dmux->dev);
 	pm_runtime_get_noresume(dmux->dev);
 
-	/* Step 10: Queue 32 RX descriptors + doorbell (BEFORE ACK).
+	/* Step 9: Queue 32 RX descriptors + doorbell.
 	 *
-	 * Submit empty buffers BEFORE toggling ACK.  This ensures that
-	 * when modem's apps_bam_link_ready becomes true (triggered by
-	 * our APPS bit 1 IPC arriving ~1-5ms from now), pipe 5 already
-	 * has empty descriptors waiting for peripheral data.
+	 * Submit empty buffers BEFORE notifying modem.  This ensures that
+	 * when modem's apps_bam_link_ready becomes true, pipe 5 already
+	 * has 32 empty descriptors waiting for peripheral data.
 	 */
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (!bam_dmux_queue_rx(dmux, &dmux->rx_skbs[i], GFP_KERNEL))
@@ -1571,15 +1574,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	}
 	bam_pipe_doorbell(dmux, &dmux->rx_pipe);
 
-	/* Step 11: Toggle APPS bit 11 (ACK) — AFTER RX queue.
-	 *
-	 * Downstream toggles ACK after pipe connect + queue_rx.
-	 * The modem's a2_apps_smsm_ack_callback just records the bit.
-	 */
-	dev_info(dmux->dev, "first_connect: toggling APPS bit 11 (ACK)\n");
-	bam_dmux_pc_ack(dmux);
-
-	/* Step 12: Clear pending IRQ status */
+	/* Step 10: Clear pending IRQ status */
 	bam_clear_irqs(dmux);
 
 	dev_info(dmux->dev,
@@ -1588,6 +1583,32 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_TX_PIPE)),
 		 bam_readl(dmux, BAM_P_CTRL(BAM_DMUX_RX_PIPE)),
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
+
+	/*
+	 * Step 11: Set APPS bit 1 (A2_POWER_CONTROL) — LAST.
+	 *
+	 * This is the critical ordering fix from attempt 38.  In the
+	 * downstream 3.18 kernel, the modem sets MODEM bit 1 first
+	 * (during a2_subsystem_boot), then APPS responds.  On Quectel
+	 * firmware, the modem waits for APPS bit 1 before setting its
+	 * own bit 1 and apps_bam_link_ready=true.
+	 *
+	 * The IPC to modem takes ~70ms (measured in attempt 37).  By the
+	 * time modem's a2_apps_smsm_callback fires and sets
+	 * apps_bam_link_ready=true, our pipe 5 has been ready for 70ms+
+	 * with 32 empty buffers.  The modem can immediately send CMD_OPEN
+	 * on pipe 5 and the BAM engine will write it into our buffers.
+	 */
+	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
+	dev_info(dmux->dev, "first_connect: APPS bit 1 set (pipe 5 ready)\n");
+
+	/* Step 12: Toggle APPS bit 11 (ACK).
+	 *
+	 * Downstream toggles ACK after pipe connect + queue_rx.
+	 * The modem's a2_apps_smsm_ack_callback just records the bit.
+	 */
+	dev_info(dmux->dev, "first_connect: toggling APPS bit 11 (ACK)\n");
+	bam_dmux_pc_ack(dmux);
 
 	/* Step 13: Schedule CMD_OPEN after 1s delay */
 	dmux->cmd_open_retries = 0;
