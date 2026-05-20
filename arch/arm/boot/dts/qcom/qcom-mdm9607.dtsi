@@ -840,29 +840,35 @@
 			#interrupt-cells = <4>;
 		};
 
-		/*
-		 * NOTE: BAM-DMUX is intentionally NOT described here.
-		 *
-		 * The AG35EVD OCPU modem firmware (AG35EVDR08A13T4G_OCPU) does
-		 * not register the BAM-DMUX channels (DATA1-4, DATA11, DS) with
-		 * the "APPS uP" / A2 BAM transport.  Instead, all of those
-		 * channels are registered with the SMD transport and exposed
-		 * via the modem SMD edge above.
-		 *
-		 * The BAM hardware at 0x04044000 is therefore unused on this
-		 * platform; the modem firmware never drives pipe 5 (RX), so any
-		 * APPS-side bam_dmux driver would sit forever with an empty RX
-		 * pipe.  See repo memory /memories/repo/CRITICAL-firmware-uses-
-		 * smd-not-bam.md for the full forensic trail (38 failed driver
-		 * attempts before this was discovered).
-		 *
-		 * Data plane on this firmware is via:
-		 *   - SMD channels DATA1/DATA4 -> /dev/wwan0at* (rpmsg_wwan_ctrl)
-		 *   - SMD channel  DS          -> /dev/wwan0qmi* (rpmsg_wwan_ctrl)
-		 * IP traffic must go over PPP-on-AT or QMI+rmnet-over-smd
-		 * (the latter requires an out-of-tree driver; the downstream
-		 * Quectel kernel uses rmnet_smd for that).
-		 */
+		bam_dmux_dma: dma-controller@4044000 {
+			compatible = "qcom,bam-v1.7.0";
+			reg = <0x04044000 0x19000>;
+			interrupts = <GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>;
+			#dma-cells = <1>;
+			qcom,ee = <0>;
+			num-channels = <6>;
+			qcom,num-ees = <1>;
+			qcom,powered-remotely;
+			status = "disabled";
+		};
+
+		bam_dmux: bam-dmux {
+			compatible = "qcom,bam-dmux";
+
+			interrupt-parent = <&modem_smsm>;
+			interrupts = <1 IRQ_TYPE_EDGE_BOTH>,
+					     <11 IRQ_TYPE_EDGE_BOTH>,
+					     <0 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "pc", "pc-ack", "remote-ready";
+
+			qcom,smem-states = <&apps_smsm 1>, <&apps_smsm 11>;
+			qcom,smem-state-names = "pc", "pc-ack";
+
+			dmas = <&bam_dmux_dma 4>, <&bam_dmux_dma 5>;
+			dma-names = "tx", "rx";
+
+			status = "disabled";
+		};
 
 		remoteproc_mss: remoteproc@4080000 {
 			compatible = "qcom,mdm9607-mss-pil";
