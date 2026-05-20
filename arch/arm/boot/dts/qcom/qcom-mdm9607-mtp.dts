@@ -60,23 +60,9 @@
 /* SD card on SDCC2 */
 /* &sdhc_2 { status = "okay"; ... }; */
 
-/* USB HS in peripheral mode (ChipIdea UDC + 28nm SNPS Femto PHY)
- *
- * Regulator supplies follow downstream AG35EVD wiring:
- *   hsusb_vdd_dig -> mdm9607_l9 (1.2 V digital core)
- *   HSUSB_1p8     -> mdm9607_l2 (1.8 V analog)
- *   HSUSB_3p3     -> mdm9607_l4 (3.075 V analog)
- */
-&usb_hs_phy {
-	vdd-supply = <&mdm9607_l9>;
-	vdda1p8-supply = <&mdm9607_l2>;
-	vdda3p3-supply = <&mdm9607_l4>;
-	status = "okay";
-};
-
-&usb {
-	status = "okay";
-};
+/* USB HS in peripheral mode */
+/* &usb_hs_phy { ... status = "okay"; }; */
+/* &usb { ... status = "okay"; }; */
 
 /* QPIC NAND */
 &qpic_bam { status = "okay"; };
