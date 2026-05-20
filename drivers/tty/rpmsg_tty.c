@@ -39,6 +39,20 @@ static int rpmsg_tty_cb(struct rpmsg_device *rpdev, void *data, int len, void *p
 
 	if (!len)
 		return -EINVAL;
+
+	/*
+	 * The rpmsg core wires this callback during rpmsg_dev_probe() before
+	 * invoking the driver-specific probe (rpmsg_tty_probe), which is what
+	 * sets drvdata.  When the remote endpoint pushes data unsolicited
+	 * (e.g. a Qualcomm SMD modem opening DATA4 on its own), the very first
+	 * packet can arrive in this window and dereference a NULL cport.
+	 *
+	 * Drop early-arrival packets: there is no tty to receive them yet, and
+	 * the modem will continue streaming once userspace opens the tty.
+	 */
+	if (!cport)
+		return -EAGAIN;
+
 	copied = tty_insert_flip_string(&cport->port, data, len);
 	if (copied != len)
 		dev_err_ratelimited(&rpdev->dev, "Trunc buffer: available space is %d\n", copied);
