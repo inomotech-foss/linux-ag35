@@ -1457,25 +1457,16 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	dmux->pipes_active = true;
 
 	dev_info(dmux->dev,
-		 "first_connect: attempt 38 — set bit1 LAST (after pipe ready)\n");
+		 "first_connect: attempt 39 - init BAM, then ACK with bit11 only\n");
 
 	/*
-	 * Step 1: SW_RST — matching downstream sps_device_reset → bam_init.
+	 * Step 1: SW_RST - matching downstream sps_device_reset -> bam_init.
 	 *
-	 * CRITICAL: Do ALL BAM/pipe init BEFORE setting APPS bit 1.
-	 *
-	 * When APPS bit 1 arrives at the modem (~70ms IPC delivery), the
-	 * modem's a2_apps_smsm_callback fires which sets apps_bam_link_ready
-	 * = true.  The modem may then IMMEDIATELY send CMD_OPEN on pipe 5.
-	 *
-	 * If pipe 5 isn't configured (P_EN=0) when this data arrives at the
-	 * BAM peripheral port, the data is LOST.  The modem's channel_open()
-	 * only responds to the FIRST CMD_OPEN (subsequent ones just increment
-	 * open_count), so the lost response is never retried.
-	 *
-	 * Fix: Configure pipes + queue RX descriptors FIRST, then set
-	 * APPS bit 1 as the LAST step.  This ensures pipe 5 has 32 empty
-	 * buffers ready before modem's callback fires.
+	 * Downstream does not assert APPS bit 1 during initial connect.
+	 * The modem raises MODEM bit 1 to request init/reconnect, APPS fully
+	 * initializes BAM/pipe state, then toggles APPS bit 11 as the ready
+	 * acknowledgement. APPS bit 1 is reserved for later UL wake requests
+	 * when TX data is queued.
 	 */
 	val = bam_readl(dmux, BAM_CTRL);
 	dev_info(dmux->dev,
@@ -1585,32 +1576,15 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
 
 	/*
-	 * Step 11: Set APPS bit 1 (A2_POWER_CONTROL) — LAST.
+	/* Step 11: Toggle APPS bit 11 (ACK).
 	 *
-	 * This is the critical ordering fix from attempt 38.  In the
-	 * downstream 3.18 kernel, the modem sets MODEM bit 1 first
-	 * (during a2_subsystem_boot), then APPS responds.  On Quectel
-	 * firmware, the modem waits for APPS bit 1 before setting its
-	 * own bit 1 and apps_bam_link_ready=true.
-	 *
-	 * The IPC to modem takes ~70ms (measured in attempt 37).  By the
-	 * time modem's a2_apps_smsm_callback fires and sets
-	 * apps_bam_link_ready=true, our pipe 5 has been ready for 70ms+
-	 * with 32 empty buffers.  The modem can immediately send CMD_OPEN
-	 * on pipe 5 and the BAM engine will write it into our buffers.
-	 */
-	qcom_smem_state_update_bits(dmux->pc, dmux->pc_mask, dmux->pc_mask);
-	dev_info(dmux->dev, "first_connect: APPS bit 1 set (pipe 5 ready)\n");
-
-	/* Step 12: Toggle APPS bit 11 (ACK).
-	 *
-	 * Downstream toggles ACK after pipe connect + queue_rx.
-	 * The modem's a2_apps_smsm_ack_callback just records the bit.
+	 * Downstream toggles ACK after pipe connect + queue_rx and leaves
+	 * APPS bit 1 for later UL wake requests.
 	 */
 	dev_info(dmux->dev, "first_connect: toggling APPS bit 11 (ACK)\n");
 	bam_dmux_pc_ack(dmux);
 
-	/* Step 13: Schedule CMD_OPEN after 1s delay */
+	/* Step 12: Schedule CMD_OPEN after 1s delay */
 	dmux->cmd_open_retries = 0;
 	dmux->cmd_open_acked = false;
 	dmux->cmd_open_next_retry = jiffies + HZ;
