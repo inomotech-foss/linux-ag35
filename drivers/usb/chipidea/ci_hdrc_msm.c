@@ -236,24 +236,28 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	dev_info(&pdev->dev, "DBG: asserting core reset\n");
-	reset_control_assert(reset);
-	dev_info(&pdev->dev, "DBG: assert done, sleeping 10ms\n");
-	usleep_range(10000, 12000);
-	dev_info(&pdev->dev, "DBG: deasserting core reset\n");
-	reset_control_deassert(reset);
-
-	clk_disable_unprepare(ci->fs_clk);
-
 	dev_info(&pdev->dev, "DBG: enabling core_clk\n");
 	ret = clk_prepare_enable(ci->core_clk);
 	if (ret)
-		return ret;
+		goto err_core;
 
 	dev_info(&pdev->dev, "DBG: enabling iface_clk\n");
 	ret = clk_prepare_enable(ci->iface_clk);
 	if (ret)
 		goto err_iface;
+
+	/*
+	 * EXPERIMENT: Skip BCR assert/deassert.  On MDM9607 (where the
+	 * bootloader skips USB initialisation entirely) asserting USB_HS_BCR
+	 * hangs the system within ~10ms even though the assert is just a
+	 * single GCC register write.  Rely on the controller soft-reset
+	 * (USBCMD_RST) inside hw_device_reset() to bring the controller to
+	 * a clean state, mirroring what downstream effectively does at boot.
+	 */
+	dev_info(&pdev->dev, "DBG: skipping BCR reset, clocks running\n");
+
+	clk_disable_unprepare(ci->fs_clk);
+
 	dev_info(&pdev->dev, "DBG: clocks running, will probe ci core\n");
 
 	ret = ci_hdrc_msm_mux_phy(ci, pdev);
@@ -289,6 +293,8 @@ err_mux:
 	clk_disable_unprepare(ci->iface_clk);
 err_iface:
 	clk_disable_unprepare(ci->core_clk);
+err_core:
+	clk_disable_unprepare(ci->fs_clk);
 	return ret;
 }
 
