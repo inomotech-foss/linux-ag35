@@ -75,20 +75,14 @@
 };
 
 /*
- * BISECT: USB HS controller deliberately left disabled.
+ * USB HS ChipIdea controller (peripheral mode).
  *
- * Re-enabling &usb together with &usb_hs_phy made boot freeze silently
- * right after the usb-net interface drivers register (last line in the
- * console is "usbcore: registered new interface driver r8153_ecm"; no
- * oops, no further timestamp).  Marking l9 always-on did not help, so
- * the digital-rail-not-up theory was wrong.  Leave the PHY enabled
- * (its devm_regulator_bulk_get/clk_bulk_get all run at probe time) but
- * keep the chipidea controller disabled to determine whether the hang
- * is in the femtophy probe or only triggered when ci_hdrc_msm starts
- * driving the PHY.
+ * The earlier "boot freeze when &usb was enabled" was a red herring: the
+ * real cause was an unrelated rpmsg_tty NULL-deref race (fixed in
+ * drivers/tty/rpmsg_tty.c).  With that fixed, enable the controller.
  */
 &usb {
-	status = "disabled";
+	status = "okay";
 };
 
 /* QPIC NAND */
