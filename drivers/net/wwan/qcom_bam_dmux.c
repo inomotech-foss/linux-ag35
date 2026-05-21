@@ -55,6 +55,8 @@
 #include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/notifier.h>
+#include <linux/remoteproc/qcom_rproc.h>
 #include <linux/soc/qcom/smem_state.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
@@ -268,6 +270,16 @@ struct bam_dmux {
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
 	struct work_struct register_netdev_work;
 	struct net_device *netdevs[BAM_DMUX_NUM_CH];
+
+	/*
+	 * Modem SSR (mpss) notifier.  Without this, when the modem crashes
+	 * (e.g. "a2_power.c assertion") the q6v5 driver tears down the BAM
+	 * clock/power domain while our rx_poll_timer is still armed.  The
+	 * next bam_clear_irqs() then takes an external abort on the now-
+	 * dead AHB slave and panics the kernel from softirq context.
+	 */
+	struct notifier_block ssr_nb;
+	void *ssr_cookie;
 };
 
 struct bam_dmux_netdev {
@@ -1746,6 +1758,36 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static int bam_dmux_ssr_notify(struct notifier_block *nb, unsigned long action,
+			       void *data)
+{
+	struct bam_dmux *dmux = container_of(nb, struct bam_dmux, ssr_nb);
+
+	switch (action) {
+	case QCOM_SSR_BEFORE_SHUTDOWN:
+		dev_info(dmux->dev,
+			 "SSR: modem going down, disabling BAM access\n");
+		WRITE_ONCE(dmux->pipes_active, false);
+		WRITE_ONCE(dmux->pc_state, false);
+		dmux->boot_done = false;
+		timer_delete(&dmux->rx_poll_timer);
+		cancel_delayed_work(&dmux->boot_work);
+		cancel_delayed_work(&dmux->ack_work);
+		break;
+	case QCOM_SSR_AFTER_SHUTDOWN:
+		dev_info(dmux->dev, "SSR: modem stopped\n");
+		break;
+	case QCOM_SSR_AFTER_POWERUP:
+		dev_info(dmux->dev,
+			 "SSR: modem restarted, awaiting remote-ready\n");
+		break;
+	default:
+		break;
+	}
+
+	return NOTIFY_DONE;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Probe / Remove
  * ────────────────────────────────────────────────────────────────────────── */
@@ -1886,6 +1928,15 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	dev_info(dev, "probe complete: pc_state=%d pc_irq=%d (NUCLEAR)\n",
 		 dmux->pc_state, dmux->pc_irq);
 
+	dmux->ssr_nb.notifier_call = bam_dmux_ssr_notify;
+	dmux->ssr_cookie = qcom_register_ssr_notifier("mpss", &dmux->ssr_nb);
+	if (IS_ERR(dmux->ssr_cookie)) {
+		ret = PTR_ERR(dmux->ssr_cookie);
+		dmux->ssr_cookie = NULL;
+		dev_err(dev, "Failed to register mpss SSR notifier: %d\n", ret);
+		goto err_disable_pm;
+	}
+
 	/* If modem already has bit 1 set, go directly to first_connect.
 	 * This handles the case where modem boot completed before our
 	 * driver probed (no pc_irq edge to trigger on). */
@@ -1903,6 +1954,11 @@ static void bam_dmux_remove(struct platform_device *pdev)
 {
 	struct bam_dmux *dmux = platform_get_drvdata(pdev);
 	int i;
+
+	if (dmux->ssr_cookie) {
+		qcom_unregister_ssr_notifier(dmux->ssr_cookie, &dmux->ssr_nb);
+		dmux->ssr_cookie = NULL;
+	}
 
 	cancel_delayed_work_sync(&dmux->boot_work);
 	cancel_delayed_work_sync(&dmux->ack_work);
