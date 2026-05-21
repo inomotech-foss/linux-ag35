@@ -68,6 +68,16 @@
 		mdm9607_l9: l9 {
 			regulator-min-microvolt = <1200000>;
 			regulator-max-microvolt = <1250000>;
+			/*
+			 * USB HS PHY digital core (hsusb_vdd_dig).  Downstream
+			 * sets "qcom,phy-dvdd-always-on" because the PHY CSR
+			 * block must stay powered for register access during
+			 * phy_init() -- mainline phy-qcom-usb-hs-28nm writes to
+			 * CSR offsets before phy_power_on() runs the bulk
+			 * regulator enable, so l9 must already be on or the
+			 * AHB write hangs the bus and silences the console.
+			 */
+			regulator-always-on;
 		};
 
 		mdm9607_l10: l10 {
