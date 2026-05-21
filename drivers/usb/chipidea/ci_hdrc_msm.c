@@ -229,6 +229,7 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "DBG: asserting core reset\n");
 	reset_control_assert(reset);
+	dev_info(&pdev->dev, "DBG: assert done, sleeping 10ms\n");
 	usleep_range(10000, 12000);
 	dev_info(&pdev->dev, "DBG: deasserting core reset\n");
 	reset_control_deassert(reset);
