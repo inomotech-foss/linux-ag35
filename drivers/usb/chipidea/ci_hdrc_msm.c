@@ -15,6 +15,7 @@
 #include <linux/of.h>
 
 #include "ci.h"
+#include "bits.h"
 
 #define HS_PHY_AHB_MODE			0x0098
 
@@ -86,7 +87,15 @@ static int ci_hdrc_msm_notify_event(struct ci_hdrc *ci, unsigned event)
 	case CI_HDRC_CONTROLLER_RESET_EVENT:
 		dev_dbg(dev, "CI_HDRC_CONTROLLER_RESET_EVENT received\n");
 
-		hw_phymode_configure(ci);
+		/*
+		 * Set PORTSC to ULPI mode explicitly.  We cannot rely on
+		 * hw_phymode_configure() because phy_type is intentionally
+		 * omitted from DT to avoid ci_ulpi_init() performing ULPI
+		 * viewport access before the PHY is powered — the bootloader
+		 * on this platform does not initialise USB so the PHY is
+		 * completely dead at probe time.
+		 */
+		hw_write(ci, OP_PORTSC, PORTSC_PTS(7), PORTSC_PTS(PTS_ULPI));
 		if (msm_ci->secondary_phy) {
 			u32 val = readl_relaxed(msm_ci->base + HS_PHY_SEC_CTRL);
 			val |= HS_PHY_DIG_CLAMP_N;

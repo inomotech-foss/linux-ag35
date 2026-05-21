@@ -1118,7 +1118,6 @@
 			assigned-clock-rates = <69500000>;
 			resets = <&gcc USB_HS_BCR>;
 			reset-names = "core";
-			phy_type = "ulpi";
 			/* We don't want the modem to be the boss. */
 			dr_mode = "peripheral";
 			hnp-disable;
