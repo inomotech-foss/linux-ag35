@@ -178,7 +178,7 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	int ret;
 	struct device_node *ulpi_node, *phy_node;
 
-	dev_dbg(&pdev->dev, "ci_hdrc_msm_probe\n");
+	dev_info(&pdev->dev, "DBG: ci_hdrc_msm_probe entry\n");
 
 	ci = devm_kzalloc(&pdev->dev, sizeof(*ci), GFP_KERNEL);
 	if (!ci)
@@ -208,6 +208,8 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
 
+	dev_info(&pdev->dev, "DBG: clocks acquired, fs_clk=%p\n", ci->fs_clk);
+
 	ci->base = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(ci->base))
 		return PTR_ERR(ci->base);
@@ -220,23 +222,29 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	dev_info(&pdev->dev, "DBG: enabling fs_clk\n");
 	ret = clk_prepare_enable(ci->fs_clk);
 	if (ret)
 		return ret;
 
+	dev_info(&pdev->dev, "DBG: asserting core reset\n");
 	reset_control_assert(reset);
 	usleep_range(10000, 12000);
+	dev_info(&pdev->dev, "DBG: deasserting core reset\n");
 	reset_control_deassert(reset);
 
 	clk_disable_unprepare(ci->fs_clk);
 
+	dev_info(&pdev->dev, "DBG: enabling core_clk\n");
 	ret = clk_prepare_enable(ci->core_clk);
 	if (ret)
 		return ret;
 
+	dev_info(&pdev->dev, "DBG: enabling iface_clk\n");
 	ret = clk_prepare_enable(ci->iface_clk);
 	if (ret)
 		goto err_iface;
+	dev_info(&pdev->dev, "DBG: clocks running, will probe ci core\n");
 
 	ret = ci_hdrc_msm_mux_phy(ci, pdev);
 	if (ret)
