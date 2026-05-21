@@ -1112,9 +1112,8 @@
 			interrupts = <GIC_SPI 134 IRQ_TYPE_LEVEL_HIGH>,
 				     <GIC_SPI 140 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&gcc GCC_USB_HS_AHB_CLK>,
-				 <&gcc GCC_USB_HS_SYSTEM_CLK>,
 				 <&gcc GCC_USB_HS_SYSTEM_CLK>;
-			clock-names = "iface", "core", "fs";
+			clock-names = "iface", "core";
 			assigned-clocks = <&gcc GCC_USB_HS_SYSTEM_CLK>;
 			assigned-clock-rates = <69500000>;
 			resets = <&gcc USB_HS_BCR>;
