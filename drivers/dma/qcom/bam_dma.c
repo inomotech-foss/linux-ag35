@@ -44,7 +44,6 @@
 #include <linux/hrtimer.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
-#include <linux/workqueue.h>
 
 #include "../dmaengine.h"
 #include "../virt-dma.h"
@@ -281,8 +280,7 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
 				 BAM_REG_P_EN |		\
 				 BAM_PSM_P_HD_DATA |	\
 				 BAM_AU_ACCUMED |	\
-				 BAM_CMD_ENABLE |	\
-				 BIT(29) | BIT(30) | BIT(31))
+				 BAM_CMD_ENABLE)
 
 /* PIPE CTRL */
 #define P_EN			BIT(1)
@@ -305,7 +303,7 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
 
 /* BAM_DESC_CNT_TRSHLD */
 #define CNT_TRSHLD		0xffff
-#define DEFAULT_CNT_THRSHLD	0x1000
+#define DEFAULT_CNT_THRSHLD	0x4
 
 /* BAM_IRQ_SRCS */
 #define BAM_IRQ			BIT(31)
@@ -353,10 +351,10 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
  *
  * IMPORTANT: The size MUST be a power of 2 because the driver uses
  * CIRC_CNT/CIRC_SPACE macros from circ_buf.h which use bitwise AND
- * with (size-1).  2048 bytes = 256 descriptors (255 usable + 1 empty
- * slot for circular buffer management).  Matches downstream SPS desc_size.
+ * with (size-1).  512 bytes = 64 descriptors (63 usable + 1 empty
+ * slot for circular buffer management).
  */
-#define BAM_DESC_FIFO_SIZE	SZ_2K
+#define BAM_DESC_FIFO_SIZE	SZ_512
 #define MAX_DESCRIPTORS (BAM_DESC_FIFO_SIZE / sizeof(struct bam_desc_hw) - 1)
 #define BAM_MAX_DATA_SIZE	(SZ_32K - 8)
 #define IS_BUSY(chan)	(CIRC_SPACE(bchan->tail, bchan->head,\
@@ -426,8 +424,6 @@ struct bam_device {
 	bool polling;
 	struct hrtimer poll_timer;
 	atomic_t poll_timer_active;
-
-
 };
 
 /**
@@ -477,113 +473,12 @@ static void bam_reset(struct bam_device *bdev)
 	/* Enable default set of h/w workarounds, ie all except BAM_FULL_PIPE */
 	writel_relaxed(BAM_CNFG_BITS_DEFAULT, bam_addr(bdev, 0, BAM_CNFG_BITS));
 
-	/* enable irqs for errors + timer (downstream value: 0x16) */
-	writel_relaxed(BAM_TIMER_EN | BAM_ERROR_EN | BAM_HRESP_ERR_EN,
+	/* enable irqs for errors */
+	writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
 			bam_addr(bdev, 0, BAM_IRQ_EN));
 
 	/* unmask global bam interrupt */
 	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-}
-
-/**
- * bam_init_powered_remotely - Full BAM init for powered-remotely BAMs
- * @bdev: bam device
- *
- * For powered-remotely BAMs (e.g. BAM_DMUX on MDM9607), APPS manages
- * the BAM locally.  The downstream MDM9607 kernel (3.18) does NOT use
- * satellite mode for the A2 BAM — it registers with SPS_BAM_MGR_LOCAL
- * (not SPS_BAM_MGR_DEVICE_REMOTE) and calls bam_init() which performs
- * a full SW_RST + BAM_EN sequence.
- *
- * SW_RST is critical: TrustZone and the bootloader may leave residual
- * BAM configuration (e.g. BAM_CTRL=0x00020000 on MDM9607) that
- * interferes with pipe operation.  Without SW_RST, the BAM's internal
- * data path for producer pipes (modem→APPS) may not function correctly,
- * causing P_SW_OFSTS to stay at 0 even with properly configured pipes
- * and submitted descriptors.
- *
- * The modem's A2 DMA engine connects to BAM pipes via internal hardware
- * bus — it is NOT affected by SW_RST on the BAM.  The modem's pipe
- * connection is re-established when the modem receives the APPS SMSM
- * ACK after our pipe configuration completes.
- */
-static void bam_init_powered_remotely(struct bam_device *bdev)
-{
-	u32 val;
-
-	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-	dev_info(bdev->dev, "BAM init (powered-remotely): BAM_CTRL=0x%08x\n", val);
-
-	/*
-	 * Do NOT do SW_RST for powered-remotely BAMs.
-	 *
-	 * The modem is the BAM primary controller and has already
-	 * initialized the BAM and pipes during its boot sequence
-	 * (a2_subsystem_boot → a2_bam_init → bamcore_pipe_init).
-	 *
-	 * In the upstream kernel's SMSM flow, the modem sets
-	 * apps_bam_link_ready=true BEFORE we get the pc_irq and
-	 * run this init code.  If we do SW_RST here, we destroy
-	 * the modem's pipe configuration.  The modem has no reason
-	 * to re-initialize because from its perspective the link is
-	 * already up.  Result: modem's producer pipe 5 never works.
-	 *
-	 * The old 3.18 kernel also does SW_RST (via bam_init() with
-	 * satellite_mode=false), but there the timing is different:
-	 * the modem sets bit 1 first, APPS does SW_RST+ACK, THEN
-	 * modem sets apps_bam_link_ready.  The modem initializes its
-	 * pipes after APPS's SW_RST, so they survive.
-	 *
-	 * Instead, just verify BAM_EN is set (matching downstream
-	 * bam_check() for satellite BAMs) and configure global regs.
-	 */
-	if (!(val & BAM_EN)) {
-		dev_info(bdev->dev, "BAM_EN not set, setting it\n");
-		val |= BAM_EN;
-		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
-	}
-
-	/* set descriptor threshold to match downstream A2_SUMMING_THRESHOLD */
-	writel_relaxed(DEFAULT_CNT_THRSHLD,
-			bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
-
-	/*
-	 * Enable h/w workarounds.  Downstream MDM9607 uses 0xFFFFF7FF
-	 * (all bits set except BAM_FULL_PIPE).  The upstream default
-	 * (0xEFFFF004) leaves bits 0-1, 3-10, 28 clear which may
-	 * prevent the remote (modem) BAM satellite from connecting
-	 * its producer pipe.
-	 */
-	writel_relaxed(0xFFFFF7FF, bam_addr(bdev, 0, BAM_CNFG_BITS));
-
-	/* enable irqs for errors + timer */
-	writel_relaxed(BAM_TIMER_EN | BAM_ERROR_EN | BAM_HRESP_ERR_EN,
-			bam_addr(bdev, 0, BAM_IRQ_EN));
-
-	/* unmask global bam interrupt */
-	writel_relaxed(BAM_IRQ_MSK, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-
-	dev_info(bdev->dev, "BAM configured: CTRL=0x%08x CNFG_BITS=0x%08x IRQ_SRCS_MSK=0x%08x "
-		 "REVISION=0x%08x NUM_PIPES=0x%08x\n",
-		 readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
-		 readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
-		 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
-		 readl_relaxed(bam_addr(bdev, 0, BAM_REVISION)),
-		 readl_relaxed(bam_addr(bdev, 0, BAM_NUM_PIPES)));
-
-	/* Dump trust/security registers and all pipe states */
-	{
-		int p;
-
-		dev_info(bdev->dev, "BAM TRUST_REG(0x2000)=0x%08x\n",
-			 readl_relaxed(bdev->regs + 0x2000));
-		for (p = 0; p < 6; p++)
-			dev_info(bdev->dev,
-				 "  pipe %d: P_TRUST(0x%x)=0x%08x P_CTRL=0x%08x\n",
-				 p, 0x2020 + 4 * p,
-				 readl_relaxed(bdev->regs + 0x2020 + 4 * p),
-				 readl_relaxed(bam_addr(bdev, p, BAM_P_CTRL)));
-	}
 }
 
 /**
@@ -635,53 +530,8 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	struct bam_device *bdev = bchan->bdev;
 	u32 val;
 
-	/*
-	 * Dump pipe registers BEFORE reset for powered-remotely BAMs.
-	 * The modem may have already configured the pipe between SMDINIT
-	 * and our init.  Our P_RST would destroy the modem's setup.
-	 */
-	if (bdev->powered_remotely) {
-		u32 bam_ctrl = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-
-		dev_info(bdev->dev,
-			"pipe %u PRE-RESET: BAM_CTRL=0x%x P_CTRL=0x%x "
-			"P_DESC_FIFO_ADDR=0x%x "
-			"P_FIFO_SIZES=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x\n",
-			bchan->id,
-			bam_ctrl,
-			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_DESC_FIFO_ADDR)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_FIFO_SIZES)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_EVNT_REG)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_SW_OFSTS)));
-
-		if (!(bam_ctrl & BAM_EN))
-			dev_warn(bdev->dev,
-				"pipe %u: BAM_EN not set! Modem may have done SW_RST.\n",
-				bchan->id);
-	}
-
-	/*
-	 * Reset the channel to clear internal state of the FIFO.
-	 *
-	 * Skip P_RST for powered-remotely BAMs: the modem (BAM primary
-	 * controller) has already configured the pipe.  P_RST destroys
-	 * the modem's pipe state machine and descriptor tracking.  The
-	 * modem doesn't re-initialize after our reset because it already
-	 * set apps_bam_link_ready=true before we run this code.
-	 *
-	 * The old 3.18 kernel's bam_pipe_init() does P_RST, but there
-	 * the modem initializes its pipes AFTER APPS's P_RST (different
-	 * SMSM callback ordering).
-	 */
-	if (!bdev->powered_remotely)
-		bam_reset_channel(bchan);
-	else
-		bchan->initialized = 0;
+	/* Reset the channel to clear internal state of the FIFO */
+	bam_reset_channel(bchan);
 
 	/*
 	 * write out 8 byte aligned address.  We have enough space for this
@@ -698,19 +548,24 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	writel(BAM_DESC_FIFO_SIZE,
 			bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES));
 
-	/* Set event threshold to 0x10 to match downstream SPS configuration */
-	writel(0x10, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
+	/* Explicitly set event threshold to 0 (generate event per descriptor) */
+	writel(0, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
 
-	/*
-	 * Match downstream SPS two-phase P_IRQ_EN init:
-	 * Phase 1 (here): P_IRQ_EN = 0 (all pipe IRQs disabled)
-	 * Phase 2 (after P_EN): P_IRQ_EN = real mask
-	 *
-	 * The downstream bam_pipe_init() writes P_IRQ_EN = 0 because
-	 * hw_params.pipe_irq_mask is zeroed.  The real mask is set
-	 * later by sps_bam_pipe_set_params() → bam_pipe_set_irq().
-	 */
-	writel(0, bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	if (bdev->polling) {
+		/*
+		 * Downstream SPS sets P_IRQ_EN to the ACTUAL mask even
+		 * for polling pipes (step 15a in bam_pipe_set_irq),
+		 * then clears IRQ_SRCS_MSK_EE to prevent interrupt
+		 * delivery.  Match this exactly — the BAM hardware
+		 * may behave differently when P_IRQ_EN=0 vs non-zero.
+		 */
+		writel(P_DEFAULT_IRQS_EN,
+				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	} else {
+		/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
+		writel(P_DEFAULT_IRQS_EN,
+				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	}
 
 	/*
 	 * IRQ_SRCS_MSK_EE handling: match the downstream SPS driver.
@@ -722,14 +577,10 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 *
 	 * TZ pre-sets IRQ_SRCS_MSK_EE = 0x80000007 (BAM + pipes 0-2).
 	 * The downstream clears all pipe bits since QPIC uses poll mode.
-	 *
-	 * For powered-remotely BAMs (BAM_DMUX), KEEP pipe bits set even
-	 * in polling mode.  The modem's A2 DMA checks IRQ_SRCS_MSK_EE
-	 * to verify APPS has configured the pipe — if the pipe bit is
-	 * cleared, the modem never starts its DMA producer.
+	 * We match this behavior exactly.
 	 */
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-	if (bdev->polling && !bdev->powered_remotely) {
+	if (bdev->polling) {
 		/*
 		 * Clear ALL pipe bits, not just the current pipe's.
 		 * TZ pre-sets bits for pipes 0-2.  Downstream clears
@@ -776,60 +627,20 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 	 */
 	val = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
 
-	/*
-	 * Phase 2 of P_IRQ_EN init: set the real interrupt mask AFTER
-	 * P_EN is set and read back.  This matches downstream SPS which
-	 * calls sps_bam_pipe_set_params() → bam_pipe_set_irq() after
-	 * bam_pipe_init() has already set P_EN=1.
-	 *
-	 * For powered-remotely BAMs (bam-dmux): use P_TRNSFR_END_EN
-	 * (0x20) only, matching old kernel's SPS_O_EOT → P_IRQ_EN=0x20.
-	 * The upstream default adds P_PRCSD_DESC_EN and P_ERR_EN which
-	 * the old kernel never set for bam-dmux pipes.
-	 */
-	if (bdev->powered_remotely)
-		writel(P_TRNSFR_END_EN,
-				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
-	else if (bdev->polling)
-		writel(P_DEFAULT_IRQS_EN,
-				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
-	else
-		writel(P_DEFAULT_IRQS_EN,
-				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
-
 	bchan->initialized = 1;
 
-	if (bdev->powered_remotely)
-		dev_info(bdev->dev,
-			"pipe %u init: dir=%d P_CTRL=0x%x "
-			"P_DESC_FIFO_ADDR=0x%x P_FIFO_SIZES=0x%x "
-			"P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
-			"P_EVNT_GEN_TRSHLD=0x%x P_HALT=0x%x "
-			"P_IRQ_EN=0x%x P_IRQ_STTS=0x%x "
-			"IRQ_SRCS_MSK_EE=0x%x "
-			"P_TRUST(0x%x)=0x%x\n",
-			bchan->id, dir,
-			readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_DESC_FIFO_ADDR)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_FIFO_SIZES)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_EVNT_REG)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_SW_OFSTS)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_EVNT_GEN_TRSHLD)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_HALT)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_IRQ_EN)),
-			readl_relaxed(bam_addr(bdev, bchan->id,
-					    BAM_P_IRQ_STTS)),
-			readl_relaxed(bam_addr(bdev, 0,
-					    BAM_IRQ_SRCS_MSK_EE)),
-			0x2020 + 4 * bchan->id,
-			readl_relaxed(bdev->regs + 0x2020 + 4 * bchan->id));
+	dev_dbg(bdev->dev,
+		"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x P_FIFO_SIZES=0x%x "
+		"P_DESC_FIFO_ADDR=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
+		"IRQ_SRCS_MSK=0x%x P_IRQ_STTS=0x%x\n",
+		bchan->id, dir, is_cmd_pipe,
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_EVNT_REG)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS)),
+		readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_STTS)));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
@@ -880,14 +691,6 @@ static void bam_init_peer_pipes(struct bam_device *bdev)
 
 		scoped_guard(spinlock_irqsave, &peer->vc.lock)
 			bam_chan_init_hw(peer, dir, false);
-
-		/*
-		 * Mark direction as known to prevent a spurious re-init
-		 * via needs_dir_fix in bam_prep_slave_sg().  For consumer
-		 * pipes (DMA_MEM_TO_DEV), the default direction is correct.
-		 */
-		peer->last_dir = dir;
-		peer->dir_known = true;
 	}
 }
 
@@ -915,7 +718,7 @@ static int bam_alloc_chan(struct dma_chan *chan)
 	}
 
 	if (bdev->active_channels++ == 0 && bdev->powered_remotely)
-		bam_init_powered_remotely(bdev);
+		bam_reset(bdev);
 
 	return 0;
 }
@@ -1025,17 +828,14 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 
 	/*
 	 * Track init state before updating direction.  A pipe that was
-	 * force-initialized by bam_init_peer_pipes() needs re-init if
-	 * the prep direction differs from the force-init direction.
-	 * This prevents a spurious P_RST when the direction matches
-	 * (e.g. pipe 4 TX force-init with DMA_MEM_TO_DEV, then prepped
-	 * with DMA_MEM_TO_DEV for CMD_OPEN — no re-init needed).
+	 * force-initialized by bam_init_peer_pipes() has initialized=1
+	 * but dir_known=false.  Such pipes need their P_DIRECTION bit
+	 * updated when they're actually prepped with the real direction.
 	 */
 	{
 		bool needs_init = !bchan->initialized;
 		bool needs_dir_fix = bchan->initialized &&
-				     (!bchan->dir_known ||
-				      bchan->last_dir != direction);
+				     !bchan->dir_known;
 
 		bchan->last_dir = direction;
 		bchan->dir_known = true;
@@ -1057,10 +857,11 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 			bam_init_peer_pipes(bdev);
 		} else if (needs_dir_fix) {
 			/*
-			 * Pipe was force-initialized with a direction that
-			 * differs from the actual prep direction, OR was
-			 * never prepped (dir_known=false).  Do a full
-			 * P_RST + re-init to update P_DIRECTION.
+			 * Pipe was force-initialized with default direction
+			 * (consumer).  The correct direction is now known.
+			 * Do a full P_RST + re-init rather than modifying
+			 * P_DIRECTION on a live (P_EN=1) pipe, which may
+			 * corrupt BAM internal pipe state.
 			 */
 			dev_dbg(bdev->dev,
 				"pipe %u: dir fix via re-init (dir=%d)\n",
@@ -1081,31 +882,8 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 	if (flags & DMA_PREP_FENCE)
 		async_desc->flags |= DESC_FLAG_NWD;
 
-	if (flags & DMA_PREP_INTERRUPT) {
-		/*
-		 * Downstream Qualcomm SPS driver uses different descriptor
-		 * flags for producer (RX) vs consumer (TX) pipes:
-		 *
-		 *   TX (consumer): SPS_IOVEC_FLAG_EOT (0x4000)
-		 *   RX (producer): flags = 0 (no descriptor flags at all)
-		 *
-		 * The downstream sps_transfer_one() for RX passes flags=0.
-		 * The BAM fills the receive buffer autonomously when data
-		 * arrives from the peripheral, advancing P_SW_OFSTS.  The
-		 * polling code detects the offset change — no descriptor
-		 * flags are needed for completion detection.
-		 *
-		 * Setting ANY flag (EOT or INT) on producer pipe descriptors
-		 * may alter BAM behavior:
-		 *   - EOT: BAM waits for peripheral EOT signal → stall
-		 *   - INT: may request interrupt acknowledgment → unknown
-		 *
-		 * Skip descriptor flags entirely for powered-remotely
-		 * producer pipes to match downstream exactly.
-		 */
-		if (!(bdev->powered_remotely && direction == DMA_DEV_TO_MEM))
-			async_desc->flags |= DESC_FLAG_EOT;
-	}
+	if (flags & DMA_PREP_INTERRUPT)
+		async_desc->flags |= DESC_FLAG_EOT;
 
 	async_desc->num_desc = num_alloc;
 	async_desc->curr_desc = async_desc->desc;
@@ -1257,7 +1035,7 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 	u32 offset;
 	unsigned int avail;
 
-	if (bdev->polling || bdev->powered_remotely) {
+	if (bdev->polling) {
 		u32 pipe_stts;
 
 		/*
@@ -1269,11 +1047,6 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 		 * IRQ status bits (P_PRCSD_DESC, P_WAKE, etc.) from
 		 * completed operations are never cleared, which may
 		 * affect BAM internal state on subsequent operations.
-		 *
-		 * For powered-remotely BAMs, TZ blocks the IRQ so the
-		 * normal IRQ handler never clears P_IRQ_STTS.  Treat
-		 * these the same as polling: always read/clear and then
-		 * check P_SW_OFSTS unconditionally.
 		 */
 		pipe_stts = readl_relaxed(bam_addr(bdev, pipe,
 						   BAM_P_IRQ_STTS));
@@ -1281,64 +1054,12 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 			writel_relaxed(pipe_stts, bam_addr(bdev, pipe,
 						   BAM_P_IRQ_CLR));
 
-		if (bdev->powered_remotely) {
-			static unsigned int poll_diag_count;
-			u32 sw_ofsts = readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS));
-
-			if (sw_ofsts || pipe_stts)
-				dev_info(bdev->dev,
-					"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u desc_list_empty=%d\n",
-					pipe, sw_ofsts, pipe_stts,
-					bchan->head,
-					list_empty(&bchan->desc_list));
-
-			/* Comprehensive register dump on first few polls */
-			if (poll_diag_count < 5 ||
-			    (poll_diag_count < 100 && !(poll_diag_count % 50))) {
-				struct bam_desc_hw *fifo;
-
-				dev_info(bdev->dev,
-					"diag[%u]: pipe %u BAM_CTRL=0x%x "
-					"P_CTRL=0x%x P_EVNT_REG=0x%x "
-					"P_SW_OFSTS=0x%x P_DESC_FIFO_ADDR=0x%x "
-					"P_FIFO_SIZES=0x%x P_HALT=0x%x "
-					"P_IRQ_STTS=0x%x P_IRQ_EN=0x%x "
-					"IRQ_SRCS_MSK_EE=0x%x\n",
-					poll_diag_count, pipe,
-					readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
-					readl_relaxed(bam_addr(bdev, pipe, BAM_P_CTRL)),
-					readl_relaxed(bam_addr(bdev, pipe, BAM_P_EVNT_REG)),
-					readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
-					readl_relaxed(bam_addr(bdev, pipe, BAM_P_DESC_FIFO_ADDR)),
-					readl_relaxed(bam_addr(bdev, pipe, BAM_P_FIFO_SIZES)),
-					readl_relaxed(bam_addr(bdev, pipe, BAM_P_HALT)),
-					readl_relaxed(bam_addr(bdev, pipe, BAM_P_IRQ_STTS)),
-					readl_relaxed(bam_addr(bdev, pipe, BAM_P_IRQ_EN)),
-					readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
-
-				/* Dump first 4 descriptors in the FIFO */
-				fifo = PTR_ALIGN(bchan->fifo_virt,
-						 sizeof(struct bam_desc_hw));
-				if (poll_diag_count == 0) {
-					int d;
-
-					for (d = 0; d < 4 && d < (int)(MAX_DESCRIPTORS + 1); d++)
-						dev_info(bdev->dev,
-							"diag: pipe %u desc[%d] addr=0x%08x size=%u flags=0x%04x\n",
-							pipe, d,
-							le32_to_cpu(fifo[d].addr),
-							le16_to_cpu(fifo[d].size),
-							le16_to_cpu(fifo[d].flags));
-				}
-			}
-			poll_diag_count++;
-		} else
-			dev_dbg(bdev->dev,
-				"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u\n",
-				pipe,
-				readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
-				pipe_stts,
-				bchan->head);
+		dev_dbg(bdev->dev,
+			"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u\n",
+			pipe,
+			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
+			pipe_stts,
+			bchan->head);
 	} else {
 		u32 pipe_stts;
 
@@ -1358,11 +1079,6 @@ static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
 	offset /= sizeof(struct bam_desc_hw);
 
 	avail = CIRC_CNT(offset, bchan->head, MAX_DESCRIPTORS + 1);
-
-	if (bdev->powered_remotely && avail)
-		dev_info(bdev->dev,
-			 "completions: pipe %u offset=%u head=%u avail=%u\n",
-			 pipe, offset, bchan->head, avail);
 
 	list_for_each_entry_safe(async_desc, tmp,
 				 &bchan->desc_list, desc_node) {
@@ -1424,24 +1140,8 @@ static enum hrtimer_restart bam_poll_timer_fn(struct hrtimer *timer)
 					       poll_timer);
 	bool any_active = false;
 	unsigned int i;
-	static int poll_count;
 
-	if (bdev->powered_remotely && (poll_count < 5 || (poll_count % 10000) == 0)) {
-		for (i = 0; i < bdev->num_channels; i++) {
-			struct bam_chan *bchan = &bdev->channels[i];
-
-			if (list_empty(&bchan->desc_list))
-				continue;
-			dev_info(bdev->dev,
-				"poll[%d] pipe %u: SW_OFSTS=0x%x P_IRQ=0x%x head=%u descs=%d\n",
-				poll_count, i,
-				readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)),
-				readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS)),
-				bchan->head,
-				!list_empty(&bchan->desc_list));
-		}
-	}
-	poll_count++;
+	dev_dbg(bdev->dev, "poll_timer fired\n");
 
 	for (i = 0; i < bdev->num_channels; i++) {
 		struct bam_chan *bchan = &bdev->channels[i];
@@ -1478,12 +1178,9 @@ static void bam_start_poll_timer(struct bam_device *bdev)
 	if (!bdev->polling)
 		return;
 
-	if (!atomic_xchg(&bdev->poll_timer_active, 1)) {
-		if (bdev->powered_remotely)
-			dev_info(bdev->dev, "poll timer started\n");
+	if (!atomic_xchg(&bdev->poll_timer_active, 1))
 		hrtimer_start(&bdev->poll_timer, ns_to_ktime(50000),
 			      HRTIMER_MODE_REL);
-	}
 }
 
 /**
@@ -1498,10 +1195,6 @@ static irqreturn_t bam_dma_irq(int irq, void *data)
 	struct bam_device *bdev = data;
 	u32 clr_mask = 0, srcs = 0;
 	int ret;
-
-	if (bdev->powered_remotely)
-		dev_info(bdev->dev, "IRQ! srcs_ee=0x%x\n",
-			 readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_EE)));
 
 	srcs |= process_channel_irqs(bdev);
 
@@ -1551,21 +1244,17 @@ static enum dma_status bam_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
 	unsigned int i;
 
 	/*
-	 * Process hardware completions before checking cookie status.
-	 *
-	 * For polling-mode (controlled-remotely) and powered-remotely
-	 * BAMs where IRQs don't reach Linux, we must actively check
-	 * for completed descriptors by reading P_SW_OFSTS.
+	 * In polling mode, process hardware completions on ALL active
+	 * pipes before checking cookie status.  This is needed because
+	 * a multi-pipe peripheral (e.g. QPIC NAND with cmd/tx/rx pipes)
+	 * requires all pipes to be drained — otherwise completed
+	 * descriptors remain in desc_list, IS_BUSY stays true, and
+	 * subsequent operations on that pipe never get doorbelled.
+	 * This matches what bam_poll_timer_fn() already does.
 	 */
-	if (bdev->polling || bdev->powered_remotely) {
+	if (bdev->polling) {
 		for (i = 0; i < bdev->num_channels; i++) {
 			struct bam_chan *bc = &bdev->channels[i];
-
-			if (bdev->powered_remotely && bc->initialized)
-				dev_info_once(bdev->dev,
-					"tx_status: ch %u initialized=%d desc_list_empty=%d\n",
-					i, bc->initialized,
-					list_empty(&bc->desc_list));
 
 			if (bc->initialized && !list_empty(&bc->desc_list))
 				bam_process_pipe_completions(bdev, i);
@@ -1614,7 +1303,7 @@ static void bam_apply_new_config(struct bam_chan *bchan,
 	struct bam_device *bdev = bchan->bdev;
 	u32 maxburst;
 
-	if (!bdev->controlled_remotely && !bdev->powered_remotely) {
+	if (!bdev->controlled_remotely) {
 		if (dir == DMA_DEV_TO_MEM)
 			maxburst = bchan->slave.src_maxburst;
 		else
@@ -1702,16 +1391,10 @@ static void bam_start_dma(struct bam_chan *bchan)
 		 *  - If a callback completion was requested for this DESC,
 		 *     In this case, BAM will deliver the completion callback
 		 *     for this desc and continue processing the next desc.
-		 *
-		 * Skip for powered-remotely producer (RX) pipes: downstream
-		 * SPS submits RX descriptors with flags=0.  The polling code
-		 * detects completions via P_SW_OFSTS without needing INT.
 		 */
 		if (((avail <= async_desc->xfer_len) || !vd ||
 		     dmaengine_desc_callback_valid(&cb)) &&
-		    !(async_desc->flags & (DESC_FLAG_EOT | DESC_FLAG_INT)) &&
-		    !(bdev->powered_remotely &&
-		      async_desc->dir == DMA_DEV_TO_MEM))
+		    !(async_desc->flags & DESC_FLAG_EOT))
 			desc[async_desc->xfer_len - 1].flags |=
 				cpu_to_le16(DESC_FLAG_INT);
 
@@ -1807,20 +1490,8 @@ static void bam_start_dma(struct bam_chan *bchan)
 	{
 		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
 
-		if (bdev->powered_remotely)
-			dev_info(bdev->dev,
-				"pipe %u doorbell: val=0x%x (tail=%u descs=%u)"
-				" IRQ_SRCS_MSK_EE=0x%x P_IRQ_EN=0x%x P_CTRL=0x%x\n",
-				bchan->id, db_val, bchan->tail,
-				db_val / (u32)sizeof(struct bam_desc_hw),
-				readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
-				readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_EN)),
-				readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)));
-
 		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
 	}
-
-
 
 	bam_start_poll_timer(bdev);
 
@@ -1931,9 +1602,11 @@ static int bam_init(struct bam_device *bdev)
 		bam_reset(bdev);
 	} else {
 		/*
-		 * For remotely-controlled/powered BAMs, registers may be
-		 * inaccessible until the remote processor enables clocks.
-		 * Defer init to first channel allocation.
+		 * For remotely-controlled BAMs, TZ already initialized the
+		 * global config including BAM_IRQ_EN.  Don't touch global
+		 * registers here — they may be XPU-protected.  Per-pipe
+		 * IRQ setup (P_IRQ_EN + BAM_IRQ_SRCS_MSK_EE per-pipe bit)
+		 * is handled later by bam_chan_init_hw().
 		 */
 	}
 
@@ -2005,8 +1678,6 @@ static int bam_dma_probe(struct platform_device *pdev)
 			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		atomic_set(&bdev->poll_timer_active, 0);
 	}
-
-
 
 	if (bdev->controlled_remotely || bdev->powered_remotely)
 		bdev->bamclk = devm_clk_get_optional(bdev->dev, "bam_clk");
