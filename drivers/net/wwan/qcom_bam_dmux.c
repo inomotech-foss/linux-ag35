@@ -1508,6 +1508,27 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	val |= BAM_IRQ_MSK | BIT(BAM_DMUX_TX_PIPE) | BIT(BAM_DMUX_RX_PIPE);
 	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), val);
 
+	/*
+	 * Step 1b: Set BAM_EN (RMW) — preserve modem's LOCAL_CLK_GATING.
+	 *
+	 * Modem leaves BAM_CTRL = 0x00020000 (LOCAL_CLK_GATING=2, BAM_EN=0)
+	 * after its bam_init() because in satellite design the BAM is
+	 * "asleep" until activity is requested.  Without BAM_EN our pipe
+	 * doorbells never trigger DMA (attempt 42 capture showed P4 SW=0
+	 * forever — modem never even consumed our CMD_OPEN).
+	 *
+	 * RMW just the BAM_EN bit so we don't disturb LOCAL_CLK_GATING or
+	 * any other state the modem programmed.  Do NOT do SW_RST.
+	 */
+	val = bam_readl(dmux, BAM_CTRL);
+	if (!(val & BAM_EN)) {
+		val |= BAM_EN;
+		bam_writel(dmux, BAM_CTRL, val);
+		dev_info(dmux->dev,
+			 "bam_hw: set BAM_EN, BAM_CTRL now 0x%08x\n",
+			 bam_readl(dmux, BAM_CTRL));
+	}
+
 	/* Step 2: Register BAM IRQ */
 	if (dmux->bam_irq > 0 && !dmux->bam_irq_registered) {
 		ret = devm_request_irq(dmux->dev, dmux->bam_irq,
