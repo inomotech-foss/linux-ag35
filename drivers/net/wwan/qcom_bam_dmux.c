@@ -1469,47 +1469,46 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	dmux->pipes_active = true;
 
 	dev_info(dmux->dev,
-		 "first_connect: attempt 39 - init BAM, then ACK with bit11 only\n");
+		 "first_connect: attempt 42 - SATELLITE mode (no BAM global init)\n");
 
 	/*
-	 * Step 1: SW_RST - matching downstream sps_device_reset -> bam_init.
+	 * Attempt 42: SATELLITE / SPS_BAM_MGR_DEVICE_REMOTE behaviour.
 	 *
-	 * Downstream does not assert APPS bit 1 during initial connect.
-	 * The modem raises MODEM bit 1 to request init/reconnect, APPS fully
-	 * initializes BAM/pipe state, then toggles APPS bit 11 as the ready
-	 * acknowledgement. APPS bit 1 is reserved for later UL wake requests
-	 * when TX data is queued.
+	 * Downstream's bam_dmux sets a2_props.manage = SPS_BAM_MGR_DEVICE_REMOTE,
+	 * meaning the BAM hardware is owned/managed by the MODEM, not APPS.
+	 * sps_bam_enable() then calls bam_check() (a read-only verification),
+	 * NOT bam_init(): no SW_RST, no BAM_CTRL write, no CNFG_BITS write,
+	 * no BAM_IRQ_EN write, no DESC_CNT_TRSHLD write.
+	 *
+	 * Our previous attempts did a full bam_init() which wiped the modem's
+	 * BAM setup, breaking the modem-side A2 pipe-5 producer path.  That is
+	 * almost certainly why every prior attempt saw the modem accept our
+	 * CMD_OPEN (P4 SW advances) but never reply on P5.
+	 *
+	 * In satellite mode APPS only:
+	 *   - configures its own pipes (P4 consumer, P5 producer)
+	 *   - sets IRQ_SRCS_MSK_EE(0) bits for its pipes so pipe IRQs route
+	 *     to EE0 (RMW, do not touch other EEs)
+	 *   - registers a Linux IRQ handler for the BAM hw IRQ
+	 *
+	 * Do NOT touch BAM_CTRL, BAM_CNFG_BITS, BAM_IRQ_EN or
+	 * BAM_DESC_CNT_TRSHLD.  Those are global state owned by the modem.
 	 */
-	val = bam_readl(dmux, BAM_CTRL);
 	dev_info(dmux->dev,
-		 "bam_hw: PRE BAM_CTRL=0x%08x CNFG=0x%08x\n",
-		 val, bam_readl(dmux, BAM_CNFG_BITS));
-
-	bam_writel_sync(dmux, BAM_CTRL, BAM_SW_RST);
-	bam_writel_sync(dmux, BAM_CTRL, 0);
-
-	/* Step 2: BAM_EN + LOCAL_CLK_GATING=1 */
-	val = BAM_EN | BIT(16);
-	bam_writel(dmux, BAM_CTRL, val);
-
-	/* Step 3: CNFG_BITS */
-	bam_writel(dmux, BAM_CNFG_BITS, BAM_CNFG_BITS_DEFAULT);
-
-	/* Step 4: Descriptor count threshold */
-	bam_writel(dmux, BAM_DESC_CNT_TRSHLD, BAM_DESC_CNT_TRSHLD_VAL);
-
-	/* Step 5: Global IRQ mask + BAM IRQ enable */
-	val = BAM_IRQ_MSK;
-	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), val);
-	bam_writel(dmux, BAM_IRQ_EN,
-		   BAM_IRQ_TIMER_EN | BAM_IRQ_ERROR_EN | BAM_IRQ_HRESP_ERR_EN);
-
-	dev_info(dmux->dev,
-		 "bam_hw: POST BAM_CTRL=0x%08x CNFG=0x%08x\n",
+		 "bam_hw: SAT PRE BAM_CTRL=0x%08x CNFG=0x%08x SRCS_MSK=0x%08x\n",
 		 bam_readl(dmux, BAM_CTRL),
-		 bam_readl(dmux, BAM_CNFG_BITS));
+		 bam_readl(dmux, BAM_CNFG_BITS),
+		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
 
-	/* Step 6: Register BAM IRQ */
+	/*
+	 * Step 1: Ensure pipe-level IRQ routing to EE0 (RMW).
+	 * BIT(31)=BAM-global IRQ visible to EE0; BIT(4)=P4; BIT(5)=P5.
+	 */
+	val = bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE));
+	val |= BAM_IRQ_MSK | BIT(BAM_DMUX_TX_PIPE) | BIT(BAM_DMUX_RX_PIPE);
+	bam_writel(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE), val);
+
+	/* Step 2: Register BAM IRQ */
 	if (dmux->bam_irq > 0 && !dmux->bam_irq_registered) {
 		ret = devm_request_irq(dmux->dev, dmux->bam_irq,
 				       bam_dmux_bam_isr,
@@ -1588,7 +1587,7 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 		 bam_readl(dmux, BAM_IRQ_SRCS_MSK_EE(BAM_DMUX_EE)));
 
 	/*
-	/* Step 11: Toggle APPS bit 11 (ACK).
+	 * Step 11: Toggle APPS bit 11 (ACK).
 	 *
 	 * Downstream toggles ACK after pipe connect + queue_rx and leaves
 	 * APPS bit 1 for later UL wake requests.
