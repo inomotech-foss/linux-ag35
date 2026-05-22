@@ -47,7 +47,7 @@
 };
 
 /* BAM-DMUX: modem data path (modem is pre-loaded by SBL1) */
-/* bam_dmux_dma kept disabled - nuclear bam_dmux accesses BAM registers directly */
+&bam_dmux_dma { status = "okay"; };
 &bam_dmux { status = "okay"; };
 
 /* &blsp1_i2c2 { status = "okay"; }; */

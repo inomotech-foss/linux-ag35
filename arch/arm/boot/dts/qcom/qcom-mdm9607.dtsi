@@ -856,29 +856,14 @@
 			compatible = "qcom,bam-dmux";
 
 			interrupt-parent = <&modem_smsm>;
-			interrupts = <1 IRQ_TYPE_EDGE_BOTH>,
-					     <11 IRQ_TYPE_EDGE_BOTH>,
-					     <0 IRQ_TYPE_EDGE_RISING>;
-			interrupt-names = "pc", "pc-ack", "remote-ready";
+			interrupts = <1 IRQ_TYPE_EDGE_BOTH>, <11 IRQ_TYPE_EDGE_BOTH>;
+			interrupt-names = "pc", "pc-ack";
 
 			qcom,smem-states = <&apps_smsm 1>, <&apps_smsm 11>;
 			qcom,smem-state-names = "pc", "pc-ack";
 
 			dmas = <&bam_dmux_dma 4>, <&bam_dmux_dma 5>;
 			dma-names = "tx", "rx";
-
-			/*
-			 * Downstream 3.18 bam_dmux.c votes for DFAB
-			 * (bus_clk @ 64 MHz) and XO before every BAM
-			 * init/reconnect.  Without this, the modem's
-			 * pipe-5 writes into APPS RAM cross an un-voted
-			 * fabric clock and silently fail.  Mainline must
-			 * vote the same clocks (PCNOC == DFAB on
-			 * MDM9607).
-			 */
-			clocks = <&rpmcc RPM_SMD_PCNOC_CLK>,
-				 <&xo_board>;
-			clock-names = "bus", "xo";
 
 			status = "disabled";
 		};
