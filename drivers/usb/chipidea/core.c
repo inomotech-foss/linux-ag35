@@ -220,15 +220,12 @@ static int hw_device_init(struct ci_hdrc *ci, void __iomem *base)
 {
 	u32 reg;
 
-	dev_info(ci->dev, "DBG: hw_device_init entry, base=%px\n", base);
 	/* bank is a module variable */
 	ci->hw_bank.abs = base;
 
 	ci->hw_bank.cap = ci->hw_bank.abs;
 	ci->hw_bank.cap += ci->platdata->capoffset;
-	dev_info(ci->dev, "DBG: about to read CAPLENGTH at %px\n", ci->hw_bank.cap);
 	ci->hw_bank.op = ci->hw_bank.cap + (ioread32(ci->hw_bank.cap) & 0xff);
-	dev_info(ci->dev, "DBG: CAPLENGTH read OK, op=%px\n", ci->hw_bank.op);
 
 	hw_alloc_regmap(ci, false);
 	reg = hw_read(ci, CAP_HCCPARAMS, HCCPARAMS_LEN) >>
@@ -1056,8 +1053,6 @@ static int ci_hdrc_probe(struct platform_device *pdev)
 	void __iomem	*base;
 	int		ret;
 	enum usb_dr_mode dr_mode;
-
-	dev_info(dev, "DBG: ci_hdrc_probe entry\n");
 
 	if (!dev_get_platdata(dev)) {
 		dev_err(dev, "platform data missing\n");

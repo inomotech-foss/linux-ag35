@@ -6,6 +6,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/usb/chipidea.h>
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/reset.h>
 #include <linux/mfd/syscon.h>
 #include <linux/regmap.h>
@@ -39,6 +40,7 @@ struct ci_hdrc_msm {
 	struct clk *core_clk;
 	struct clk *iface_clk;
 	struct clk *fs_clk;
+	struct reset_control *rst;
 	struct ci_hdrc_platform_data pdata;
 	struct reset_controller_dev rcdev;
 	bool secondary_phy;
@@ -88,20 +90,13 @@ static int ci_hdrc_msm_notify_event(struct ci_hdrc *ci, unsigned event)
 		dev_dbg(dev, "CI_HDRC_CONTROLLER_RESET_EVENT received\n");
 
 		/*
-		 * Set PORTSC to ULPI mode explicitly.  We cannot rely on
-		 * hw_phymode_configure() because phy_type is intentionally
-		 * omitted from DT to avoid ci_ulpi_init() performing ULPI
-		 * viewport access before the PHY is powered — the bootloader
-		 * on this platform does not initialise USB so the PHY is
-		 * completely dead at probe time.
+		 * Initialise the PHY first so its clocks are running, then
+		 * assert USB_HS_BCR to reset the controller’s ULPI interface
+		 * hardware.  On MDM9607 the bootloader leaves USB completely
+		 * uninitialised so the ULPI state machine is stuck at power-on;
+		 * BCR is the only way to reset it.  Doing BCR before phy_init
+		 * hangs because the PHY clock is not yet running.
 		 */
-		hw_write(ci, OP_PORTSC, PORTSC_PTS(7), PORTSC_PTS(PTS_ULPI));
-		if (msm_ci->secondary_phy) {
-			u32 val = readl_relaxed(msm_ci->base + HS_PHY_SEC_CTRL);
-			val |= HS_PHY_DIG_CLAMP_N;
-			writel_relaxed(val, msm_ci->base + HS_PHY_SEC_CTRL);
-		}
-
 		ret = phy_init(ci->phy);
 		if (ret)
 			return ret;
@@ -110,6 +105,20 @@ static int ci_hdrc_msm_notify_event(struct ci_hdrc *ci, unsigned event)
 		if (ret) {
 			phy_exit(ci->phy);
 			return ret;
+		}
+
+		/* BCR reset — safe now that PHY clocks are running */
+		reset_control_assert(msm_ci->rst);
+		usleep_range(1000, 1200);
+		reset_control_deassert(msm_ci->rst);
+		ndelay(200);
+
+		/* Configure PORTSC for ULPI (BCR just reset it to default) */
+		hw_write(ci, OP_PORTSC, PORTSC_PTS(7), PORTSC_PTS(PTS_ULPI));
+		if (msm_ci->secondary_phy) {
+			u32 val = readl_relaxed(msm_ci->base + HS_PHY_SEC_CTRL);
+			val |= HS_PHY_DIG_CLAMP_N;
+			writel_relaxed(val, msm_ci->base + HS_PHY_SEC_CTRL);
 		}
 
 		/* use AHB transactor, allow posted data writes */
@@ -183,11 +192,8 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	struct ci_hdrc_msm *ci;
 	struct platform_device *plat_ci;
 	struct clk *clk;
-	struct reset_control *reset;
 	int ret;
 	struct device_node *ulpi_node, *phy_node;
-
-	dev_info(&pdev->dev, "DBG: ci_hdrc_msm_probe entry\n");
 
 	ci = devm_kzalloc(&pdev->dev, sizeof(*ci), GFP_KERNEL);
 	if (!ci)
@@ -201,9 +207,9 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 			  CI_HDRC_OVERRIDE_PHY_CONTROL;
 	ci->pdata.notify_event = ci_hdrc_msm_notify_event;
 
-	reset = devm_reset_control_get(&pdev->dev, "core");
-	if (IS_ERR(reset))
-		return PTR_ERR(reset);
+	ci->rst = devm_reset_control_get(&pdev->dev, "core");
+	if (IS_ERR(ci->rst))
+		return PTR_ERR(ci->rst);
 
 	ci->core_clk = clk = devm_clk_get(&pdev->dev, "core");
 	if (IS_ERR(clk))
@@ -217,8 +223,6 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
 
-	dev_info(&pdev->dev, "DBG: clocks acquired, fs_clk=%p\n", ci->fs_clk);
-
 	ci->base = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(ci->base))
 		return PTR_ERR(ci->base);
@@ -231,34 +235,26 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	dev_info(&pdev->dev, "DBG: enabling fs_clk\n");
 	ret = clk_prepare_enable(ci->fs_clk);
 	if (ret)
 		return ret;
 
-	dev_info(&pdev->dev, "DBG: enabling core_clk\n");
 	ret = clk_prepare_enable(ci->core_clk);
 	if (ret)
 		goto err_core;
 
-	dev_info(&pdev->dev, "DBG: enabling iface_clk\n");
 	ret = clk_prepare_enable(ci->iface_clk);
 	if (ret)
 		goto err_iface;
 
 	/*
-	 * EXPERIMENT: Skip BCR assert/deassert.  On MDM9607 (where the
-	 * bootloader skips USB initialisation entirely) asserting USB_HS_BCR
-	 * hangs the system within ~10ms even though the assert is just a
-	 * single GCC register write.  Rely on the controller soft-reset
-	 * (USBCMD_RST) inside hw_device_reset() to bring the controller to
-	 * a clean state, mirroring what downstream effectively does at boot.
+	 * BCR is NOT done here.  On MDM9607 the bootloader leaves USB
+	 * completely uninitialised (PHY clocks off), so asserting BCR at
+	 * this point hangs the bus.  Instead, BCR is performed later in
+	 * the notify_event handler after phy_init has enabled PHY clocks.
 	 */
-	dev_info(&pdev->dev, "DBG: skipping BCR reset, clocks running\n");
 
 	clk_disable_unprepare(ci->fs_clk);
-
-	dev_info(&pdev->dev, "DBG: clocks running, will probe ci core\n");
 
 	ret = ci_hdrc_msm_mux_phy(ci, pdev);
 	if (ret)
