@@ -132,7 +132,8 @@ static int ci_hdrc_msm_notify_event(struct ci_hdrc *ci, unsigned event)
 			hw_write_id_reg(ci, HS_PHY_GENCONFIG_2,
 					HS_PHY_ULPI_TX_PKT_EN_CLR_FIX, 0);
 
-		if (!IS_ERR(ci->platdata->vbus_extcon.edev) || ci->role_switch) {
+		if (!IS_ERR(ci->platdata->vbus_extcon.edev) || ci->role_switch ||
+		    (ci->platdata->flags & CI_HDRC_FORCE_VBUS_ACTIVE_ALWAYS)) {
 			hw_write_id_reg(ci, HS_PHY_GENCONFIG_2,
 					HS_PHY_SESS_VLD_CTRL_EN,
 					HS_PHY_SESS_VLD_CTRL_EN);
