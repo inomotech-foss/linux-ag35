@@ -1726,17 +1726,35 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 					     boot_work.work);
 
 	/*
-	 * Safety net: if modem still hasn't set bit 1 after 30s, log it.
-	 * Do NOT call first_connect — that crashes the modem.
+	 * Attempt 41: actively request A2 wake by setting APPS bit 1.
+	 *
+	 * Per modem firmware (a2_power.c::a2_apps_smsm_callback), when APPS
+	 * sets SMSM_A2_POWER_CONTROL (bit 1), the modem will:
+	 *   1. call a2_power_vote(A2_CLIENT_APPS=11, true) - powers on A2 HW
+	 *   2. set MODEM SMSM bit 1 (A2_POWER_CONTROL) - 'A2 is ready'
+	 *   3. toggle MODEM SMSM bit 11 (A2_POWER_CONTROL_ACK)
+	 *   4. set apps_bam_link_ready = true
+	 *
+	 * On downstream (3.18 kernel), the modem set its bit 1 autonomously
+	 * about 1.5s after modem boot - presumably because LTE/data activity
+	 * triggered an internal A2 client (clients 2-10 per firmware string
+	 * 'A2 turned ON by client=%d[(0,1)=INT,(2,4,7,9)=L/W/TD/DO UL,...]').
+	 * On mainline, no internal client triggers, so modem never sets bit 1
+	 * without an explicit APPS request.
+	 *
+	 * We schedule this work ~500ms after remote_ready_irq to give the
+	 * modem time to register its a2_apps_smsm_callback during its own
+	 * boot sequence.  Setting bit 1 too early would be silently ignored.
 	 */
+
 	if (dmux->pc_state || dmux->pipes_active) {
 		dev_info(dmux->dev, "boot_work: already connected, nop\n");
 		return;
 	}
 
-	dev_warn(dmux->dev,
-		 "boot_work: modem bit 1 never arrived (pc_irq count=0). "
-		 "BAM-DMUX will not start until modem signals readiness.\n");
+	dev_info(dmux->dev,
+		 "boot_work: asserting APPS bit 1 to request A2 wake from modem\n");
+	bam_dmux_pc_vote(dmux, true);
 }
 
 static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
@@ -1744,23 +1762,14 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 	struct bam_dmux *dmux = data;
 
 	dev_info(dmux->dev,
-		 "remote ready (SMDINIT), waiting for modem bit 1 (pc_irq)\n");
+		 "remote ready (SMDINIT), scheduling A2 wake request in 500ms\n");
 
 	/*
-	 * Do NOT call first_connect here.  The modem's A2 subsystem sets
-	 * SMSM bit 1 (A2_POWER_CONTROL) when it is ready for APPS to init
-	 * the BAM.  If we toggle APPS bit 11 before modem has set bit 1,
-	 * a2_power.c asserts and the modem crashes.
-	 *
-	 * Previous attempts used a 5-second delayed boot_work here, which
-	 * consistently caused: "a2_power.c:2556:A2 Assertion Failed".
-	 *
-	 * The correct protocol (confirmed from downstream IPC logs at t=34s
-	 * boot capture): modem sets bit 1, APPS inits BAM, APPS toggles
-	 * bit 11.  Our pc_irq handler fires on modem bit 1 and calls
-	 * first_connect from there.
+	 * Defer the APPS-bit-1 assertion so the modem has time to bring up
+	 * its A2 SMSM callback after MPSS finishes loading.  See boot_work
+	 * comment for the full sequence.
 	 */
-	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(30000));
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(500));
 
 	return IRQ_HANDLED;
 }
