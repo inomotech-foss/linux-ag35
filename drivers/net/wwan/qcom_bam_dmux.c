@@ -1636,15 +1636,11 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 
 	if (new_state && !dmux->pipes_active) {
 		/*
-		 * Modem set A2_POWER_CONTROL (bit 1) — first connect.
+		 * Modem set A2_POWER_CONTROL (bit 1) — ready for init.
 		 *
-		 * The modem finished its a2_subsystem_boot() (including
-		 * a2_bam_init + set MODEM bit 1) autonomously.
-		 * Cancel boot_work (no longer needed) and init BAM now.
-		 *
-		 * first_connect() sets APPS bit 1 as its first operation,
-		 * matching downstream timing where APPS bit 1 and BAM init
-		 * happen simultaneously.
+		 * The modem finished its a2_subsystem_boot() and is now
+		 * waiting for APPS to init BAM + toggle bit 11 (ACK).
+		 * Cancel the diagnostic boot_work timer and proceed.
 		 */
 		cancel_delayed_work(&dmux->boot_work);
 		dmux->pc_state = true;
@@ -1729,22 +1725,18 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux,
 					     boot_work.work);
 
-	if (dmux->pc_state || dmux->pipes_active)
-		return;
-
 	/*
-	 * Attempt 37: Trigger first_connect directly from boot_work.
-	 *
-	 * first_connect has its own re-entry guard (sets pipes_active=true
-	 * at the top).  If pc_irq preempts us after first_connect sets
-	 * APPS bit 1 and modem responds, pc_irq will see pipes_active=true
-	 * and skip the redundant call.
+	 * Safety net: if modem still hasn't set bit 1 after 30s, log it.
+	 * Do NOT call first_connect — that crashes the modem.
 	 */
-	dev_info(dmux->dev,
-		 "boot_work: triggering first_connect directly\n");
+	if (dmux->pc_state || dmux->pipes_active) {
+		dev_info(dmux->dev, "boot_work: already connected, nop\n");
+		return;
+	}
 
-	dmux->pc_state = true;
-	bam_dmux_first_connect(dmux);
+	dev_warn(dmux->dev,
+		 "boot_work: modem bit 1 never arrived (pc_irq count=0). "
+		 "BAM-DMUX will not start until modem signals readiness.\n");
 }
 
 static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
@@ -1752,8 +1744,23 @@ static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
 	struct bam_dmux *dmux = data;
 
 	dev_info(dmux->dev,
-		 "remote ready (SMDINIT), scheduling boot_work in 5s\n");
-	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(5000));
+		 "remote ready (SMDINIT), waiting for modem bit 1 (pc_irq)\n");
+
+	/*
+	 * Do NOT call first_connect here.  The modem's A2 subsystem sets
+	 * SMSM bit 1 (A2_POWER_CONTROL) when it is ready for APPS to init
+	 * the BAM.  If we toggle APPS bit 11 before modem has set bit 1,
+	 * a2_power.c asserts and the modem crashes.
+	 *
+	 * Previous attempts used a 5-second delayed boot_work here, which
+	 * consistently caused: "a2_power.c:2556:A2 Assertion Failed".
+	 *
+	 * The correct protocol (confirmed from downstream IPC logs at t=34s
+	 * boot capture): modem sets bit 1, APPS inits BAM, APPS toggles
+	 * bit 11.  Our pc_irq handler fires on modem bit 1 and calls
+	 * first_connect from there.
+	 */
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(30000));
 
 	return IRQ_HANDLED;
 }
