@@ -452,6 +452,8 @@ static void bam_reset(struct bam_device *bdev)
 	u32 val;
 
 	if (bdev->powered_remotely) {
+		u32 ctrl_pre, ctrl_post, msk_pre, msk_post;
+
 		/*
 		 * Satellite mode: the remote processor (modem) owns the
 		 * BAM global config.  Don't SW_RST (wipes all EEs/pipes),
@@ -459,13 +461,24 @@ static void bam_reset(struct bam_device *bdev)
 		 * Only set BAM_EN (required for any pipe operation) and
 		 * enable our EE's interrupt mask.
 		 */
-		val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
-		val |= BAM_EN;
+		ctrl_pre = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
+		val = ctrl_pre | BAM_EN;
 		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+		ctrl_post = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
 
-		val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-		val |= BAM_IRQ_MSK;
+		msk_pre = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		val = msk_pre | BAM_IRQ_MSK;
 		writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		msk_post = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+
+		dev_info(bdev->dev,
+			"bam_hw: powered_remotely reset ee=%u BAM_CTRL=0x%08x->0x%08x IRQ_SRCS_MSK_EE=0x%08x->0x%08x BAM_IRQ_EN=0x%08x BAM_CNFG_BITS=0x%08x DESC_CNT_TRSHLD=0x%08x REVISION=0x%08x NUM_PIPES=0x%08x\n",
+			bdev->ee, ctrl_pre, ctrl_post, msk_pre, msk_post,
+			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_REVISION)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_NUM_PIPES)));
 		return;
 	}
 
@@ -648,8 +661,8 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	bchan->initialized = 1;
 
-	dev_dbg(bdev->dev,
-		"pipe %u init: dir=%d cmd=%d P_CTRL=0x%x P_FIFO_SIZES=0x%x "
+	dev_info(bdev->dev,
+		"bam_hw: pipe %u init: dir=%d cmd=%d P_CTRL=0x%x P_FIFO_SIZES=0x%x "
 		"P_DESC_FIFO_ADDR=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
 		"IRQ_SRCS_MSK=0x%x P_IRQ_STTS=0x%x\n",
 		bchan->id, dir, is_cmd_pipe,
