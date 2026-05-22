@@ -804,27 +804,22 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 
 	/*
-	 * Fully initialize the data path before the power vote:
-	 * - Allocate DMA channels (triggers bam_enable_irqs → BAM_EN)
-	 * - Submit RX descriptors (triggers bam_chan_init_hw → pipe P_EN)
-	 * The modem's A2 checks BAM_EN and pipe P_EN immediately upon
-	 * receiving the SMSM power request.  If either is 0, A2 gives up.
-	 */
-	if (!bam_dmux_power_on(dmux)) {
-		dev_err(dev, "boot pre-init failed\n");
-		bam_dmux_power_off(dmux);
-		return;
-	}
-
-	/*
-	 * Request power-on by asserting APPS A2_POWER_CONTROL (bit 1).
+	 * Request power-on by asserting APPS A2_POWER_CONTROL (bit 1) FIRST.
+	 *
+	 * Per the modem firmware A2 power state machine (confirmed by
+	 * decompilation of MDM9607 modem fw, see scratch/references/modem-fw/
+	 * decomp/FINDINGS.md): the modem only turns on the A2 hardware AFTER
+	 * APPS sets the SMSM_A2_POWER_CONTROL bit.  The modem then sets its
+	 * own PWR_CTRL bit + the ACK bit, which fires pc_irq.  pc_irq's
+	 * handler calls bam_dmux_power_on() at the correct moment (after A2
+	 * is powered up and the modem has programmed its side of the BAM
+	 * pipes).  Writing BAM/pipe registers before this point hits A2
+	 * hardware that is still powered down, leaving the BAM and pipe
+	 * state inconsistent with what the modem later programs.
 	 *
 	 * Do NOT use pm_runtime here: autosuspend would clear bit 1 after
-	 * 1 second, before the modem has time to send CMD_OPEN.  Instead,
-	 * vote directly.  The modem will respond by setting its own bit 1
-	 * (triggering pc_irq) and toggling bit 11 (ACK).  The pc_irq
-	 * handler completes the handshake.  Power-down happens only when
-	 * the modem clears its bit 1.
+	 * 1 second, before the modem has time to send CMD_OPEN.  Vote
+	 * directly; power-down happens only when the modem clears its bit 1.
 	 */
 	dev_info(dev, "modem did not initiate, requesting power on\n");
 	bam_dmux_pc_vote(dmux, true);
