@@ -42,6 +42,7 @@
 
 #include <linux/atomic.h>
 #include <linux/bitops.h>
+#include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/dma-mapping.h>
 #include <linux/if_arp.h>
@@ -234,6 +235,15 @@ struct bam_dmux {
 	void __iomem *bam_base;		/* BAM register base */
 	int bam_irq;			/* BAM hardware IRQ */
 	bool bam_irq_registered;
+
+	/*
+	 * DFAB ("bus") and XO clocks — downstream 3.18 bam_dmux votes
+	 * for both before every BAM init/reconnect.  See vote_dfab()
+	 * in scratch/references/.../soc/qcom/bam_dmux.c.
+	 */
+	struct clk *bus_clk;
+	struct clk *xo_clk;
+	bool clks_enabled;
 
 	/* SMSM power control */
 	int pc_irq;
@@ -1382,7 +1392,6 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 	WRITE_ONCE(dmux->pipes_active, false);
 	WRITE_ONCE(dmux->pc_state, false);
 	dmux->boot_done = false;
-
 	/*
 	 * Use timer_delete (not timer_delete_sync) — this may be
 	 * called from IRQ context (pc_irq) where sync would deadlock
@@ -1414,6 +1423,41 @@ static void bam_dmux_power_off(struct bam_dmux *dmux)
 			skb_dma->skb = NULL;
 		}
 	}
+
+	/* Release DFAB / XO clock votes */
+	if (dmux->clks_enabled) {
+		clk_disable_unprepare(dmux->xo_clk);
+		clk_disable_unprepare(dmux->bus_clk);
+		dmux->clks_enabled = false;
+		dev_info(dmux->dev, "clocks: disabled (DFAB+XO)\n");
+	}
+}
+
+/*
+ * Vote DFAB ("bus") and XO clocks before touching BAM registers.
+ * Mirrors downstream vote_dfab() at scratch/.../bam_dmux.c:2109.
+ */
+static int bam_dmux_vote_clocks(struct bam_dmux *dmux)
+{
+	int ret;
+
+	if (dmux->clks_enabled)
+		return 0;
+
+	ret = clk_prepare_enable(dmux->bus_clk);
+	if (ret) {
+		dev_err(dmux->dev, "clk_prepare_enable(bus) failed: %d\n", ret);
+		return ret;
+	}
+	ret = clk_prepare_enable(dmux->xo_clk);
+	if (ret) {
+		dev_err(dmux->dev, "clk_prepare_enable(xo) failed: %d\n", ret);
+		clk_disable_unprepare(dmux->bus_clk);
+		return ret;
+	}
+	dmux->clks_enabled = true;
+	dev_info(dmux->dev, "clocks: enabled (DFAB+XO)\n");
+	return 0;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -1468,8 +1512,23 @@ static void bam_dmux_first_connect(struct bam_dmux *dmux)
 	}
 	dmux->pipes_active = true;
 
+	/*
+	 * Attempt 44: vote DFAB + XO BEFORE touching any BAM register.
+	 * Downstream bam_init() begins with vote_dfab() then ioremap.
+	 * The BAM HW lives on the PCNOC fabric; without the bus_clk
+	 * vote the modem's pipe-5 writes that cross APPS RAM may be
+	 * silently dropped, which is consistent with the symptom we
+	 * have observed for 43 attempts (P4 SW advances, P5 SW=0).
+	 */
+	if (bam_dmux_vote_clocks(dmux)) {
+		dev_err(dmux->dev,
+			"first_connect: failed to vote clocks, abort\n");
+		dmux->pipes_active = false;
+		return;
+	}
+
 	dev_info(dmux->dev,
-		 "first_connect: attempt 42 - SATELLITE mode (no BAM global init)\n");
+		 "first_connect: attempt 44 - DFAB+XO clock vote\n");
 
 	/*
 	 * Attempt 42: SATELLITE / SPS_BAM_MGR_DEVICE_REMOTE behaviour.
@@ -1877,6 +1936,29 @@ static int bam_dmux_probe(struct platform_device *pdev)
 
 	dev_info(dev, "BAM at %pa size 0x%llx mapped to %px\n",
 		 &res.start, (u64)resource_size(&res), dmux->bam_base);
+
+	/*
+	 * Acquire DFAB ("bus") and XO clocks.  Optional: in case the DT
+	 * has not been updated they will be NULL and clk_prepare_enable
+	 * becomes a no-op.  Downstream sets bus_clk rate to 64 MHz.
+	 */
+	dmux->bus_clk = devm_clk_get_optional(dev, "bus");
+	if (IS_ERR(dmux->bus_clk))
+		return dev_err_probe(dev, PTR_ERR(dmux->bus_clk),
+				     "Failed to get bus clock\n");
+	if (dmux->bus_clk) {
+		ret = clk_set_rate(dmux->bus_clk, 64000000);
+		if (ret)
+			dev_warn(dev, "clk_set_rate(bus, 64MHz) failed: %d\n",
+				 ret);
+	}
+
+	dmux->xo_clk = devm_clk_get_optional(dev, "xo");
+	if (IS_ERR(dmux->xo_clk))
+		return dev_err_probe(dev, PTR_ERR(dmux->xo_clk),
+				     "Failed to get xo clock\n");
+
+	dev_info(dev, "clocks: bus=%p xo=%p\n", dmux->bus_clk, dmux->xo_clk);
 
 	/*
 	 * Do NOT read BAM registers here — the BAM clock domain is

@@ -867,6 +867,19 @@
 			dmas = <&bam_dmux_dma 4>, <&bam_dmux_dma 5>;
 			dma-names = "tx", "rx";
 
+			/*
+			 * Downstream 3.18 bam_dmux.c votes for DFAB
+			 * (bus_clk @ 64 MHz) and XO before every BAM
+			 * init/reconnect.  Without this, the modem's
+			 * pipe-5 writes into APPS RAM cross an un-voted
+			 * fabric clock and silently fail.  Mainline must
+			 * vote the same clocks (PCNOC == DFAB on
+			 * MDM9607).
+			 */
+			clocks = <&rpmcc RPM_SMD_PCNOC_CLK>,
+				 <&xo_board>;
+			clock-names = "bus", "xo";
+
 			status = "disabled";
 		};
 
