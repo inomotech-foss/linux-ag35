@@ -451,9 +451,24 @@ static void bam_reset(struct bam_device *bdev)
 {
 	u32 val;
 
+	if (bdev->powered_remotely) {
+		/*
+		 * Satellite mode: the remote processor (modem) owns the
+		 * BAM global config.  Don't SW_RST (wipes all EEs/pipes),
+		 * don't overwrite BAM_CTRL/CNFG_BITS/DESC_CNT_TRSHLD.
+		 * Only enable our EE's interrupt mask so we get pipe
+		 * completion IRQs.
+		 */
+		val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		val |= BAM_IRQ_MSK;
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		return;
+	}
+
+	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
+
 	/* s/w reset bam */
 	/* after reset all pipes are disabled and idle */
-	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
 	val |= BAM_SW_RST;
 	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 	val &= ~BAM_SW_RST;
