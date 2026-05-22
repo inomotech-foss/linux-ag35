@@ -452,31 +452,55 @@ static void bam_reset(struct bam_device *bdev)
 	u32 val;
 
 	if (bdev->powered_remotely) {
-		u32 ctrl_pre, ctrl_post, msk_pre, msk_post;
+		u32 ctrl_pre, ctrl_post;
 
 		/*
-		 * Satellite mode: the remote processor (modem) owns the
-		 * BAM global config.  Don't SW_RST (wipes all EEs/pipes),
-		 * don't overwrite BAM_CNFG_BITS/DESC_CNT_TRSHLD.
-		 * Only set BAM_EN (required for any pipe operation) and
-		 * enable our EE's interrupt mask.
+		 * Remote-powered BAM: the modem turns on/off A2 power but
+		 * downstream MDM9607 SPS uses MGR_LOCAL (sps_bam.c:bam_init),
+		 * meaning APPS still programs all the BAM global config
+		 * registers.  The only thing we MUST avoid is BAM_SW_RST,
+		 * because that wipes pipe state that the modem may have
+		 * already programmed for its peripheral-side pipes when A2
+		 * was powered up.
+		 *
+		 * Match the normal path register-by-register, just skip the
+		 * SW_RST step.  Without these writes, BAM_CNFG_BITS stays 0
+		 * (BAM_PIPE_CNFG=0 disables per-pipe config), DESC_CNT_TRSHLD
+		 * is whatever the modem left, and BAM_IRQ_EN is 0 (no error
+		 * IRQs).  Captures with the previous skip-everything code
+		 * showed the modem latching P5 P_IRQ_STTS WAKE but never
+		 * pushing data, consistent with the BAM not being properly
+		 * configured by APPS.
 		 */
 		ctrl_pre = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
 		val = ctrl_pre | BAM_EN;
 		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 		ctrl_post = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
 
-		msk_pre = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-		val = msk_pre | BAM_IRQ_MSK;
+		/* set descriptor threshold, start with 4 bytes */
+		writel_relaxed(DEFAULT_CNT_THRSHLD,
+				bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
+
+		/* Enable default set of h/w workarounds */
+		writel_relaxed(BAM_CNFG_BITS_DEFAULT,
+				bam_addr(bdev, 0, BAM_CNFG_BITS));
+
+		/* enable irqs for errors */
+		writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
+				bam_addr(bdev, 0, BAM_IRQ_EN));
+
+		/* unmask our EE's global bam interrupt */
+		val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		val |= BAM_IRQ_MSK;
 		writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-		msk_post = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
 		dev_info(bdev->dev,
-			"bam_hw: powered_remotely reset ee=%u BAM_CTRL=0x%08x->0x%08x IRQ_SRCS_MSK_EE=0x%08x->0x%08x BAM_IRQ_EN=0x%08x BAM_CNFG_BITS=0x%08x DESC_CNT_TRSHLD=0x%08x REVISION=0x%08x NUM_PIPES=0x%08x\n",
-			bdev->ee, ctrl_pre, ctrl_post, msk_pre, msk_post,
-			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN)),
+			"bam_hw: powered_remotely reset ee=%u BAM_CTRL=0x%08x->0x%08x BAM_CNFG_BITS=0x%08x DESC_CNT_TRSHLD=0x%08x BAM_IRQ_EN=0x%08x IRQ_SRCS_MSK_EE=0x%08x REVISION=0x%08x NUM_PIPES=0x%08x\n",
+			bdev->ee, ctrl_pre, ctrl_post,
 			readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
 			readl_relaxed(bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
 			readl_relaxed(bam_addr(bdev, 0, BAM_REVISION)),
 			readl_relaxed(bam_addr(bdev, 0, BAM_NUM_PIPES)));
 		return;
