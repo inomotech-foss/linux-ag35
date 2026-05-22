@@ -798,7 +798,6 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux, boot_work.work);
 	struct device *dev = dmux->dev;
-	int ret;
 
 	/* If the modem already initiated, nothing to do */
 	if (dmux->pc_state)
@@ -817,14 +816,18 @@ static void bam_dmux_boot_work_fn(struct work_struct *work)
 		return;
 	}
 
-	dev_info(dmux->dev, "modem did not initiate, requesting power on\n");
-	ret = pm_runtime_resume_and_get(dmux->dev);
-	if (ret < 0) {
-		dev_err(dmux->dev, "boot power-on failed: %d\n", ret);
-		return;
-	}
-	pm_runtime_mark_last_busy(dmux->dev);
-	pm_runtime_put_autosuspend(dmux->dev);
+	/*
+	 * Request power-on by asserting APPS A2_POWER_CONTROL (bit 1).
+	 *
+	 * Do NOT use pm_runtime here: autosuspend would clear bit 1 after
+	 * 1 second, before the modem has time to send CMD_OPEN.  Instead,
+	 * vote directly.  The modem will respond by setting its own bit 1
+	 * (triggering pc_irq) and toggling bit 11 (ACK).  The pc_irq
+	 * handler completes the handshake.  Power-down happens only when
+	 * the modem clears its bit 1.
+	 */
+	dev_info(dev, "modem did not initiate, requesting power on\n");
+	bam_dmux_pc_vote(dmux, true);
 }
 
 /**
