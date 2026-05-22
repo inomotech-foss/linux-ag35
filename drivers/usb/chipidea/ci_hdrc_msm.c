@@ -204,7 +204,8 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	ci->pdata.capoffset = DEF_CAPOFFSET;
 	ci->pdata.flags	= CI_HDRC_REGS_SHARED | CI_HDRC_DISABLE_STREAMING |
 			  CI_HDRC_OVERRIDE_AHB_BURST |
-			  CI_HDRC_OVERRIDE_PHY_CONTROL;
+			  CI_HDRC_OVERRIDE_PHY_CONTROL |
+			  CI_HDRC_FORCE_VBUS_ACTIVE_ALWAYS;
 	ci->pdata.notify_event = ci_hdrc_msm_notify_event;
 
 	ci->rst = devm_reset_control_get(&pdev->dev, "core");
