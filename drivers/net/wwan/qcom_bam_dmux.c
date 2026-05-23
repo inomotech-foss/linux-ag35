@@ -228,116 +228,6 @@ bam_dmux_tx_queue(struct bam_dmux *dmux, struct sk_buff *skb)
 	return skb_dma;
 }
 
-/*
- * bam_dmux_inject_tx_callback() - completion callback for boot-time
- * injected control commands (e.g. proactive CMD_OPEN).
- *
- * Unlike bam_dmux_tx_callback() which goes through bam_dmux_tx_done()
- * and calls pm_runtime_put_autosuspend(), this callback does NOT touch
- * pm_runtime, because the injection path never took a pm_runtime
- * reference (the modem is already powered via boot_work's direct
- * pc_vote() and the subsequent pc_irq handshake).
- */
-static void bam_dmux_inject_tx_callback(void *data)
-{
-	struct bam_dmux_skb_dma *skb_dma = data;
-	struct bam_dmux *dmux = skb_dma->dmux;
-	struct sk_buff *skb = skb_dma->skb;
-	unsigned long flags;
-
-	if (skb_dma->addr)
-		bam_dmux_skb_dma_unmap(skb_dma, DMA_TO_DEVICE);
-
-	spin_lock_irqsave(&dmux->tx_lock, flags);
-	skb_dma->skb = NULL;
-	if (skb_dma == &dmux->tx_skbs[dmux->tx_next_skb % BAM_DMUX_NUM_SKB])
-		bam_dmux_tx_wake_queues(dmux);
-	spin_unlock_irqrestore(&dmux->tx_lock, flags);
-
-	dev_info(dmux->dev, "inject_tx: CMD_OPEN delivered to modem\n");
-	dev_consume_skb_any(skb);
-}
-
-/*
- * bam_dmux_inject_cmd_open() - send a CMD_OPEN to the modem for channel @ch
- * directly from the boot/pc_irq path, bypassing pm_runtime.
- *
- * Background: the mainline qcom_bam_dmux driver is purely reactive — it
- * registers a netdev only after the modem sends an unsolicited CMD_OPEN.
- * The Quectel MDM9607 modem firmware does NOT initiate CMD_OPEN; instead
- * it waits for APPS to open the channel first (matching the downstream
- * msm_bam_dmux_open() flow in drivers/soc/qcom/bam_dmux.c).  This causes
- * a chicken-and-egg deadlock: modem won't push data on pipe 5 because
- * APPS never opened a channel; APPS can't open a channel because no
- * netdev exists; no netdev exists because modem never sent CMD_OPEN.
- *
- * Break the cycle by sending CMD_OPEN for channel 0 right after the
- * power-state handshake completes.  If the modem responds with its own
- * CMD_OPEN (the normal protocol acknowledgement), bam_dmux_cmd_open()
- * schedules register_netdev_work and the channel becomes usable.
- *
- * We use a custom path (not bam_dmux_send_cmd) because send_cmd ties
- * into pm_runtime, and triggering autosuspend right after this command
- * would cause us to drop the PC vote and lose the modem connection
- * before userspace has a chance to take a reference on the netdev.
- */
-static int bam_dmux_inject_cmd_open(struct bam_dmux *dmux, u8 ch)
-{
-	struct bam_dmux_skb_dma *skb_dma;
-	struct dma_async_tx_descriptor *desc;
-	struct bam_dmux_hdr *hdr;
-	struct sk_buff *skb;
-	unsigned long flags;
-
-	skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
-	if (!skb)
-		return -ENOMEM;
-
-	hdr = skb_put_zero(skb, sizeof(*hdr));
-	hdr->magic = BAM_DMUX_HDR_MAGIC;
-	hdr->cmd = BAM_DMUX_CMD_OPEN;
-	hdr->ch = ch;
-
-	/* Reserve TX slot without taking a pm_runtime reference */
-	spin_lock_irqsave(&dmux->tx_lock, flags);
-	skb_dma = &dmux->tx_skbs[dmux->tx_next_skb % BAM_DMUX_NUM_SKB];
-	if (skb_dma->skb) {
-		spin_unlock_irqrestore(&dmux->tx_lock, flags);
-		dev_err(dmux->dev, "inject_cmd_open: TX queue full\n");
-		dev_kfree_skb(skb);
-		return -EAGAIN;
-	}
-	skb_dma->skb = skb;
-	dmux->tx_next_skb++;
-	spin_unlock_irqrestore(&dmux->tx_lock, flags);
-
-	if (!bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE))
-		goto fail;
-
-	desc = dmaengine_prep_slave_single(dmux->tx, skb_dma->addr, skb->len,
-					   DMA_MEM_TO_DEV, DMA_PREP_INTERRUPT);
-	if (!desc) {
-		dev_err(dmux->dev, "inject_cmd_open: prep_slave_single failed\n");
-		bam_dmux_skb_dma_unmap(skb_dma, DMA_TO_DEVICE);
-		goto fail;
-	}
-
-	desc->callback = bam_dmux_inject_tx_callback;
-	desc->callback_param = skb_dma;
-	desc->cookie = dmaengine_submit(desc);
-	dma_async_issue_pending(dmux->tx);
-
-	dev_info(dmux->dev, "inject_cmd_open: submitted CMD_OPEN for ch %u\n", ch);
-	return 0;
-
-fail:
-	spin_lock_irqsave(&dmux->tx_lock, flags);
-	skb_dma->skb = NULL;
-	spin_unlock_irqrestore(&dmux->tx_lock, flags);
-	dev_kfree_skb(skb);
-	return -EIO;
-}
-
 static int bam_dmux_send_cmd(struct bam_dmux_netdev *bndev, u8 cmd)
 {
 	struct bam_dmux *dmux = bndev->dmux;
@@ -808,17 +698,9 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state) {
-		if (bam_dmux_power_on(dmux)) {
+		if (bam_dmux_power_on(dmux))
 			bam_dmux_pc_ack(dmux);
-			/*
-			 * Kick the modem: send a proactive CMD_OPEN for
-			 * channel 0.  See bam_dmux_inject_cmd_open() for
-			 * rationale.  Failure here is non-fatal — userspace
-			 * can still retry via netdev open once a netdev
-			 * exists.
-			 */
-			bam_dmux_inject_cmd_open(dmux, BAM_DMUX_CH_DATA_0);
-		} else {
+		else {
 			dev_err(dmux->dev, "power_on failed\n");
 			bam_dmux_power_off(dmux);
 		}
