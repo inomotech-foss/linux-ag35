@@ -29,12 +29,15 @@
 	/* Fixed 1.8 V rail for eMMC IO (SDC2 vqmmc).
 	 * The physical supply is mdm9607_l13 set to 1.8 V by the
 	 * bootloader / always-on constraint.  Model as fixed so the
-	 * MMC core never attempts 3.3 V → 1.8 V voltage switching. */
+	 * MMC core never attempts 3.3 V → 1.8 V voltage switching.
+	 * vin-supply keeps l13 enabled (prevents regulator framework
+	 * from disabling the unused PMIC LDO). */
 	sdc2_vqmmc_fixed: sdc2-vqmmc-fixed {
 		compatible = "regulator-fixed";
 		regulator-name = "sdc2_vqmmc_1p8";
 		regulator-min-microvolt = <1800000>;
 		regulator-max-microvolt = <1800000>;
+		vin-supply = <&mdm9607_l13>;
 		regulator-always-on;
 		regulator-boot-on;
 	};
