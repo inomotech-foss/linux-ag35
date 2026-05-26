@@ -57,8 +57,25 @@
 /* eMMC on SDCC1 */
 /* &sdhc_1 { status = "okay"; ... }; */
 
-/* SD card on SDCC2 */
-/* &sdhc_2 { status = "okay"; ... }; */
+/* eMMC on SDCC2 (LTE OPEN EVB: Micron MTFC4GACAJCN-4M, S0701 -> right)
+ *
+ * Downstream (mdm9607-mtp.dtsi) wires SDC2 as follows:
+ *   vdd-io  = mdm9607_l13 @ 1.8 V (also used at 2.85 V for SD)
+ *   non-removable for eMMC mode (qcom,nonhotplug downstream)
+ *
+ * Mainline qcom,sdhci-msm-v4 takes vqmmc-supply for the IO rail and
+ * vmmc-supply for the card power.  The EVB doesn't expose vmmc to the
+ * SoC -- the eMMC is hard-powered from the on-board LDO -- so we only
+ * provide vqmmc and rely on non-removable + bus-width=4.
+ */
+&sdhc_2 {
+	vqmmc-supply = <&mdm9607_l13>;
+	bus-width = <4>;
+	non-removable;
+	no-sd;
+	no-sdio;
+	status = "okay";
+};
 
 /* USB HS in peripheral mode (ChipIdea UDC + 28nm SNPS Femto PHY)
  *
