@@ -870,6 +870,18 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		if (bam_dmux_power_on(dmux)) {
 			bam_dmux_pc_ack(dmux);
 			/*
+			 * Modem-initiated power-up: the MDM9607 modem firmware
+			 * raises pc to ask apps to bring BAM up, but if apps
+			 * does not also assert its own pc vote, the modem
+			 * powers BAM down again after a short timeout
+			 * (~2 s) before it ever sends the initial CMD_OPEN.
+			 *
+			 * Assert our pc vote so the modem keeps BAM up long
+			 * enough to complete the open handshake.  The vote is
+			 * cleared in the down path below.
+			 */
+			bam_dmux_pc_vote(dmux, true);
+			/*
 			 * Kick the modem: send a proactive CMD_OPEN for
 			 * channel 0.  See bam_dmux_inject_cmd_open() for
 			 * rationale.  Failure here is non-fatal — userspace
@@ -886,6 +898,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		}
 	} else {
 		bam_dmux_power_off(dmux);
+		bam_dmux_pc_vote(dmux, false);
 		bam_dmux_pc_ack(dmux);
 	}
 
