@@ -60,13 +60,15 @@
 /* eMMC on SDCC2 (LTE OPEN EVB: Micron MTFC4GACAJCN-4M, S0701 -> right)
  *
  * Downstream (mdm9607-mtp.dtsi) wires SDC2 as follows:
- *   vdd-io  = mdm9607_l13 @ 1.8 V (also used at 2.85 V for SD)
- *   non-removable for eMMC mode (qcom,nonhotplug downstream)
+ *   vdd-io  = mdm9607_l13 @ 1.8 V, always-on
+ *   qcom,nonhotplug (= non-removable)
+ *   bus-width 4, no vmmc (eMMC chip power is board-level LDO)
+ *   bus scaling via qcom,msm-bus (proprietary, not mainline interconnect)
  *
- * Mainline qcom,sdhci-msm-v4 takes vqmmc-supply for the IO rail and
- * vmmc-supply for the card power.  The EVB doesn't expose vmmc to the
- * SoC -- the eMMC is hard-powered from the on-board LDO -- so we only
- * provide vqmmc and rely on non-removable + bus-width=4.
+ * The mainline dtsi adds interconnects/OPP/power-domains, but the
+ * bimc & pcnoc interconnect providers are disabled (driver bugs), so
+ * sdhci-msm gets stuck in deferred probe on dev_pm_opp_of_find_icc_paths.
+ * Delete those properties to let the controller probe without bus scaling.
  */
 &sdhc_2 {
 	vqmmc-supply = <&mdm9607_l13>;
@@ -75,6 +77,10 @@
 	no-sd;
 	no-sdio;
 	status = "okay";
+
+	/delete-property/ interconnects;
+	/delete-property/ operating-points-v2;
+	/delete-property/ power-domains;
 };
 
 /* USB HS in peripheral mode (ChipIdea UDC + 28nm SNPS Femto PHY)
