@@ -7,6 +7,7 @@
 #include <linux/atomic.h>
 #include <linux/bitops.h>
 #include <linux/completion.h>
+#include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
 #include <linux/dmaengine.h>
 #include <linux/if_arp.h>
@@ -31,6 +32,18 @@
 
 #define BAM_DMUX_AUTOSUSPEND_DELAY	1000
 #define BAM_DMUX_REMOTE_TIMEOUT		msecs_to_jiffies(2000)
+
+/*
+ * Module parameter: when true (default) the driver proactively injects a
+ * CMD_OPEN for channel 0 inside pc_irq right after the power handshake.
+ * Set to false to disable auto-injection and trigger it manually from
+ * userspace via debugfs (bam_dmux/trigger_inject_open) — useful to
+ * separate timing issues from protocol issues.
+ */
+static bool auto_inject_cmd_open = true;
+module_param(auto_inject_cmd_open, bool, 0644);
+MODULE_PARM_DESC(auto_inject_cmd_open,
+		 "Auto-inject CMD_OPEN for ch0 in pc_irq (default: true)");
 
 enum {
 	BAM_DMUX_CMD_DATA,
@@ -84,6 +97,9 @@ struct bam_dmux {
 	struct work_struct tx_wakeup_work;
 
 	struct delayed_work boot_work;
+
+	/* debugfs */
+	struct dentry *dbg_dir;
 
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
 	struct work_struct register_netdev_work;
@@ -337,6 +353,49 @@ fail:
 	dev_kfree_skb(skb);
 	return -EIO;
 }
+
+/*
+ * debugfs: write a channel id (0..BAM_DMUX_NUM_CH-1) to trigger an on-demand
+ * CMD_OPEN injection. Useful when auto_inject_cmd_open is disabled so the
+ * timing of injection vs modem-side BAM A2 power-on / DPM_OPEN_PORT can be
+ * controlled from userspace.
+ */
+static ssize_t bam_dmux_dbg_inject_open_write(struct file *file,
+					      const char __user *ubuf,
+					      size_t len, loff_t *ppos)
+{
+	struct bam_dmux *dmux = file->private_data;
+	char buf[16];
+	unsigned int ch;
+	int ret;
+
+	if (len == 0 || len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+
+	if (kstrtouint(buf, 0, &ch))
+		return -EINVAL;
+	if (ch >= BAM_DMUX_NUM_CH)
+		return -ERANGE;
+
+	if (!dmux->pc_state) {
+		dev_warn(dmux->dev, "dbg inject_open: BAM A2 not powered\n");
+		return -ENETDOWN;
+	}
+
+	dev_info(dmux->dev, "dbg inject_open: userspace requested ch %u\n", ch);
+	ret = bam_dmux_inject_cmd_open(dmux, (u8)ch);
+	return ret ? ret : len;
+}
+
+static const struct file_operations bam_dmux_dbg_inject_open_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = bam_dmux_dbg_inject_open_write,
+	.llseek = noop_llseek,
+};
 
 static int bam_dmux_send_cmd(struct bam_dmux_netdev *bndev, u8 cmd)
 {
@@ -817,7 +876,10 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			 * can still retry via netdev open once a netdev
 			 * exists.
 			 */
-			bam_dmux_inject_cmd_open(dmux, BAM_DMUX_CH_DATA_0);
+			if (auto_inject_cmd_open)
+				bam_dmux_inject_cmd_open(dmux, BAM_DMUX_CH_DATA_0);
+			else
+				dev_info(dmux->dev, "pc_irq: auto-inject disabled, waiting for userspace trigger\n");
 		} else {
 			dev_err(dmux->dev, "power_on failed\n");
 			bam_dmux_power_off(dmux);
@@ -1049,6 +1111,12 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	dev_info(dev, "probe complete: pc_state=%d pc_irq=%d\n",
 		 dmux->pc_state, dmux->pc_irq);
 
+	/* debugfs: expose on-demand CMD_OPEN injection trigger */
+	dmux->dbg_dir = debugfs_create_dir("bam_dmux", NULL);
+	if (!IS_ERR_OR_NULL(dmux->dbg_dir))
+		debugfs_create_file("trigger_inject_open", 0200, dmux->dbg_dir,
+				    dmux, &bam_dmux_dbg_inject_open_fops);
+
 	/* Check if remote finished initialization before us */
 	if (dmux->pc_state) {
 		dev_info(dev, "remote already powered on, initializing\n");
@@ -1074,6 +1142,8 @@ static void bam_dmux_remove(struct platform_device *pdev)
 	int i;
 
 	cancel_delayed_work_sync(&dmux->boot_work);
+
+	debugfs_remove_recursive(dmux->dbg_dir);
 
 	/* Unregister network interfaces */
 	cancel_work_sync(&dmux->register_netdev_work);
