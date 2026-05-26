@@ -41,6 +41,23 @@
 		regulator-always-on;
 		regulator-boot-on;
 	};
+
+	/* Fixed ~2.95 V rail for eMMC card power (SDC2 vmmc).
+	 * On the AG35 EVB the eMMC VCC is always-on from a board-level
+	 * LDO (downstream comments out vdd-supply entirely and uses
+	 * qcom,vdd-voltage-level = <2850000 2850000>).
+	 * Model as a fixed regulator so mmc_regulator_get_ocrmask()
+	 * returns a valid OCR (MMC_VDD_29_30).  Without this, the SDHCI
+	 * caps register may not report VDD support after controller reset,
+	 * leaving ocr_avail=0 and preventing any power-up/CMD1 sequence. */
+	sdc2_vmmc_fixed: sdc2-vmmc-fixed {
+		compatible = "regulator-fixed";
+		regulator-name = "sdc2_vmmc_2p95";
+		regulator-min-microvolt = <2950000>;
+		regulator-max-microvolt = <2950000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
 };
 
 /* BLSP1 UART2 (gpio4/5): debug console */
@@ -92,6 +109,7 @@
  * Use a fixed-voltage regulator to prevent voltage switching attempts.
  */
 &sdhc_2 {
+	vmmc-supply = <&sdc2_vmmc_fixed>;
 	vqmmc-supply = <&sdc2_vqmmc_fixed>;
 	bus-width = <4>;
 	non-removable;
