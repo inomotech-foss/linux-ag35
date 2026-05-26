@@ -873,13 +873,17 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			 * Modem-initiated power-up: the MDM9607 modem firmware
 			 * raises pc to ask apps to bring BAM up, but if apps
 			 * does not also assert its own pc vote, the modem
-			 * powers BAM down again after a short timeout
-			 * (~2 s) before it ever sends the initial CMD_OPEN.
+			 * powers BAM down again after a grace period (~70 s)
+			 * before it ever sends the initial CMD_OPEN.
 			 *
 			 * Assert our pc vote so the modem keeps BAM up long
-			 * enough to complete the open handshake.  The vote is
+			 * enough to complete the open handshake.  Also bump
+			 * the runtime PM usage count so the 1-second
+			 * autosuspend timer does NOT immediately clear our
+			 * vote via bam_dmux_runtime_suspend().  The vote is
 			 * cleared in the down path below.
 			 */
+			pm_runtime_get_noresume(dmux->dev);
 			bam_dmux_pc_vote(dmux, true);
 			/*
 			 * Kick the modem: send a proactive CMD_OPEN for
@@ -898,7 +902,10 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		}
 	} else {
 		bam_dmux_power_off(dmux);
-		bam_dmux_pc_vote(dmux, false);
+		if (dmux->pc_state) {
+			bam_dmux_pc_vote(dmux, false);
+			pm_runtime_put_noidle(dmux->dev);
+		}
 		bam_dmux_pc_ack(dmux);
 	}
 
