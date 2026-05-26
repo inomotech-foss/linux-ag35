@@ -25,6 +25,19 @@
 	chosen {
 		stdout-path = "serial0:115200n8";
 	};
+
+	/* Fixed 1.8 V rail for eMMC IO (SDC2 vqmmc).
+	 * The physical supply is mdm9607_l13 set to 1.8 V by the
+	 * bootloader / always-on constraint.  Model as fixed so the
+	 * MMC core never attempts 3.3 V → 1.8 V voltage switching. */
+	sdc2_vqmmc_fixed: sdc2-vqmmc-fixed {
+		compatible = "regulator-fixed";
+		regulator-name = "sdc2_vqmmc_1p8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
 };
 
 /* BLSP1 UART2 (gpio4/5): debug console */
@@ -69,13 +82,20 @@
  * bimc & pcnoc interconnect providers are disabled (driver bugs), so
  * sdhci-msm gets stuck in deferred probe on dev_pm_opp_of_find_icc_paths.
  * Delete those properties to let the controller probe without bus scaling.
+ *
+ * The IO rail (vqmmc) is hard-wired at 1.8 V (downstream: vdd-io-always-on
+ * + voltage-level 1800000/1800000).  mdm9607_l13 has a range up to 2.85 V,
+ * so the MMC core tries 2.85 V first, which the 1.8 V-only eMMC ignores.
+ * Use a fixed-voltage regulator to prevent voltage switching attempts.
  */
 &sdhc_2 {
-	vqmmc-supply = <&mdm9607_l13>;
+	vqmmc-supply = <&sdc2_vqmmc_fixed>;
 	bus-width = <4>;
 	non-removable;
 	no-sd;
 	no-sdio;
+	mmc-hs200-1_8v;
+	mmc-ddr-1_8v;
 	status = "okay";
 
 	/delete-property/ interconnects;
