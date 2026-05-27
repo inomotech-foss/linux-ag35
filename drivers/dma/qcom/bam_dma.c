@@ -494,7 +494,7 @@ static void bam_reset(struct bam_device *bdev)
 		val |= BAM_IRQ_MSK;
 		writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-		dev_info(bdev->dev,
+		dev_dbg(bdev->dev,
 			"bam_hw: powered_remotely reset ee=%u BAM_CTRL=0x%08x->0x%08x BAM_CNFG_BITS=0x%08x DESC_CNT_TRSHLD=0x%08x BAM_IRQ_EN=0x%08x IRQ_SRCS_MSK_EE=0x%08x REVISION=0x%08x NUM_PIPES=0x%08x\n",
 			bdev->ee, ctrl_pre, ctrl_post,
 			readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
@@ -685,7 +685,7 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	bchan->initialized = 1;
 
-	dev_info(bdev->dev,
+	dev_dbg(bdev->dev,
 		"bam_hw: pipe %u init: dir=%d cmd=%d P_CTRL=0x%x P_FIFO_SIZES=0x%x "
 		"P_DESC_FIFO_ADDR=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
 		"IRQ_SRCS_MSK=0x%x P_IRQ_STTS=0x%x\n",
