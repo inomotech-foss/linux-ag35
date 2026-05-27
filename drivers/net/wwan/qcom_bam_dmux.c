@@ -270,7 +270,7 @@ static void bam_dmux_inject_tx_callback(void *data)
 		bam_dmux_tx_wake_queues(dmux);
 	spin_unlock_irqrestore(&dmux->tx_lock, flags);
 
-	dev_info(dmux->dev, "inject_tx: CMD_OPEN delivered to modem\n");
+	dev_dbg(dmux->dev, "inject_tx: CMD_OPEN delivered to modem\n");
 	dev_consume_skb_any(skb);
 }
 
@@ -343,7 +343,7 @@ static int bam_dmux_inject_cmd_open(struct bam_dmux *dmux, u8 ch)
 	desc->cookie = dmaengine_submit(desc);
 	dma_async_issue_pending(dmux->tx);
 
-	dev_info(dmux->dev, "inject_cmd_open: submitted CMD_OPEN for ch %u\n", ch);
+	dev_dbg(dmux->dev, "inject_cmd_open: submitted CMD_OPEN for ch %u\n", ch);
 	return 0;
 
 fail:
@@ -385,7 +385,7 @@ static ssize_t bam_dmux_dbg_inject_open_write(struct file *file,
 		return -ENETDOWN;
 	}
 
-	dev_info(dmux->dev, "dbg inject_open: userspace requested ch %u\n", ch);
+	dev_dbg(dmux->dev, "dbg inject_open: userspace requested ch %u\n", ch);
 	ret = bam_dmux_inject_cmd_open(dmux, (u8)ch);
 	return ret ? ret : len;
 }
@@ -507,6 +507,7 @@ static netdev_tx_t bam_dmux_netdev_start_xmit(struct sk_buff *skb,
 	struct bam_dmux_netdev *bndev = netdev_priv(netdev);
 	struct bam_dmux *dmux = bndev->dmux;
 	struct bam_dmux_skb_dma *skb_dma;
+	unsigned int tx_bytes = skb->len;
 	int active, ret;
 
 	skb_dma = bam_dmux_tx_queue(dmux, skb);
@@ -529,6 +530,7 @@ static netdev_tx_t bam_dmux_netdev_start_xmit(struct sk_buff *skb,
 		if (!atomic_long_fetch_or(BIT(skb_dma - dmux->tx_skbs),
 					  &dmux->tx_deferred_skb))
 			queue_pm_work(&dmux->tx_wakeup_work);
+		dev_sw_netstats_tx_add(netdev, 1, tx_bytes);
 		return NETDEV_TX_OK;
 	}
 
@@ -536,11 +538,13 @@ static netdev_tx_t bam_dmux_netdev_start_xmit(struct sk_buff *skb,
 		goto drop;
 
 	dma_async_issue_pending(dmux->tx);
+	dev_sw_netstats_tx_add(netdev, 1, tx_bytes);
 	return NETDEV_TX_OK;
 
 drop:
 	bam_dmux_tx_done(skb_dma);
 	dev_kfree_skb_any(skb);
+	netdev->stats.tx_dropped++;
 	return NETDEV_TX_OK;
 }
 
@@ -593,6 +597,7 @@ static void bam_dmux_netdev_setup(struct net_device *dev)
 	dev->needed_headroom = sizeof(struct bam_dmux_hdr);
 	dev->needed_tailroom = sizeof(u32); /* word-aligned */
 	dev->tx_queue_len = DEFAULT_TX_QUEUE_LEN;
+	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
 
 	/* This perm addr will be used as interface identifier by IPv6 */
 	dev->addr_assign_type = NET_ADDR_RANDOM;
@@ -705,6 +710,7 @@ static void bam_dmux_cmd_data(struct bam_dmux_skb_dma *skb_dma)
 		break;
 	}
 
+	dev_sw_netstats_rx_add(netdev, hdr->len);
 	netif_receive_skb(skb);
 }
 
