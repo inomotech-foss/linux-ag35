@@ -604,39 +604,50 @@ static void bam_dmux_netdev_setup(struct net_device *dev)
 	eth_random_addr(dev->perm_addr);
 }
 
+static int bam_dmux_register_netdev(struct bam_dmux *dmux, u8 ch)
+{
+	struct bam_dmux_netdev *bndev;
+	struct net_device *netdev;
+	int ret;
+
+	if (dmux->netdevs[ch])
+		return 0;
+
+	netdev = alloc_netdev(sizeof(*bndev), "wwan%d", NET_NAME_ENUM,
+			      bam_dmux_netdev_setup);
+	if (!netdev)
+		return -ENOMEM;
+
+	SET_NETDEV_DEV(netdev, dmux->dev);
+	netdev->dev_port = ch;
+
+	bndev = netdev_priv(netdev);
+	bndev->dmux = dmux;
+	bndev->ch = ch;
+
+	ret = register_netdev(netdev);
+	if (ret) {
+		dev_err(dmux->dev, "Failed to register netdev for channel %u: %d\n",
+			ch, ret);
+		free_netdev(netdev);
+		return ret;
+	}
+
+	/* Start detached until modem opens the channel */
+	netif_carrier_off(netdev);
+	netif_device_detach(netdev);
+
+	dmux->netdevs[ch] = netdev;
+	return 0;
+}
+
 static void bam_dmux_register_netdev_work(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux, register_netdev_work);
-	struct bam_dmux_netdev *bndev;
-	struct net_device *netdev;
-	int ch, ret;
+	int ch;
 
-	for_each_set_bit(ch, dmux->remote_channels, BAM_DMUX_NUM_CH) {
-		if (dmux->netdevs[ch])
-			continue;
-
-		netdev = alloc_netdev(sizeof(*bndev), "wwan%d", NET_NAME_ENUM,
-				      bam_dmux_netdev_setup);
-		if (!netdev)
-			return;
-
-		SET_NETDEV_DEV(netdev, dmux->dev);
-		netdev->dev_port = ch;
-
-		bndev = netdev_priv(netdev);
-		bndev->dmux = dmux;
-		bndev->ch = ch;
-
-		ret = register_netdev(netdev);
-		if (ret) {
-			dev_err(dmux->dev, "Failed to register netdev for channel %u: %d\n",
-				ch, ret);
-			free_netdev(netdev);
-			return;
-		}
-
-		dmux->netdevs[ch] = netdev;
-	}
+	for_each_set_bit(ch, dmux->remote_channels, BAM_DMUX_NUM_CH)
+		bam_dmux_register_netdev(dmux, ch);
 }
 
 static void bam_dmux_rx_callback(void *data);
@@ -727,6 +738,7 @@ static void bam_dmux_cmd_open(struct bam_dmux *dmux, struct bam_dmux_hdr *hdr)
 
 	if (netdev) {
 		netif_device_attach(netdev);
+		netif_carrier_on(netdev);
 	} else {
 		/* Cannot sleep here, schedule work to register the netdev */
 		schedule_work(&dmux->register_netdev_work);
@@ -744,8 +756,10 @@ static void bam_dmux_cmd_close(struct bam_dmux *dmux, struct bam_dmux_hdr *hdr)
 		return;
 	}
 
-	if (netdev)
+	if (netdev) {
+		netif_carrier_off(netdev);
 		netif_device_detach(netdev);
+	}
 }
 
 static void bam_dmux_rx_callback(void *data)
@@ -1056,6 +1070,14 @@ static int bam_dmux_probe(struct platform_device *pdev)
 		dmux->rx_skbs[i].dmux = dmux;
 		dmux->tx_skbs[i].dmux = dmux;
 	}
+
+	/* Pre-register channel 0 netdev so userspace (e.g. ModemManager)
+	 * can discover the data interface at probe time.  It starts with
+	 * carrier off and device-detached until the modem opens the channel.
+	 */
+	ret = bam_dmux_register_netdev(dmux, BAM_DMUX_CH_DATA_0);
+	if (ret)
+		return ret;
 
 	/* Runtime PM manages our own power vote.
 	 * Note that the RX path may be active even if we are runtime suspended,
