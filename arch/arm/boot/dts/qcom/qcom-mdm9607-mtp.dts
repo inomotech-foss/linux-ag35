@@ -117,6 +117,7 @@
 	no-sdio;
 	mmc-hs200-1_8v;
 	mmc-ddr-1_8v;
+	post-power-on-delay-ms = <200>;
 	status = "okay";
 
 	/delete-property/ interconnects;
