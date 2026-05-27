@@ -873,17 +873,14 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 			 * Modem-initiated power-up: the MDM9607 modem firmware
 			 * raises pc to ask apps to bring BAM up, but if apps
 			 * does not also assert its own pc vote, the modem
-			 * powers BAM down again after a grace period (~70 s)
-			 * before it ever sends the initial CMD_OPEN.
-			 *
-			 * Assert our pc vote so the modem keeps BAM up long
-			 * enough to complete the open handshake.  Also bump
-			 * the runtime PM usage count so the 1-second
-			 * autosuspend timer does NOT immediately clear our
-			 * vote via bam_dmux_runtime_suspend().  The vote is
-			 * cleared in the down path below.
+			 * powers BAM down again before it ever sends the
+			 * initial CMD_OPEN.  Assert our pc vote so the modem
+			 * keeps BAM up long enough to complete the open
+			 * handshake.  The vote is cleared in the down path
+			 * below when the modem releases its bit.  Runtime PM
+			 * does not manage the vote in modem-driven mode; see
+			 * bam_dmux_runtime_{suspend,resume}().
 			 */
-			pm_runtime_get_noresume(dmux->dev);
 			bam_dmux_pc_vote(dmux, true);
 			/*
 			 * Kick the modem: send a proactive CMD_OPEN for
@@ -902,10 +899,7 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 		}
 	} else {
 		bam_dmux_power_off(dmux);
-		if (dmux->pc_state) {
-			bam_dmux_pc_vote(dmux, false);
-			pm_runtime_put_noidle(dmux->dev);
-		}
+		bam_dmux_pc_vote(dmux, false);
 		bam_dmux_pc_ack(dmux);
 	}
 
@@ -925,13 +919,19 @@ static irqreturn_t bam_dmux_pc_ack_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * MDM9607 runs in modem-driven mode (the modem firmware owns the A2
+ * power state machine).  The pc vote is asserted/cleared exclusively
+ * by bam_dmux_pc_irq() in response to modem-initiated transitions;
+ * letting the kernel's runtime PM core toggle the vote on its own
+ * autosuspend schedule races against the modem's handshake and leaves
+ * BAM in inconsistent states.  Keep the callbacks as inert hooks so
+ * pm_runtime_get_sync()/pm_runtime_put_autosuspend() in the TX path
+ * keep working without touching the pc vote.  DMA channels are
+ * requested in bam_dmux_power_on() rather than here.
+ */
 static int bam_dmux_runtime_suspend(struct device *dev)
 {
-	struct bam_dmux *dmux = dev_get_drvdata(dev);
-
-	dev_dbg(dev, "runtime suspend\n");
-	bam_dmux_pc_vote(dmux, false);
-
 	return 0;
 }
 
@@ -939,49 +939,8 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 {
 	struct bam_dmux *dmux = dev_get_drvdata(dev);
 
-	dev_dbg(dev, "runtime resume\n");
-
-	/* Wait until previous power down was acked */
-	if (!wait_for_completion_timeout(&dmux->pc_ack_completion,
-					 BAM_DMUX_REMOTE_TIMEOUT))
-		return -ETIMEDOUT;
-
-	/* Vote for power state */
-	bam_dmux_pc_vote(dmux, true);
-
-	/* Wait for ack */
-	if (!wait_for_completion_timeout(&dmux->pc_ack_completion,
-					 BAM_DMUX_REMOTE_TIMEOUT)) {
-		bam_dmux_pc_vote(dmux, false);
-		return -ETIMEDOUT;
-	}
-
-	/* Wait until we're up */
-	if (!wait_event_timeout(dmux->pc_wait, dmux->pc_state,
-				BAM_DMUX_REMOTE_TIMEOUT)) {
-		bam_dmux_pc_vote(dmux, false);
-		return -ETIMEDOUT;
-	}
-
-	/* Ensure that we actually initialized successfully */
-	if (!dmux->rx) {
-		bam_dmux_pc_vote(dmux, false);
-		return -ENXIO;
-	}
-
-	/* Request TX channel if necessary */
-	if (dmux->tx)
-		return 0;
-
-	dmux->tx = dma_request_chan(dev, "tx");
-	if (IS_ERR(dmux->tx)) {
-		dev_err(dev, "Failed to request TX DMA channel: %pe\n", dmux->tx);
-		dmux->tx = NULL;
-		bam_dmux_runtime_suspend(dev);
-		return -ENXIO;
-	}
-
-	return 0;
+	/* TX path needs BAM up; only succeed if pc is currently asserted. */
+	return dmux->pc_state ? 0 : -EAGAIN;
 }
 
 /**
