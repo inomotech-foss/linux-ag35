@@ -1,0 +1,265 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * MDM9607 MTP board - used as the base for Quectel AG35 module
+ * Copyright (c) 2015, The Linux Foundation. All rights reserved.
+ */
+/dts-v1/;
+
+#include "qcom-mdm9607.dtsi"
+#include "qcom-pm8019.dtsi"
+#include "qcom-mdm9607-regulators.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+
+/ {
+	model = "Qualcomm Technologies, Inc. MDM9607 MTP";
+	compatible = "qcom,mdm9607-mtp", "qcom,mdm9607";
+	qcom,msm-id = <290 0x10000>, <296 0x10000>, <297 0x10000>,
+		      <298 0x10000>, <299 0x10000>;
+	qcom,board-id = <8 0>;
+
+	aliases {
+		serial0 = &blsp1_uart2;
+		mmc0 = &sdhc_2;	/* eMMC */
+		mmc1 = &sdhc_1;	/* FC20/QCA6174 WiFi SDIO */
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	/* Fixed 1.8 V rail for eMMC IO (SDC2 vqmmc).
+	 * The physical supply is mdm9607_l13 set to 1.8 V by the
+	 * bootloader / always-on constraint.  Model as fixed so the
+	 * MMC core never attempts 3.3 V → 1.8 V voltage switching.
+	 * vin-supply keeps l13 enabled (prevents regulator framework
+	 * from disabling the unused PMIC LDO). */
+	sdc2_vqmmc_fixed: sdc2-vqmmc-fixed {
+		compatible = "regulator-fixed";
+		regulator-name = "sdc2_vqmmc_1p8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		vin-supply = <&mdm9607_l13>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/* Fixed ~2.95 V rail for eMMC card power (SDC2 vmmc).
+	 * On the AG35 EVB the eMMC VCC is always-on from a board-level
+	 * LDO (downstream comments out vdd-supply entirely and uses
+	 * qcom,vdd-voltage-level = <2850000 2850000>).
+	 * Model as a fixed regulator so mmc_regulator_get_ocrmask()
+	 * returns a valid OCR (MMC_VDD_29_30).  Without this, the SDHCI
+	 * caps register may not report VDD support after controller reset,
+	 * leaving ocr_avail=0 and preventing any power-up/CMD1 sequence. */
+	sdc2_vmmc_fixed: sdc2-vmmc-fixed {
+		compatible = "regulator-fixed";
+		regulator-name = "sdc2_vmmc_2p95";
+		regulator-min-microvolt = <2950000>;
+		regulator-max-microvolt = <2950000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/*
+	 * Main VBAT enable for the FC20 (QCA6174) WiFi+BT module on the
+	 * LTE OPEN EVB.  PM8019 GPIO 2 gates the board-level rail that
+	 * powers the entire FC20 module.  Modeled as a regulator-fixed
+	 * so MMC core (vmmc-supply) drives it on/off via the gpio.
+	 * Default off: WiFi is enabled by user action (rfkill / mmc
+	 * power-cycle).  When disabled the FC20 is completely unpowered,
+	 * for system-idle current targets near the PMIC quiescent floor.
+	 *
+	 * EVB requires switch S0201 set RIGHT to route SDC1 to FC20.
+	 * Note: PM8019 GPIO 2 = BT_EN (separate); GPIO 3 = WiFi power.
+	 */
+	wifi_pwr_reg: regulator-wifi-pwr {
+		compatible = "regulator-fixed";
+		regulator-name = "wifi_vbat";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&pm8019_gpios 3 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <70000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_pwr_en_default>;
+	};
+
+	/*
+	 * MMC power sequencer for QCA6174 SDIO.
+	 * WLAN_EN (TLMM gpio54) is asserted after vmmc rises so the chip
+	 * comes out of reset only once supplies are stable.
+	 */
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&tlmm 54 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&sdc1_wlan_gpio_active>;
+		post-power-on-delay-ms = <20>;
+	};
+};
+
+/* BLSP1 UART2 (gpio4/5): debug console */
+&blsp1_uart2 {
+	status = "okay";
+};
+
+/*
+ * ===== DIAGNOSTIC: everything below disabled to isolate reset cause =====
+ * If boot progresses past ~2.8s, one of these devices causes the reset.
+ * Re-enable them one by one to find the culprit.
+ */
+
+/* BLSP1 UART3 (gpio0/1/2/3): modem AT command port */
+/* &blsp1_uart3 { status = "okay"; }; */
+
+/* Modem remoteproc - loads and manages modem firmware */
+&remoteproc_mss {
+	status = "okay";
+};
+
+/* BAM-DMUX: modem data path (modem is pre-loaded by SBL1) */
+&bam_dmux_dma { status = "okay"; };
+&bam_dmux { status = "okay"; };
+
+/* &blsp1_i2c2 { status = "okay"; }; */
+/* &blsp1_i2c4 { status = "okay"; }; */
+/* &blsp1_spi6 { status = "okay"; }; */
+
+/* eMMC on SDCC1 */
+/* &sdhc_1 { status = "okay"; ... }; */
+
+/* eMMC on SDCC2 (LTE OPEN EVB: Micron MTFC4GACAJCN-4M, S0701 -> right)
+ *
+ * Downstream (mdm9607-mtp.dtsi) wires SDC2 as follows:
+ *   vdd-io  = mdm9607_l13 @ 1.8 V, always-on
+ *   qcom,nonhotplug (= non-removable)
+ *   bus-width 4, no vmmc (eMMC chip power is board-level LDO)
+ *   bus scaling via qcom,msm-bus (proprietary, not mainline interconnect)
+ *
+ * The mainline dtsi adds interconnects/OPP/power-domains, but the
+ * bimc & pcnoc interconnect providers are disabled (driver bugs), so
+ * sdhci-msm gets stuck in deferred probe on dev_pm_opp_of_find_icc_paths.
+ * Delete those properties to let the controller probe without bus scaling.
+ *
+ * The IO rail (vqmmc) is hard-wired at 1.8 V (downstream: vdd-io-always-on
+ * + voltage-level 1800000/1800000).  mdm9607_l13 has a range up to 2.85 V,
+ * so the MMC core tries 2.85 V first, which the 1.8 V-only eMMC ignores.
+ * Use a fixed-voltage regulator to prevent voltage switching attempts.
+ */
+&sdhc_2 {
+	vmmc-supply = <&sdc2_vmmc_fixed>;
+	vqmmc-supply = <&sdc2_vqmmc_fixed>;
+	bus-width = <4>;
+	non-removable;
+	no-sd;
+	no-sdio;
+	mmc-hs200-1_8v;
+	mmc-ddr-1_8v;
+	post-power-on-delay-ms = <200>;
+	status = "okay";
+
+	/delete-property/ interconnects;
+	/delete-property/ operating-points-v2;
+	/delete-property/ power-domains;
+};
+
+/* USB HS in peripheral mode (ChipIdea UDC + 28nm SNPS Femto PHY)
+ *
+ * Regulator supplies follow downstream AG35EVD wiring:
+ *   hsusb_vdd_dig -> mdm9607_l9 (1.2 V digital core)
+ *   HSUSB_1p8     -> mdm9607_l2 (1.8 V analog)
+ *   HSUSB_3p3     -> mdm9607_l4 (3.075 V analog)
+ */
+&usb_hs_phy {
+	vdd-supply = <&mdm9607_l9>;
+	vdda1p8-supply = <&mdm9607_l2>;
+	vdda3p3-supply = <&mdm9607_l4>;
+	status = "okay";
+};
+
+/*
+ * USB HS ChipIdea controller (peripheral mode).
+ *
+ * The earlier "boot freeze when &usb was enabled" was a red herring: the
+ * real cause was an unrelated rpmsg_tty NULL-deref race (fixed in
+ * drivers/tty/rpmsg_tty.c).  With that fixed, enable the controller.
+ */
+&usb {
+	status = "okay";
+};
+
+/* QPIC NAND */
+&qpic_bam { status = "okay"; };
+&qpic_nand { status = "okay"; };
+
+/* &pm8019_mpps { ... }; */
+
+/*
+ * PM8019 GPIO 3 = "PM_ENABLE_WIFI": gates the board-level VBAT rail to
+ * the FC20 (QCA6174) WiFi+BT module.  Configured as a normal output,
+ * VPH_PWR source, default low so WiFi is OFF at boot (downstream does
+ * the same: "do not active PM_ENABLE_WIFI when bootup time").  The
+ * wifi_pwr_reg regulator-fixed in / drives it via gpiolib.
+ */
+&pm8019_gpios {
+	wifi_pwr_en_default: wifi-pwr-en-default {
+		pins = "gpio3";
+		function = "normal";
+		bias-disable;
+		drive-push-pull;
+		power-source = <3>;	/* VPH_PWR */
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_HIGH>;
+		output-low;
+	};
+};
+
+/*
+ * SDCC1 = SDIO host for FC20 (QCA6174 / AR6320) WiFi.
+ *
+ * Power topology:
+ *   vmmc (FC20 VBAT)  -> wifi_pwr_reg  -> PM8019 GPIO 3
+ *   vqmmc (SDIO 1.8V) -> mdm9607_l11   (always-on PMIC LDO)
+ *   mmc-pwrseq        -> WLAN_EN (TLMM gpio54) released after vmmc
+ *
+ * The interconnect / OPP / power-domain properties from the dtsi are
+ * deleted (same workaround as sdhc_2): the bimc & pcnoc interconnect
+ * providers are disabled, so dev_pm_opp_of_find_icc_paths returns
+ * -EPROBE_DEFER forever and the host never probes.
+ *
+ * cap-power-off-card lets the MMC core fully power off the SDIO card
+ * (vmmc disable) when the wifi driver is unbound, dropping the FC20
+ * to ~0 mA.
+ */
+&sdhc_1 {
+	vmmc-supply = <&wifi_pwr_reg>;
+	vqmmc-supply = <&mdm9607_l11>;
+	mmc-pwrseq = <&wifi_pwrseq>;
+
+	bus-width = <4>;
+	non-removable;
+	cap-power-off-card;
+	keep-power-in-suspend;
+	wakeup-source;
+
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&sdhci1_pins_active &wlan_wake_default>;
+	pinctrl-1 = <&sdhci1_pins_sleep  &wlan_wake_default>;
+
+	status = "okay";
+
+	/delete-property/ interconnects;
+	/delete-property/ operating-points-v2;
+	/delete-property/ power-domains;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	wifi@1 {
+		compatible = "qcom,ath10k";
+		reg = <1>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <59 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "wow";
+	};
+};
