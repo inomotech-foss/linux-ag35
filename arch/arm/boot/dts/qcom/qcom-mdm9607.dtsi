@@ -244,6 +244,13 @@
 			qcom,smd-edge = <0>;
 			qcom,remote-pid = <1>;
 			label = "modem";
+
+			/*
+			 * Allow incoming QMI traffic from the modem (e.g.
+			 * WMS SMS indications) to wake the AP from system
+			 * suspend.
+			 */
+			wakeup-source;
 		};
 	};
 

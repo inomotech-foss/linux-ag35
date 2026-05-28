@@ -1436,6 +1436,15 @@ static int qcom_smd_parse_edge(struct device *dev,
 
 	edge->irq = irq;
 
+	if (of_property_read_bool(node, "wakeup-source")) {
+		ret = enable_irq_wake(irq);
+		if (ret)
+			dev_warn(dev, "failed to enable wake for irq %d: %d\n",
+				 irq, ret);
+		else
+			device_set_wakeup_capable(dev, true);
+	}
+
 	return 0;
 
 put_node:
