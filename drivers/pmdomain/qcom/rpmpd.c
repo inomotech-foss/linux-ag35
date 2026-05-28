@@ -163,7 +163,7 @@ static struct rpmpd cx_s2a_lvl_ao = {
 
 static struct rpmpd cx_s3a_lvl_ao;
 static struct rpmpd cx_s3a_lvl = {
-	.pd = { .name = "cx", },
+	.pd = { .name = "cx", .flags = GENPD_FLAG_ALWAYS_ON, },
 	.peer = &cx_s3a_lvl_ao,
 	.res_type = RPMPD_SMPA,
 	.res_id = 3,
@@ -375,7 +375,7 @@ static struct rpmpd mx_l3a_lvl_ao = {
 
 static struct rpmpd mx_l12a_lvl_ao;
 static struct rpmpd mx_l12a_lvl = {
-	.pd = { .name = "mx", },
+	.pd = { .name = "mx", .flags = GENPD_FLAG_ALWAYS_ON, },
 	.peer = &mx_l12a_lvl_ao,
 	.res_type = RPMPD_LDOA,
 	.res_id = 12,
@@ -1142,10 +1142,17 @@ static void rpmpd_sync_state(struct device *dev)
 	struct rpmpd **rpmpds = desc->rpmpds;
 	struct rpmpd *pd;
 	unsigned int i;
-	int ret;
 
-	of_genpd_sync_state(dev->of_node);
-
+	/*
+	 * Do NOT call of_genpd_sync_state() or send corner=0.
+	 * On MDM9607, all rpmpd consumers (modem, sdhc) may be disabled
+	 * during bringup.  sync_state would send KEY_LEVEL=0 / swen=0
+	 * for VDDCX (SMPA3) and VDDMX (LDOA12), causing the RPM to
+	 * shut down the SoC power rails → UVLO reset.
+	 *
+	 * Still mark domains as synced so they can be properly managed
+	 * when consumers are eventually enabled.
+	 */
 	mutex_lock(&rpmpd_lock);
 	for (i = 0; i < desc->num_pds; i++) {
 		pd = rpmpds[i];
@@ -1153,13 +1160,6 @@ static void rpmpd_sync_state(struct device *dev)
 			continue;
 
 		pd->state_synced = true;
-
-		if (!pd->enabled)
-			pd->corner = 0;
-
-		ret = rpmpd_aggregate_corner(pd);
-		if (ret)
-			dev_err(dev, "failed to sync %s: %d\n", pd->pd.name, ret);
 	}
 	mutex_unlock(&rpmpd_lock);
 }

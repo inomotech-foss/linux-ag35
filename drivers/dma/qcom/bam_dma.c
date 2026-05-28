@@ -28,6 +28,7 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
+#include <linux/delay.h>
 #include <linux/dmaengine.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -40,6 +41,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/hrtimer.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 
@@ -59,6 +61,8 @@ struct bam_desc_hw {
 #define DESC_FLAG_EOB BIT(13)
 #define DESC_FLAG_NWD BIT(12)
 #define DESC_FLAG_CMD BIT(11)
+#define DESC_FLAG_LOCK BIT(10)
+#define DESC_FLAG_UNLOCK BIT(9)
 
 struct bam_async_desc {
 	struct virt_dma_desc vd;
@@ -339,9 +343,20 @@ static const struct reg_offset_data bam_v1_7_reg_info[] = {
 /* BAM_P_SW_OFSTS */
 #define P_SW_OFSTS_MASK		0xffff
 
-#define BAM_DESC_FIFO_SIZE	SZ_32K
+/*
+ * Downstream Qualcomm SPS uses (SPS_MAX_DESC_NUM + 1) * 8 = 65 * 8 = 520
+ * bytes for the descriptor FIFO.  Using a larger FIFO (e.g. SZ_32K) causes
+ * AHB bus lockup on controlled-remotely BAMs like QPIC when multiple pipes
+ * are active simultaneously.
+ *
+ * IMPORTANT: The size MUST be a power of 2 because the driver uses
+ * CIRC_CNT/CIRC_SPACE macros from circ_buf.h which use bitwise AND
+ * with (size-1).  512 bytes = 64 descriptors (63 usable + 1 empty
+ * slot for circular buffer management).
+ */
+#define BAM_DESC_FIFO_SIZE	SZ_512
 #define MAX_DESCRIPTORS (BAM_DESC_FIFO_SIZE / sizeof(struct bam_desc_hw) - 1)
-#define BAM_FIFO_SIZE	(SZ_32K - 8)
+#define BAM_MAX_DATA_SIZE	(SZ_32K - 8)
 #define IS_BUSY(chan)	(CIRC_SPACE(bchan->tail, bchan->head,\
 			 MAX_DESCRIPTORS + 1) == 0)
 
@@ -367,6 +382,11 @@ struct bam_chan {
 	unsigned int initialized;	/* is the channel hw initialized? */
 	unsigned int paused;		/* is the channel paused? */
 	unsigned int reconfigure;	/* new slave config? */
+
+	/* last known DMA direction (set by bam_prep_slave_sg) */
+	enum dma_transfer_direction last_dir;
+	bool dir_known;
+
 	/* list of descriptors currently processed */
 	struct list_head desc_list;
 
@@ -399,6 +419,11 @@ struct bam_device {
 
 	/* dma start transaction tasklet */
 	struct tasklet_struct task;
+
+	/* polling mode for controlled-remotely BAMs */
+	bool polling;
+	struct hrtimer poll_timer;
+	atomic_t poll_timer_active;
 };
 
 /**
@@ -426,9 +451,65 @@ static void bam_reset(struct bam_device *bdev)
 {
 	u32 val;
 
+	if (bdev->powered_remotely) {
+		u32 ctrl_pre, ctrl_post;
+
+		/*
+		 * Remote-powered BAM: the modem turns on/off A2 power but
+		 * downstream MDM9607 SPS uses MGR_LOCAL (sps_bam.c:bam_init),
+		 * meaning APPS still programs all the BAM global config
+		 * registers.  The only thing we MUST avoid is BAM_SW_RST,
+		 * because that wipes pipe state that the modem may have
+		 * already programmed for its peripheral-side pipes when A2
+		 * was powered up.
+		 *
+		 * Match the normal path register-by-register, just skip the
+		 * SW_RST step.  Without these writes, BAM_CNFG_BITS stays 0
+		 * (BAM_PIPE_CNFG=0 disables per-pipe config), DESC_CNT_TRSHLD
+		 * is whatever the modem left, and BAM_IRQ_EN is 0 (no error
+		 * IRQs).  Captures with the previous skip-everything code
+		 * showed the modem latching P5 P_IRQ_STTS WAKE but never
+		 * pushing data, consistent with the BAM not being properly
+		 * configured by APPS.
+		 */
+		ctrl_pre = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
+		val = ctrl_pre | BAM_EN;
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
+		ctrl_post = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
+
+		/* set descriptor threshold, start with 4 bytes */
+		writel_relaxed(DEFAULT_CNT_THRSHLD,
+				bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD));
+
+		/* Enable default set of h/w workarounds */
+		writel_relaxed(BAM_CNFG_BITS_DEFAULT,
+				bam_addr(bdev, 0, BAM_CNFG_BITS));
+
+		/* enable irqs for errors */
+		writel_relaxed(BAM_ERROR_EN | BAM_HRESP_ERR_EN,
+				bam_addr(bdev, 0, BAM_IRQ_EN));
+
+		/* unmask our EE's global bam interrupt */
+		val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		val |= BAM_IRQ_MSK;
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+
+		dev_dbg(bdev->dev,
+			"bam_hw: powered_remotely reset ee=%u BAM_CTRL=0x%08x->0x%08x BAM_CNFG_BITS=0x%08x DESC_CNT_TRSHLD=0x%08x BAM_IRQ_EN=0x%08x IRQ_SRCS_MSK_EE=0x%08x REVISION=0x%08x NUM_PIPES=0x%08x\n",
+			bdev->ee, ctrl_pre, ctrl_post,
+			readl_relaxed(bam_addr(bdev, 0, BAM_CNFG_BITS)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_DESC_CNT_TRSHLD)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_EN)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_REVISION)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_NUM_PIPES)));
+		return;
+	}
+
+	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
+
 	/* s/w reset bam */
 	/* after reset all pipes are disabled and idle */
-	val = readl_relaxed(bam_addr(bdev, 0, BAM_CTRL));
 	val |= BAM_SW_RST;
 	writel_relaxed(val, bam_addr(bdev, 0, BAM_CTRL));
 	val &= ~BAM_SW_RST;
@@ -468,12 +549,13 @@ static void bam_reset_channel(struct bam_chan *bchan)
 
 	lockdep_assert_held(&bchan->vc.lock);
 
-	/* reset channel */
-	writel_relaxed(1, bam_addr(bdev, bchan->id, BAM_P_RST));
-	writel_relaxed(0, bam_addr(bdev, bchan->id, BAM_P_RST));
-
-	/* don't allow cpu to reorder BAM register accesses done after this */
-	wmb();
+	/*
+	 * Reset channel.  Use writel() (ordered) to match downstream
+	 * iowrite32 semantics — ensures the reset assert/deassert
+	 * sequence completes at the BAM before subsequent register writes.
+	 */
+	writel(1, bam_addr(bdev, bchan->id, BAM_P_RST));
+	writel(0, bam_addr(bdev, bchan->id, BAM_P_RST));
 
 	/* make sure hw is initialized when channel is used the first time  */
 	bchan->initialized = 0;
@@ -483,11 +565,23 @@ static void bam_reset_channel(struct bam_chan *bchan)
  * bam_chan_init_hw - Initialize channel hardware
  * @bchan: bam channel
  * @dir: DMA transfer direction
+ * @is_cmd_pipe: true if this pipe carries BAM command descriptors
  *
- * This function resets and initializes the BAM channel
+ * This function resets and initializes the BAM channel.
+ *
+ * Downstream Qualcomm SPS driver initializes all pipes eagerly at
+ * sps_connect() time, well before any DMA operations.  It also uses
+ * iowrite32 (= writel on ARM, with implicit __iowmb barrier) for ALL
+ * register writes.  We match both behaviors here:
+ *  - Use writel() (ordered) instead of writel_relaxed() for pipe
+ *    register writes, matching downstream's iowrite32 semantics.
+ *  - This function can be called from bam_prep_slave_sg() (early
+ *    init path) to initialize pipes before any doorbell is written,
+ *    avoiding the problematic pattern where pipe N is reset while
+ *    pipe M has an active DMA session.
  */
 static void bam_chan_init_hw(struct bam_chan *bchan,
-	enum dma_transfer_direction dir)
+	enum dma_transfer_direction dir, bool is_cmd_pipe)
 {
 	struct bam_device *bdev = bchan->bdev;
 	u32 val;
@@ -497,37 +591,163 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
 
 	/*
 	 * write out 8 byte aligned address.  We have enough space for this
-	 * because we allocated 1 more descriptor (8 bytes) than we can use
+	 * because we allocated 1 more descriptor (8 bytes) than we can use.
+	 *
+	 * Use writel() (ordered writes) to match downstream iowrite32
+	 * semantics.  The implicit dsb(st) barrier in writel() ensures
+	 * each register write completes at the BAM before the next one
+	 * is issued.  writel_relaxed() could allow the CPU write buffer
+	 * to reorder or coalesce these writes.
 	 */
-	writel_relaxed(ALIGN(bchan->fifo_phys, sizeof(struct bam_desc_hw)),
+	writel(ALIGN(bchan->fifo_phys, sizeof(struct bam_desc_hw)),
 			bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR));
-	writel_relaxed(BAM_FIFO_SIZE,
+	writel(BAM_DESC_FIFO_SIZE,
 			bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES));
 
-	/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
-	writel_relaxed(P_DEFAULT_IRQS_EN,
-			bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	/* Explicitly set event threshold to 0 (generate event per descriptor) */
+	writel(0, bam_addr(bdev, bchan->id, BAM_P_EVNT_GEN_TRSHLD));
 
-	/* unmask the specific pipe and EE combo */
+	if (bdev->polling) {
+		/*
+		 * Downstream SPS sets P_IRQ_EN to the ACTUAL mask even
+		 * for polling pipes (step 15a in bam_pipe_set_irq),
+		 * then clears IRQ_SRCS_MSK_EE to prevent interrupt
+		 * delivery.  Match this exactly — the BAM hardware
+		 * may behave differently when P_IRQ_EN=0 vs non-zero.
+		 */
+		writel(P_DEFAULT_IRQS_EN,
+				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	} else {
+		/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
+		writel(P_DEFAULT_IRQS_EN,
+				bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
+	}
+
+	/*
+	 * IRQ_SRCS_MSK_EE handling: match the downstream SPS driver.
+	 *
+	 * Downstream bam_pipe_init() unconditionally SETS the pipe's
+	 * bit in IRQ_SRCS_MSK_EE.  Then pipe_set_irq() immediately
+	 * CLEARS it for polling-mode pipes.  The net effect for polling
+	 * pipes: bit CLEARED.  For interrupt-mode: bit SET.
+	 *
+	 * TZ pre-sets IRQ_SRCS_MSK_EE = 0x80000007 (BAM + pipes 0-2).
+	 * The downstream clears all pipe bits since QPIC uses poll mode.
+	 * We match this behavior exactly.
+	 */
 	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-	val |= BIT(bchan->id);
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+	if (bdev->polling) {
+		/*
+		 * Clear ALL pipe bits, not just the current pipe's.
+		 * TZ pre-sets bits for pipes 0-2.  Downstream clears
+		 * all of them (each pipe's pipe_set_irq clears its own).
+		 * We must clear stale bits for pipes we never init
+		 * (e.g. pipe 0/TX) because a set bit with no IRQ
+		 * handler can cause undefined BAM behavior.
+		 */
+		val &= ~((1 << bdev->num_channels) - 1);
+	} else
+		val |= BIT(bchan->id);
+	writel(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
 
-	/* don't allow cpu to reorder the channel enable done below */
-	wmb();
-
-	/* set fixed direction and mode, then enable channel */
-	val = P_EN | P_SYS_MODE;
+	/*
+	 * Use read-modify-write for P_CTRL to preserve any bits that
+	 * TrustZone may have set (e.g. on controlled-remotely BAMs).
+	 * The downstream SPS driver uses individual field RMW writes
+	 * for P_DIRECTION, P_SYS_MODE, P_LOCK_GROUP, and P_EN.
+	 */
+	val = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
+	val |= P_EN | P_SYS_MODE;
 	if (dir == DMA_DEV_TO_MEM)
 		val |= P_DIRECTION;
+	else
+		val &= ~P_DIRECTION;
 
-	writel_relaxed(val, bam_addr(bdev, bchan->id, BAM_P_CTRL));
+	/*
+	 * CMD pipes must be in a separate lock group from data pipes.
+	 * The downstream SPS driver uses lock_group=1 for CMD and 0 for
+	 * data.  Without this, the BAM's internal arbitration can deadlock
+	 * when CMD and data pipes share the same group.
+	 */
+	val &= ~(P_LOCK_GROUP_MASK << P_LOCK_GROUP_SHIFT);
+	if (is_cmd_pipe)
+		val |= 1 << P_LOCK_GROUP_SHIFT;
+
+	writel(val, bam_addr(bdev, bchan->id, BAM_P_CTRL));
+
+	/*
+	 * Read back P_CTRL to ensure the BAM has processed the pipe
+	 * enable before any subsequent register writes (e.g. doorbell).
+	 * This matches downstream behavior where iowrite32's implicit
+	 * barrier ensures completion.
+	 */
+	val = readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL));
 
 	bchan->initialized = 1;
+
+	dev_dbg(bdev->dev,
+		"bam_hw: pipe %u init: dir=%d cmd=%d P_CTRL=0x%x P_FIFO_SIZES=0x%x "
+		"P_DESC_FIFO_ADDR=0x%x P_EVNT_REG=0x%x P_SW_OFSTS=0x%x "
+		"IRQ_SRCS_MSK=0x%x P_IRQ_STTS=0x%x\n",
+		bchan->id, dir, is_cmd_pipe,
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_CTRL)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_FIFO_SIZES)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_EVNT_REG)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_SW_OFSTS)),
+		readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)),
+		readl_relaxed(bam_addr(bdev, bchan->id, BAM_P_IRQ_STTS)));
 
 	/* init FIFO pointers */
 	bchan->head = 0;
 	bchan->tail = 0;
+}
+
+/**
+ * bam_init_peer_pipes - Initialize all allocated but uninitialized peer pipes
+ * @bdev: bam device
+ *
+ * The downstream Qualcomm SPS driver initializes ALL pipes at sps_connect()
+ * time during probe, before any DMA operations.  The QPIC BAM appears to
+ * require all participating pipes (0=TX, 1=RX, 2=CMD) to be enabled (P_EN=1)
+ * before multi-pipe operations.  Without this, writing a doorbell to one pipe
+ * while another pipe is enabled-but-uninitialized can hang the BAM's internal
+ * AHB bus.
+ *
+ * This function is called when the first pipe is initialized.  It iterates
+ * all channels and initializes any that have a descriptor FIFO allocated
+ * (i.e. dma_request_chan was called) but are not yet hardware-initialized.
+ *
+ * For pipes whose DMA direction has been set via bam_prep_slave_sg(), the
+ * stored direction is used.  For pipes that have never been prepped (e.g.
+ * TX pipe during read-only operations), MEM_TO_DEV (consumer) is used as
+ * a safe default — the BAM won't process any descriptors on these pipes
+ * since no doorbell will be written.
+ */
+static void bam_init_peer_pipes(struct bam_device *bdev)
+{
+	unsigned int i;
+
+	for (i = 0; i < bdev->num_channels; i++) {
+		struct bam_chan *peer = &bdev->channels[i];
+		enum dma_transfer_direction dir;
+
+		if (!peer->fifo_virt || peer->initialized)
+			continue;
+
+		/* Use stored direction if known, otherwise default to consumer */
+		if (peer->dir_known)
+			dir = peer->last_dir;
+		else
+			dir = DMA_MEM_TO_DEV;
+
+		dev_dbg(bdev->dev,
+			"pipe %u: force-init peer (dir=%d known=%d)\n",
+			peer->id, dir, peer->dir_known);
+
+		scoped_guard(spinlock_irqsave, &peer->vc.lock)
+			bam_chan_init_hw(peer, dir, false);
+	}
 }
 
 /**
@@ -545,7 +765,7 @@ static int bam_alloc_chan(struct dma_chan *chan)
 		return 0;
 
 	/* allocate FIFO descriptor space, but only if necessary */
-	bchan->fifo_virt = dma_alloc_wc(bdev->dev, BAM_DESC_FIFO_SIZE,
+	bchan->fifo_virt = dma_alloc_coherent(bdev->dev, BAM_DESC_FIFO_SIZE,
 					&bchan->fifo_phys, GFP_KERNEL);
 
 	if (!bchan->fifo_virt) {
@@ -587,14 +807,16 @@ static void bam_free_chan(struct dma_chan *chan)
 	scoped_guard(spinlock_irqsave, &bchan->vc.lock)
 		bam_reset_channel(bchan);
 
-	dma_free_wc(bdev->dev, BAM_DESC_FIFO_SIZE, bchan->fifo_virt,
+	dma_free_coherent(bdev->dev, BAM_DESC_FIFO_SIZE, bchan->fifo_virt,
 		    bchan->fifo_phys);
 	bchan->fifo_virt = NULL;
 
 	/* mask irq for pipe/channel */
-	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
-	val &= ~BIT(bchan->id);
-	writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+	if (!bdev->polling) {
+		val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+		val &= ~BIT(bchan->id);
+		writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
+	}
 
 	/* disable irq */
 	writel_relaxed(0, bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
@@ -660,8 +882,55 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 		return NULL;
 	}
 
+	/*
+	 * Track init state before updating direction.  A pipe that was
+	 * force-initialized by bam_init_peer_pipes() has initialized=1
+	 * but dir_known=false.  Such pipes need their P_DIRECTION bit
+	 * updated when they're actually prepped with the real direction.
+	 */
+	{
+		bool needs_init = !bchan->initialized;
+		bool needs_dir_fix = bchan->initialized &&
+				     !bchan->dir_known;
+
+		bchan->last_dir = direction;
+		bchan->dir_known = true;
+
+		if (needs_init) {
+			bool is_cmd = !!(flags & DMA_PREP_CMD);
+
+			scoped_guard(spinlock_irqsave, &bchan->vc.lock) {
+				bam_chan_init_hw(bchan, direction, is_cmd);
+			}
+
+			/*
+			 * Match downstream SPS: initialize all peer pipes
+			 * now (before any DMA doorbell) to avoid resetting
+			 * a pipe while other pipes have active DMA sessions.
+			 * Downstream sps_connect() inits all pipes eagerly
+			 * during probe.
+			 */
+			bam_init_peer_pipes(bdev);
+		} else if (needs_dir_fix) {
+			/*
+			 * Pipe was force-initialized with default direction
+			 * (consumer).  The correct direction is now known.
+			 * Do a full P_RST + re-init rather than modifying
+			 * P_DIRECTION on a live (P_EN=1) pipe, which may
+			 * corrupt BAM internal pipe state.
+			 */
+			dev_dbg(bdev->dev,
+				"pipe %u: dir fix via re-init (dir=%d)\n",
+				bchan->id, direction);
+
+			bchan->initialized = 0;
+			scoped_guard(spinlock_irqsave, &bchan->vc.lock)
+				bam_chan_init_hw(bchan, direction, false);
+		}
+	}
+
 	/* allocate enough room to accommodate the number of entries */
-	num_alloc = sg_nents_for_dma(sgl, sg_len, BAM_FIFO_SIZE);
+	num_alloc = sg_nents_for_dma(sgl, sg_len, BAM_MAX_DATA_SIZE);
 	async_desc = kzalloc_flex(*async_desc, desc, num_alloc, GFP_NOWAIT);
 	if (!async_desc)
 		return NULL;
@@ -689,10 +958,10 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 			desc->addr = cpu_to_le32(sg_dma_address(sg) +
 						 curr_offset);
 
-			if (remainder > BAM_FIFO_SIZE) {
-				desc->size = cpu_to_le16(BAM_FIFO_SIZE);
-				remainder -= BAM_FIFO_SIZE;
-				curr_offset += BAM_FIFO_SIZE;
+			if (remainder > BAM_MAX_DATA_SIZE) {
+				desc->size = cpu_to_le16(BAM_MAX_DATA_SIZE);
+				remainder -= BAM_MAX_DATA_SIZE;
+				curr_offset += BAM_MAX_DATA_SIZE;
 			} else {
 				desc->size = cpu_to_le16(remainder);
 				remainder = 0;
@@ -717,6 +986,7 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 static int bam_dma_terminate_all(struct dma_chan *chan)
 {
 	struct bam_chan *bchan = to_bam_chan(chan);
+	struct bam_device *bdev = bchan->bdev;
 	struct bam_async_desc *async_desc, *tmp;
 	LIST_HEAD(head);
 
@@ -736,9 +1006,28 @@ static int bam_dma_terminate_all(struct dma_chan *chan)
 		 * by accessing freed resources.
 		 */
 		if (!list_empty(&bchan->desc_list)) {
-			async_desc = list_first_entry(&bchan->desc_list,
-						      struct bam_async_desc, desc_node);
-			bam_chan_init_hw(bchan, async_desc->dir);
+			if (bdev->powered_remotely) {
+				/*
+				 * Remotely-powered BAM (the A2 BAM behind
+				 * bam-dmux): the remote EE owns the BAM
+				 * clock/reset and this terminate runs from the
+				 * modem power-down / SSR path, i.e. exactly when
+				 * the remote has gated the BAM core.  Issuing the
+				 * pipe reset in bam_chan_init_hw() (BAM_P_RST)
+				 * then faults with an imprecise external abort.
+				 * Skip the hardware reset and just mark the pipe
+				 * uninitialized; bam_prep_slave_sg() reprograms
+				 * the desc FIFO on the next power-on, after the
+				 * remote has powered the BAM back up.
+				 */
+				bchan->initialized = 0;
+			} else {
+				async_desc = list_first_entry(&bchan->desc_list,
+							      struct bam_async_desc, desc_node);
+				bam_chan_init_hw(bchan, async_desc->dir,
+						 async_desc->desc[0].flags &
+						 cpu_to_le16(DESC_FLAG_CMD));
+			}
 		}
 
 		list_for_each_entry_safe(async_desc, tmp,
@@ -806,6 +1095,88 @@ static int bam_resume(struct dma_chan *chan)
 }
 
 /**
+ * bam_process_pipe_completions - process completions on a single pipe
+ * @bdev: bam controller
+ * @pipe: pipe/channel index
+ *
+ * Reads the pipe IRQ status and SW offset to determine which descriptors
+ * have completed.  Usable from both IRQ and polling contexts.
+ */
+static void bam_process_pipe_completions(struct bam_device *bdev, u32 pipe)
+{
+	struct bam_chan *bchan = &bdev->channels[pipe];
+	struct bam_async_desc *async_desc, *tmp;
+	u32 offset;
+	unsigned int avail;
+
+	if (bdev->polling) {
+		u32 pipe_stts;
+
+		/*
+		 * Match downstream SPS driver: read and clear P_IRQ_STTS
+		 * even in polling mode.  The downstream pipe_handler()
+		 * calls bam_pipe_get_and_clear_irq_status() on every
+		 * poll iteration, which reads P_IRQ_STTS and writes the
+		 * value back to P_IRQ_CLR.  Without this, accumulated
+		 * IRQ status bits (P_PRCSD_DESC, P_WAKE, etc.) from
+		 * completed operations are never cleared, which may
+		 * affect BAM internal state on subsequent operations.
+		 */
+		pipe_stts = readl_relaxed(bam_addr(bdev, pipe,
+						   BAM_P_IRQ_STTS));
+		if (pipe_stts)
+			writel_relaxed(pipe_stts, bam_addr(bdev, pipe,
+						   BAM_P_IRQ_CLR));
+
+		dev_dbg(bdev->dev,
+			"poll: pipe %u P_SW_OFSTS=0x%x P_IRQ_STTS=0x%x head=%u\n",
+			pipe,
+			readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)),
+			pipe_stts,
+			bchan->head);
+	} else {
+		u32 pipe_stts;
+
+		pipe_stts = readl_relaxed(bam_addr(bdev, pipe,
+						   BAM_P_IRQ_STTS));
+		if (!pipe_stts)
+			return;
+
+		writel_relaxed(pipe_stts, bam_addr(bdev, pipe,
+						   BAM_P_IRQ_CLR));
+	}
+
+	guard(spinlock_irqsave)(&bchan->vc.lock);
+
+	offset = readl_relaxed(bam_addr(bdev, pipe, BAM_P_SW_OFSTS)) &
+			       P_SW_OFSTS_MASK;
+	offset /= sizeof(struct bam_desc_hw);
+
+	avail = CIRC_CNT(offset, bchan->head, MAX_DESCRIPTORS + 1);
+
+	list_for_each_entry_safe(async_desc, tmp,
+				 &bchan->desc_list, desc_node) {
+		if (avail < async_desc->xfer_len)
+			break;
+
+		bchan->head += async_desc->xfer_len;
+		bchan->head %= (MAX_DESCRIPTORS + 1);
+
+		async_desc->num_desc -= async_desc->xfer_len;
+		async_desc->curr_desc += async_desc->xfer_len;
+		avail -= async_desc->xfer_len;
+
+		if (!async_desc->num_desc) {
+			vchan_cookie_complete(&async_desc->vd);
+		} else {
+			list_add(&async_desc->vd.node,
+				 &bchan->vc.desc_issued);
+		}
+		list_del(&async_desc->desc_node);
+	}
+}
+
+/**
  * process_channel_irqs - processes the channel interrupts
  * @bdev: bam controller
  *
@@ -814,8 +1185,7 @@ static int bam_resume(struct dma_chan *chan)
  */
 static u32 process_channel_irqs(struct bam_device *bdev)
 {
-	u32 i, srcs, pipe_stts, offset, avail;
-	struct bam_async_desc *async_desc, *tmp;
+	u32 i, srcs;
 
 	srcs = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_EE));
 
@@ -824,58 +1194,67 @@ static u32 process_channel_irqs(struct bam_device *bdev)
 		return srcs;
 
 	for (i = 0; i < bdev->num_channels; i++) {
-		struct bam_chan *bchan = &bdev->channels[i];
-
-		if (!(srcs & BIT(i)))
-			continue;
-
-		/* clear pipe irq */
-		pipe_stts = readl_relaxed(bam_addr(bdev, i, BAM_P_IRQ_STTS));
-
-		writel_relaxed(pipe_stts, bam_addr(bdev, i, BAM_P_IRQ_CLR));
-
-		guard(spinlock_irqsave)(&bchan->vc.lock);
-
-		offset = readl_relaxed(bam_addr(bdev, i, BAM_P_SW_OFSTS)) &
-				       P_SW_OFSTS_MASK;
-		offset /= sizeof(struct bam_desc_hw);
-
-		/* Number of bytes available to read */
-		avail = CIRC_CNT(offset, bchan->head, MAX_DESCRIPTORS + 1);
-
-		if (offset < bchan->head)
-			avail--;
-
-		list_for_each_entry_safe(async_desc, tmp,
-					 &bchan->desc_list, desc_node) {
-			/* Not enough data to read */
-			if (avail < async_desc->xfer_len)
-				break;
-
-			/* manage FIFO */
-			bchan->head += async_desc->xfer_len;
-			bchan->head %= MAX_DESCRIPTORS;
-
-			async_desc->num_desc -= async_desc->xfer_len;
-			async_desc->curr_desc += async_desc->xfer_len;
-			avail -= async_desc->xfer_len;
-
-			/*
-			 * if complete, process cookie. Otherwise
-			 * push back to front of desc_issued so that
-			 * it gets restarted by the tasklet
-			 */
-			if (!async_desc->num_desc) {
-				vchan_cookie_complete(&async_desc->vd);
-			} else {
-				list_add(&async_desc->vd.node,
-					 &bchan->vc.desc_issued);
-			}
-			list_del(&async_desc->desc_node);
-		}
+		if (srcs & BIT(i))
+			bam_process_pipe_completions(bdev, i);
 	}
 
 	return srcs;
+}
+
+/**
+ * bam_poll_timer_fn - hrtimer callback for polling-mode BAMs
+ * @timer: hrtimer embedded in bam_device
+ *
+ * For controlled-remotely BAMs where IRQs may not reach the APPS CPU,
+ * this timer polls pipe completion status periodically.
+ */
+static enum hrtimer_restart bam_poll_timer_fn(struct hrtimer *timer)
+{
+	struct bam_device *bdev = container_of(timer, struct bam_device,
+					       poll_timer);
+	bool any_active = false;
+	unsigned int i;
+
+	dev_dbg(bdev->dev, "poll_timer fired\n");
+
+	for (i = 0; i < bdev->num_channels; i++) {
+		struct bam_chan *bchan = &bdev->channels[i];
+
+		if (list_empty(&bchan->desc_list))
+			continue;
+
+		bam_process_pipe_completions(bdev, i);
+	}
+
+	tasklet_schedule(&bdev->task);
+
+	for (i = 0; i < bdev->num_channels; i++) {
+		struct bam_chan *bchan = &bdev->channels[i];
+
+		if (!list_empty(&bchan->desc_list) ||
+		    !list_empty(&bchan->vc.desc_issued)) {
+			any_active = true;
+			break;
+		}
+	}
+
+	if (any_active) {
+		hrtimer_forward_now(timer, ns_to_ktime(100000));
+		return HRTIMER_RESTART;
+	}
+
+	atomic_set(&bdev->poll_timer_active, 0);
+	return HRTIMER_NORESTART;
+}
+
+static void bam_start_poll_timer(struct bam_device *bdev)
+{
+	if (!bdev->polling)
+		return;
+
+	if (!atomic_xchg(&bdev->poll_timer_active, 1))
+		hrtimer_start(&bdev->poll_timer, ns_to_ktime(50000),
+			      HRTIMER_MODE_REL);
 }
 
 /**
@@ -931,11 +1310,30 @@ static enum dma_status bam_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
 		struct dma_tx_state *txstate)
 {
 	struct bam_chan *bchan = to_bam_chan(chan);
+	struct bam_device *bdev = bchan->bdev;
 	struct bam_async_desc *async_desc;
 	struct virt_dma_desc *vd;
 	int ret;
 	size_t residue = 0;
 	unsigned int i;
+
+	/*
+	 * In polling mode, process hardware completions on ALL active
+	 * pipes before checking cookie status.  This is needed because
+	 * a multi-pipe peripheral (e.g. QPIC NAND with cmd/tx/rx pipes)
+	 * requires all pipes to be drained — otherwise completed
+	 * descriptors remain in desc_list, IS_BUSY stays true, and
+	 * subsequent operations on that pipe never get doorbelled.
+	 * This matches what bam_poll_timer_fn() already does.
+	 */
+	if (bdev->polling) {
+		for (i = 0; i < bdev->num_channels; i++) {
+			struct bam_chan *bc = &bdev->channels[i];
+
+			if (bc->initialized && !list_empty(&bc->desc_list))
+				bam_process_pipe_completions(bdev, i);
+		}
+	}
 
 	ret = dma_cookie_status(chan, cookie, txstate);
 	if (ret == DMA_COMPLETE)
@@ -1007,6 +1405,9 @@ static void bam_start_dma(struct bam_chan *bchan)
 	int ret;
 	unsigned int avail;
 	struct dmaengine_desc_callback cb;
+	unsigned int fifo_start;
+	int first_cmd_fifo_idx = -1;
+	int last_cmd_fifo_idx = -1;
 
 	lockdep_assert_held(&bchan->vc.lock);
 
@@ -1017,14 +1418,23 @@ static void bam_start_dma(struct bam_chan *bchan)
 	if (ret < 0)
 		return;
 
+	fifo_start = bchan->tail;
+
 	while (vd && !IS_BUSY(bchan)) {
 		list_del(&vd->node);
 
 		async_desc = container_of(vd, struct bam_async_desc, vd);
 
-		/* on first use, initialize the channel hardware */
-		if (!bchan->initialized)
-			bam_chan_init_hw(bchan, async_desc->dir);
+		/*
+		 * Fallback init: normally the pipe is initialized eagerly
+		 * in bam_prep_slave_sg().  This handles edge cases where
+		 * prep didn't initialize (e.g. terminate_all + reuse).
+		 */
+		if (!bchan->initialized) {
+			bam_chan_init_hw(bchan, async_desc->dir,
+					 async_desc->desc[0].flags &
+					 cpu_to_le16(DESC_FLAG_CMD));
+		}
 
 		/* apply new slave config changes, if necessary */
 		if (bchan->reconfigure)
@@ -1062,8 +1472,8 @@ static void bam_start_dma(struct bam_chan *bchan)
 			desc[async_desc->xfer_len - 1].flags |=
 				cpu_to_le16(DESC_FLAG_INT);
 
-		if (bchan->tail + async_desc->xfer_len > MAX_DESCRIPTORS) {
-			u32 partial = MAX_DESCRIPTORS - bchan->tail;
+		if (bchan->tail + async_desc->xfer_len > MAX_DESCRIPTORS + 1) {
+			u32 partial = MAX_DESCRIPTORS + 1 - bchan->tail;
 
 			memcpy(&fifo[bchan->tail], desc,
 			       partial * sizeof(struct bam_desc_hw));
@@ -1076,15 +1486,67 @@ static void bam_start_dma(struct bam_chan *bchan)
 			       sizeof(struct bam_desc_hw));
 		}
 
+		/*
+		 * Track first and last CMD descriptors in FIFO for
+		 * LOCK/UNLOCK flag insertion (see below).
+		 */
+		{
+			unsigned int i;
+
+			for (i = 0; i < async_desc->xfer_len; i++) {
+				unsigned int idx = (bchan->tail + i) %
+						   (MAX_DESCRIPTORS + 1);
+				if (fifo[idx].flags &
+				    cpu_to_le16(DESC_FLAG_CMD)) {
+					if (first_cmd_fifo_idx < 0)
+						first_cmd_fifo_idx = idx;
+					last_cmd_fifo_idx = idx;
+				}
+			}
+		}
+
 		bchan->tail += async_desc->xfer_len;
-		bchan->tail %= MAX_DESCRIPTORS;
+		bchan->tail %= (MAX_DESCRIPTORS + 1);
 		list_add_tail(&async_desc->desc_node, &bchan->desc_list);
 	}
 
-	/* ensure descriptor writes and dma start not reordered */
+	/*
+	 * Add LOCK/UNLOCK flags to CMD descriptors.
+	 *
+	 * The downstream Qualcomm SPS NAND driver sets LOCK (0x0400) on
+	 * the first CMD descriptor and UNLOCK (0x0200) on the last CMD
+	 * descriptor for every multi-descriptor CMD sequence.  These
+	 * flags control the BAM's internal pipe group arbiter:
+	 *
+	 *   LOCK:   Acquire the pipe's lock group before processing.
+	 *           Prevents the BAM from switching to pipes in other
+	 *           lock groups until UNLOCK is seen.
+	 *   UNLOCK: Release the pipe's lock group after processing.
+	 *
+	 * Without LOCK/UNLOCK, when the BAM sees pending descriptors on
+	 * pipes in different lock groups (e.g. CMD pipe in group 1 and
+	 * data pipe in group 0), the arbiter may deadlock internally,
+	 * causing the BAM to stop responding to register writes.
+	 */
+	if (first_cmd_fifo_idx >= 0) {
+		fifo[first_cmd_fifo_idx].flags |=
+			cpu_to_le16(DESC_FLAG_LOCK);
+		fifo[last_cmd_fifo_idx].flags |=
+			cpu_to_le16(DESC_FLAG_UNLOCK);
+	}
+
+	/*
+	 * Ensure descriptor FIFO writes are visible to the BAM before
+	 * the doorbell write.
+	 */
 	wmb();
-	writel_relaxed(bchan->tail * sizeof(struct bam_desc_hw),
-			bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
+	{
+		u32 db_val = bchan->tail * sizeof(struct bam_desc_hw);
+
+		writel(db_val, bam_addr(bdev, bchan->id, BAM_P_EVNT_REG));
+	}
+
+	bam_start_poll_timer(bdev);
 
 	pm_runtime_mark_last_busy(bdev->dev);
 	pm_runtime_put_autosuspend(bdev->dev);
@@ -1101,6 +1563,8 @@ static void dma_tasklet(struct tasklet_struct *t)
 	struct bam_device *bdev = from_tasklet(bdev, t, task);
 	struct bam_chan *bchan;
 	unsigned int i;
+
+	dev_dbg(bdev->dev, "dma_tasklet running\n");
 
 	/* go through the channels and kick off transactions */
 	for (i = 0; i < bdev->num_channels; i++) {
@@ -1187,8 +1651,17 @@ static int bam_init(struct bam_device *bdev)
 	}
 
 	/* Reset BAM now if fully controlled locally */
-	if (!bdev->controlled_remotely && !bdev->powered_remotely)
+	if (!bdev->controlled_remotely && !bdev->powered_remotely) {
 		bam_reset(bdev);
+	} else {
+		/*
+		 * For remotely-controlled BAMs, TZ already initialized the
+		 * global config including BAM_IRQ_EN.  Don't touch global
+		 * registers here — they may be XPU-protected.  Per-pipe
+		 * IRQ setup (P_IRQ_EN + BAM_IRQ_SRCS_MSK_EE per-pipe bit)
+		 * is handled later by bam_chan_init_hw().
+		 */
+	}
 
 	return 0;
 }
@@ -1252,6 +1725,13 @@ static int bam_dma_probe(struct platform_device *pdev)
 	bdev->powered_remotely = of_property_read_bool(pdev->dev.of_node,
 						"qcom,powered-remotely");
 
+	bdev->polling = bdev->controlled_remotely;
+	if (bdev->polling) {
+		hrtimer_setup(&bdev->poll_timer, bam_poll_timer_fn,
+			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		atomic_set(&bdev->poll_timer_active, 0);
+	}
+
 	if (bdev->controlled_remotely || bdev->powered_remotely)
 		bdev->bamclk = devm_clk_get_optional(bdev->dev, "bam_clk");
 	else
@@ -1260,20 +1740,27 @@ static int bam_dma_probe(struct platform_device *pdev)
 	if (IS_ERR(bdev->bamclk))
 		return PTR_ERR(bdev->bamclk);
 
-	if (!bdev->bamclk) {
-		ret = of_property_read_u32(pdev->dev.of_node, "num-channels",
-					   &bdev->num_channels);
-		if (ret) {
-			dev_err(bdev->dev, "num-channels unspecified in dt\n");
-			return ret;
-		}
+	/*
+	 * Read num-channels / num-ees from DT when available, regardless
+	 * of whether a clock was found.  The upstream code only reads these
+	 * when bamclk is NULL, but controlled-remotely BAMs may provide
+	 * both a clock AND these properties to avoid register reads during
+	 * bam_init() (the BAM registers may be inaccessible until the
+	 * clock is enabled).
+	 */
+	of_property_read_u32(pdev->dev.of_node, "num-channels",
+			     &bdev->num_channels);
+	of_property_read_u32(pdev->dev.of_node, "qcom,num-ees",
+			     &bdev->num_ees);
 
-		ret = of_property_read_u32(pdev->dev.of_node, "qcom,num-ees",
-					   &bdev->num_ees);
-		if (ret) {
-			dev_err(bdev->dev, "num-ees unspecified in dt\n");
-			return ret;
-		}
+	if (!bdev->bamclk && !bdev->num_channels) {
+		dev_err(bdev->dev, "num-channels unspecified in dt\n");
+		return -EINVAL;
+	}
+
+	if (!bdev->bamclk && !bdev->num_ees) {
+		dev_err(bdev->dev, "num-ees unspecified in dt\n");
+		return -EINVAL;
 	}
 
 	ret = clk_prepare_enable(bdev->bamclk);
@@ -1285,6 +1772,12 @@ static int bam_dma_probe(struct platform_device *pdev)
 	ret = bam_init(bdev);
 	if (ret)
 		goto err_disable_clk;
+
+	if (bdev->controlled_remotely || bdev->powered_remotely) {
+		dev_dbg(bdev->dev, "BAM TZ state: CTRL=0x%x IRQ_SRCS_MSK=0x%x\n",
+			readl_relaxed(bam_addr(bdev, 0, BAM_CTRL)),
+			readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE)));
+	}
 
 	tasklet_setup(&bdev->task, dma_tasklet);
 
@@ -1302,14 +1795,16 @@ static int bam_dma_probe(struct platform_device *pdev)
 	for (i = 0; i < bdev->num_channels; i++)
 		bam_channel_init(bdev, &bdev->channels[i], i);
 
-	ret = devm_request_irq(bdev->dev, bdev->irq, bam_dma_irq,
-			IRQF_TRIGGER_HIGH, "bam_dma", bdev);
-	if (ret)
-		goto err_bam_channel_exit;
+	if (!bdev->polling) {
+		ret = devm_request_irq(bdev->dev, bdev->irq, bam_dma_irq,
+				IRQF_TRIGGER_HIGH, "bam_dma", bdev);
+		if (ret)
+			goto err_bam_channel_exit;
+	}
 
 	/* set max dma segment size */
 	bdev->common.dev = bdev->dev;
-	dma_set_max_seg_size(bdev->common.dev, BAM_FIFO_SIZE);
+	dma_set_max_seg_size(bdev->common.dev, BAM_MAX_DATA_SIZE);
 
 	platform_set_drvdata(pdev, bdev);
 
@@ -1373,11 +1868,15 @@ static void bam_dma_remove(struct platform_device *pdev)
 
 	pm_runtime_force_suspend(&pdev->dev);
 
+	if (bdev->polling)
+		hrtimer_cancel(&bdev->poll_timer);
+
 	of_dma_controller_free(pdev->dev.of_node);
 	dma_async_device_unregister(&bdev->common);
 
 	/* mask all interrupts for this execution environment */
-	writel_relaxed(0, bam_addr(bdev, 0,  BAM_IRQ_SRCS_MSK_EE));
+	if (!bdev->polling)
+		writel_relaxed(0, bam_addr(bdev, 0,  BAM_IRQ_SRCS_MSK_EE));
 
 	devm_free_irq(bdev->dev, bdev->irq, bdev);
 
@@ -1388,7 +1887,7 @@ static void bam_dma_remove(struct platform_device *pdev)
 		if (!bdev->channels[i].fifo_virt)
 			continue;
 
-		dma_free_wc(bdev->dev, BAM_DESC_FIFO_SIZE,
+		dma_free_coherent(bdev->dev, BAM_DESC_FIFO_SIZE,
 			    bdev->channels[i].fifo_virt,
 			    bdev->channels[i].fifo_phys);
 	}

@@ -51,6 +51,17 @@
 #define SMEM_SMSM_SIZE_INFO		419
 
 /*
+ * SMSM state bits used in the handshake protocol.
+ */
+#define SMSM_INIT		BIT(0)
+#define SMSM_A2_POWER_CONTROL	BIT(1)
+#define SMSM_SMDINIT		BIT(3)
+#define SMSM_RPCINIT		BIT(5)
+#define SMSM_RESET		BIT(6)
+#define SMSM_A2_POWER_CONTROL_ACK BIT(11)
+#define SMSM_PROC_AWAKE		BIT(12)
+
+/*
  * Default sizes, in case SMEM_SMSM_SIZE_INFO is not found.
  */
 #define SMSM_DEFAULT_NUM_ENTRIES	8
@@ -174,18 +185,40 @@ static int smsm_update_bits(void *data, u32 mask, u32 value)
 	/* Make sure the value update is ordered before any kicks */
 	wmb();
 
-	/* Iterate over all hosts to check whom wants a kick */
+	/*
+	 * Kick all remote hosts that have a valid IPC channel.
+	 *
+	 * The upstream design checks the subscription mask (intr_mask)
+	 * to avoid unnecessary kicks.  However, on MDM9607 with Quectel
+	 * OCPU firmware, the modem may not subscribe to all APPS state
+	 * bits it actually needs (e.g. A2_POWER_CONTROL_ACK / bit 11).
+	 * The modem firmware relies on receiving an IPC kick whenever
+	 * APPS state changes, then re-reads the full state to decide
+	 * what changed.  Extra kicks are harmless — the modem's SMSM
+	 * handler simply re-reads and returns if nothing relevant changed.
+	 *
+	 * This matches the downstream behavior where notify_modem_smsm()
+	 * is called if the subscription mask has ANY overlap with the
+	 * changed bits — but the modem firmware may have populated the
+	 * mask incompletely.
+	 */
 	for (host = 0; host < smsm->num_hosts; host++) {
 		hostp = &smsm->hosts[host];
 
-		val = readl(smsm->subscription + host);
-		if (!(val & changes))
+		/* Skip self */
+		if (host == smsm->local_host)
 			continue;
 
 		if (hostp->mbox_chan) {
 			mbox_send_message(hostp->mbox_chan, NULL);
 			mbox_client_txdone(hostp->mbox_chan, 0);
-		} else if (hostp->ipc_regmap) {
+		}
+		/*
+		 * Always do the regmap write if available.  On MDM9607,
+		 * mbox_send_message may not reliably trigger the modem
+		 * interrupt; the direct register write is guaranteed.
+		 */
+		if (hostp->ipc_regmap) {
 			regmap_write(hostp->ipc_regmap,
 				     hostp->ipc_offset,
 				     BIT(hostp->ipc_bit));
@@ -207,10 +240,18 @@ static const struct qcom_smem_state_ops smsm_state_ops = {
  *
  * This function cascades an incoming interrupt from a remote system, based on
  * the state bits and configuration.
+ *
+ * Additionally, it implements the SMSM handshake protocol required by Qualcomm
+ * modem firmware: when a remote processor sets SMSM_INIT or SMSM_SMDINIT in
+ * its state, the local host mirrors those bits back into its own state.  This
+ * mirror-and-kick sequence is how the downstream kernel's smsm_irq_handler()
+ * works — the modem sets INIT, APPS mirrors INIT (triggering an IPC kick back
+ * to the modem), and the modem proceeds with its initialization.
  */
 static irqreturn_t smsm_intr(int irq, void *data)
 {
 	struct smsm_entry *entry = data;
+	struct qcom_smsm *smsm = entry->smsm;
 	unsigned i;
 	int irq_pin;
 	u32 changed;
@@ -218,6 +259,49 @@ static irqreturn_t smsm_intr(int irq, void *data)
 
 	val = readl(entry->remote_state);
 	changed = val ^ xchg(&entry->last_value, val);
+
+	/*
+	 * Mirror INIT/SMDINIT from remote into local APPS state AND
+	 * always kick the remote processor back.
+	 *
+	 * The modem firmware handshake requires receiving a kick-back
+	 * after it sets INIT/SMDINIT.  It waits for this confirmation
+	 * before proceeding with subsystem init (including A2/BAM-DMUX).
+	 *
+	 * With proactive INIT|SMDINIT (set at SMSM probe), the mirror
+	 * calls below are no-ops (bits already set → smsm_update_bits
+	 * detects no change → skips the kick loop).  But the modem still
+	 * needs the kick.  Send it unconditionally.
+	 */
+	if (val & SMSM_INIT)
+		smsm_update_bits(smsm, SMSM_INIT, SMSM_INIT);
+	if (val & SMSM_SMDINIT)
+		smsm_update_bits(smsm, SMSM_SMDINIT, SMSM_SMDINIT);
+
+	/*
+	 * Unconditional kick-back: if remote has INIT or SMDINIT set,
+	 * always kick it regardless of whether our state changed.
+	 * This ensures the modem gets its expected confirmation even
+	 * when APPS state was pre-populated at probe time.
+	 */
+	if (val & (SMSM_INIT | SMSM_SMDINIT)) {
+		struct smsm_host *hostp;
+		u32 host;
+
+		for (host = 0; host < smsm->num_hosts; host++) {
+			hostp = &smsm->hosts[host];
+			if (host == smsm->local_host)
+				continue;
+			if (hostp->mbox_chan) {
+				mbox_send_message(hostp->mbox_chan, NULL);
+				mbox_client_txdone(hostp->mbox_chan, 0);
+			} else if (hostp->ipc_regmap) {
+				regmap_write(hostp->ipc_regmap,
+					     hostp->ipc_offset,
+					     BIT(hostp->ipc_bit));
+			}
+		}
+	}
 
 	for_each_set_bit(i, entry->irq_enabled, 32) {
 		if (!(changed & BIT(i)))
@@ -268,12 +352,22 @@ static void smsm_mask_irq(struct irq_data *irqd)
  *
  * This subscribes the local CPU to interrupts upon changes to the defined
  * status bit. The bit is also marked for cascading.
+ *
+ * After updating the subscription matrix, an IPC kick is sent to the remote
+ * host that owns this entry.  This is necessary because the remote processor
+ * may check the subscription mask during its initialization to decide whether
+ * to activate certain features (e.g. the modem checks if APPS is subscribed
+ * to A2_POWER_CONTROL before activating BAM-DMUX).  If the subscription is
+ * added after the remote has already checked, the kick causes it to re-read
+ * the mask.
  */
 static void smsm_unmask_irq(struct irq_data *irqd)
 {
 	struct smsm_entry *entry = irq_data_get_irq_chip_data(irqd);
 	irq_hw_number_t irq = irqd_to_hwirq(irqd);
 	struct qcom_smsm *smsm = entry->smsm;
+	struct smsm_host *hostp;
+	u32 host;
 	u32 val;
 
 	/* Make sure our last cached state is up-to-date */
@@ -288,6 +382,23 @@ static void smsm_unmask_irq(struct irq_data *irqd)
 		val = readl(entry->subscription + smsm->local_host);
 		val |= BIT(irq);
 		writel(val, entry->subscription + smsm->local_host);
+
+		/* Ensure the subscription write is visible before the kick */
+		wmb();
+
+		/* Kick the remote host so it re-reads the subscription mask */
+		host = entry - smsm->entries;
+		if (host < smsm->num_hosts) {
+			hostp = &smsm->hosts[host];
+			if (hostp->mbox_chan) {
+				mbox_send_message(hostp->mbox_chan, NULL);
+				mbox_client_txdone(hostp->mbox_chan, 0);
+			} else if (hostp->ipc_regmap) {
+				regmap_write(hostp->ipc_regmap,
+					     hostp->ipc_offset,
+					     BIT(hostp->ipc_bit));
+			}
+		}
 	}
 }
 
@@ -561,14 +672,16 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 
 	/* Parse the host properties */
 	for (id = 0; id < smsm->num_hosts; id++) {
-		/* Try using mbox interface first, otherwise fall back to syscon */
-		ret = smsm_parse_mbox(smsm, id);
-		if (!ret)
-			continue;
+		/*
+		 * Always parse ipc (syscon) path — used as belt-and-suspenders
+		 * alongside mbox.  On MDM9607, mbox_send_message() may silently
+		 * fail if the apcs-ipc-mailbox driver hasn't fully initialized
+		 * its channel, but the direct regmap write always works.
+		 */
+		smsm_parse_ipc(smsm, id);
 
-		ret = smsm_parse_ipc(smsm, id);
-		if (ret < 0)
-			goto out_put;
+		/* Also try mbox — some platforms only have mbox */
+		smsm_parse_mbox(smsm, id);
 	}
 
 	/* Acquire the main SMSM state vector */
@@ -634,6 +747,26 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 		entry->subscription = intr_mask + id * smsm->num_hosts;
 		writel(0, entry->subscription + smsm->local_host);
 
+		/*
+		 * Subscribe to RESET|INIT|SMDINIT|A2 power bits from remote
+		 * processors.  The downstream kernel explicitly sets a legacy
+		 * mask so that remote processors (modem) know to kick APPS
+		 * when they change those bits.  Without this subscription, the
+		 * modem won't send an IPC to APPS after setting its INIT bit,
+		 * and the handshake in smsm_intr() will never trigger.
+		 *
+		 * A2_POWER_CONTROL and A2_POWER_CONTROL_ACK must also be
+		 * pre-subscribed because the modem firmware checks whether
+		 * APPS has subscribed before activating the BAM-DMUX data
+		 * path.  If BAM-DMUX loads as a module after the modem has
+		 * already booted, the modem will have already checked and
+		 * found no subscription — skipping A2 activation permanently.
+		 */
+		if (id != smsm->local_host)
+			writel(SMSM_RESET | SMSM_INIT | SMSM_SMDINIT |
+			       SMSM_A2_POWER_CONTROL | SMSM_A2_POWER_CONTROL_ACK,
+			       entry->subscription + smsm->local_host);
+
 		ret = smsm_inbound_entry(smsm, entry, node);
 		if (ret < 0)
 			goto unwind_interfaces;
@@ -641,6 +774,37 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, smsm);
 	of_node_put(local_node);
+
+	/*
+	 * Signal to all remote processors that APPS is fully initialized.
+	 *
+	 * On downstream 3.18, smd_init() and smd_post_init() proactively
+	 * set SMSM_INIT and SMSM_SMDINIT in APPS state BEFORE the modem
+	 * boots.  The modem's A2/BAM-DMUX init code runs early during
+	 * modem boot and checks APPS state — if INIT|SMDINIT are missing,
+	 * the modem skips A2 DMA initialization entirely and never
+	 * spontaneously sets A2_POWER_CONTROL (bit 1) in its SMSM entry.
+	 *
+	 * With reactive mirroring (set INIT|SMDINIT only after modem sets
+	 * them), the bits arrive too late: the modem's A2 init has already
+	 * passed its window and won't retry.  The result is that BAM_DMUX
+	 * never activates (P_SW_OFSTS stays 0, no rmnet interfaces).
+	 *
+	 * RPCINIT must also be set.  The modem firmware waits for APPS to
+	 * signal IPC Router readiness before activating its data subsystem.
+	 * In downstream, ipc_router_smd_xprt sets this when opening the
+	 * IPCRTR channel.  Since we build monolithically, setting it at
+	 * probe is safe.
+	 *
+	 * CRITICAL: SMEM survives warm reboots, so stale bits from a
+	 * previous kernel may still be set.  Clear APPS state to 0 first,
+	 * then set all required bits atomically.
+	 */
+	writel(0, smsm->local_state);
+	wmb();
+	smsm_update_bits(smsm,
+			 SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT | SMSM_PROC_AWAKE,
+			 SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT | SMSM_PROC_AWAKE);
 
 	return 0;
 

@@ -1368,12 +1368,6 @@ static int qcom_smd_parse_edge(struct device *dev,
 	edge->mbox_client.knows_txdone = true;
 	edge->mbox_chan = mbox_request_channel(&edge->mbox_client, 0);
 	if (IS_ERR(edge->mbox_chan)) {
-		if (PTR_ERR(edge->mbox_chan) != -ENOENT) {
-			ret = dev_err_probe(dev, PTR_ERR(edge->mbox_chan),
-					    "failed to acquire IPC mailbox\n");
-			goto put_node;
-		}
-
 		edge->mbox_chan = NULL;
 
 		syscon_np = of_parse_phandle(node, "qcom,ipc", 0);
@@ -1425,6 +1419,15 @@ static int qcom_smd_parse_edge(struct device *dev,
 	}
 
 	edge->irq = irq;
+
+	if (of_property_read_bool(node, "wakeup-source")) {
+		ret = enable_irq_wake(irq);
+		if (ret)
+			dev_warn(dev, "failed to enable wake for irq %d: %d\n",
+				 irq, ret);
+		else
+			device_set_wakeup_capable(dev, true);
+	}
 
 	return 0;
 
@@ -1514,6 +1517,17 @@ struct qcom_smd_edge *qcom_smd_register_edge(struct device *parent,
 
 	schedule_work(&edge->scan_work);
 
+	/*
+	 * Flush the scan work synchronously so that SMD channels are
+	 * discovered before the edge registration returns.  On single-
+	 * core systems (MDM9607) the kworker may not get CPU time for
+	 * hundreds of milliseconds if initcalls are running back-to-back.
+	 * The modem firmware expects channel discovery to complete
+	 * promptly after edge registration.
+	 */
+	flush_work(&edge->scan_work);
+	flush_work(&edge->state_work);
+
 	return edge;
 
 unregister_dev:
@@ -1553,24 +1567,30 @@ void qcom_smd_unregister_edge(struct qcom_smd_edge *edge)
 }
 EXPORT_SYMBOL(qcom_smd_unregister_edge);
 
-static int qcom_smd_probe(struct platform_device *pdev)
-{
-	struct device_node *node;
-
-	if (!qcom_smem_is_available())
-		return -EPROBE_DEFER;
-
-	for_each_available_child_of_node(pdev->dev.of_node, node)
-		qcom_smd_register_edge(&pdev->dev, node);
-
-	return 0;
-}
-
 static int qcom_smd_remove_edge(struct device *dev, void *data)
 {
 	struct qcom_smd_edge *edge = to_smd_edge(dev);
 
 	qcom_smd_unregister_edge(edge);
+
+	return 0;
+}
+
+static int qcom_smd_probe(struct platform_device *pdev)
+{
+	struct qcom_smd_edge *edge;
+	struct device_node *node;
+
+	if (!qcom_smem_is_available())
+		return -EPROBE_DEFER;
+
+	for_each_available_child_of_node(pdev->dev.of_node, node) {
+		edge = qcom_smd_register_edge(&pdev->dev, node);
+		if (IS_ERR(edge))
+			dev_warn(&pdev->dev,
+				 "failed to register edge %pOFn: %ld\n",
+				 node, PTR_ERR(edge));
+	}
 
 	return 0;
 }
