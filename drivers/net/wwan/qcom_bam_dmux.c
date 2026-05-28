@@ -1178,6 +1178,33 @@ static void bam_dmux_remove(struct platform_device *pdev)
 	bam_dmux_free_skbs(dmux->tx_skbs, DMA_TO_DEVICE);
 }
 
+/*
+ * On system shutdown the modem subsystem is powered down asynchronously by
+ * the firmware. Any in-flight or deferred TX work that runs after that
+ * point would issue BAM DMA descriptors against an MMIO window that is no
+ * longer backed by a powered peripheral, producing an imprecise external
+ * abort from inside the BAM DMA engine. Quiesce the data path here so it
+ * cannot race with modem power-collapse during reboot/poweroff.
+ */
+static void bam_dmux_shutdown(struct platform_device *pdev)
+{
+	struct bam_dmux *dmux = platform_get_drvdata(pdev);
+	int i;
+
+	rtnl_lock();
+	for (i = 0; i < BAM_DMUX_NUM_CH; ++i) {
+		struct net_device *netdev = dmux->netdevs[i];
+
+		if (!netdev)
+			continue;
+		netif_device_detach(netdev);
+		netif_carrier_off(netdev);
+	}
+	rtnl_unlock();
+
+	cancel_work_sync(&dmux->tx_wakeup_work);
+}
+
 static const struct dev_pm_ops bam_dmux_pm_ops = {
 	SET_RUNTIME_PM_OPS(bam_dmux_runtime_suspend, bam_dmux_runtime_resume, NULL)
 };
@@ -1191,6 +1218,7 @@ MODULE_DEVICE_TABLE(of, bam_dmux_of_match);
 static struct platform_driver bam_dmux_driver = {
 	.probe = bam_dmux_probe,
 	.remove = bam_dmux_remove,
+	.shutdown = bam_dmux_shutdown,
 	.driver = {
 		.name = "bam-dmux",
 		.pm = &bam_dmux_pm_ops,
