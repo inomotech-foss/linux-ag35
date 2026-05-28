@@ -713,40 +713,48 @@
 			};
 
 			sdhci1_pins_active: sdhci1-pins-active {
-				cmd {
-					pins = "sdc1_cmd";
-					drive-strength = <10>;
-					bias-pull-up;
-				};
-
 				clk {
-					pins = "sdc1_clk";
+					pins = "gpio16";
+					function = "gpio";
 					drive-strength = <16>;
 					bias-disable;
 				};
 
+				cmd {
+					pins = "gpio17";
+					function = "gpio";
+					drive-strength = <10>;
+					bias-pull-up;
+				};
+
 				data {
-					pins = "sdc1_data";
+					pins = "gpio12", "gpio13",
+					       "gpio14", "gpio15";
+					function = "gpio";
 					drive-strength = <10>;
 					bias-pull-up;
 				};
 			};
 
 			sdhci1_pins_sleep: sdhci1-pins-sleep {
-				cmd {
-					pins = "sdc1_cmd";
-					drive-strength = <2>;
-					bias-pull-up;
-				};
-
 				clk {
-					pins = "sdc1_clk";
+					pins = "gpio16";
+					function = "gpio";
 					drive-strength = <2>;
 					bias-disable;
 				};
 
+				cmd {
+					pins = "gpio17";
+					function = "gpio";
+					drive-strength = <2>;
+					bias-pull-up;
+				};
+
 				data {
-					pins = "sdc1_data";
+					pins = "gpio12", "gpio13",
+					       "gpio14", "gpio15";
+					function = "gpio";
 					drive-strength = <2>;
 					bias-pull-up;
 				};
@@ -933,8 +941,9 @@
 
 		sdhc_1: sdhci@7824000 {
 			compatible = "qcom,sdhci-msm-v4";
-			reg = <0x07824900 0x200>, <0x07824000 0x800>;
-			reg-names = "hc_mem", "core_mem";
+			reg = <0x07824900 0x200>, <0x07824000 0x800>,
+			      <0x01111000 0x4>;
+			reg-names = "hc_mem", "core_mem", "tlmm_mem";
 
 			interrupts = <GIC_SPI 123 IRQ_TYPE_LEVEL_HIGH>,
 				     <GIC_SPI 138 IRQ_TYPE_LEVEL_HIGH>;

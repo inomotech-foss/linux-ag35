@@ -2666,6 +2666,26 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		}
 	}
 
+	/*
+	 * If a third register region (tlmm_mem) is specified, set bit 1 to
+	 * route the SDCC I/O signals to the GPIO-based pads instead of the
+	 * dedicated SDC pads. This is needed on some boards (e.g. MDM9607)
+	 * where the SDIO device is wired to GPIO pads.
+	 */
+	{
+		struct resource *tlmm_memres;
+		void __iomem *tlmm_mem;
+
+		tlmm_memres = platform_get_resource(pdev, IORESOURCE_MEM, 2);
+		if (tlmm_memres) {
+			tlmm_mem = devm_ioremap(&pdev->dev, tlmm_memres->start,
+						resource_size(tlmm_memres));
+			if (tlmm_mem)
+				writel_relaxed(readl_relaxed(tlmm_mem) | 0x2,
+					       tlmm_mem);
+		}
+	}
+
 	/* Reset the vendor spec register to power on reset state */
 	writel_relaxed(CORE_VENDOR_SPEC_POR_VAL,
 			host->ioaddr + msm_offset->core_vendor_spec);

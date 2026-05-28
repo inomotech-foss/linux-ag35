@@ -80,7 +80,7 @@
 		regulator-max-microvolt = <3300000>;
 		gpio = <&pm8019_gpios 3 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
-		startup-delay-us = <70000>;
+		startup-delay-us = <150000>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&wifi_pwr_en_default>;
 	};
@@ -88,14 +88,34 @@
 	/*
 	 * MMC power sequencer for QCA6174 SDIO.
 	 * WLAN_EN (TLMM gpio54) is asserted after vmmc rises so the chip
-	 * comes out of reset only once supplies are stable.
+	 * comes out of reset only once supplies are stable.  The 200 ms
+	 * post-power-on delay matches the downstream wlan init script:
+	 * QCA6174's internal SDIO subsystem needs ~150 ms to be ready
+	 * after WLAN_EN goes high, before CMD5 will be acked.
 	 */
 	wifi_pwrseq: wifi-pwrseq {
 		compatible = "mmc-pwrseq-simple";
 		reset-gpios = <&tlmm 54 GPIO_ACTIVE_LOW>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&sdc1_wlan_gpio_active>;
-		post-power-on-delay-ms = <20>;
+		post-power-on-delay-ms = <200>;
+	};
+
+	/*
+	 * MMC power sequencer for QCA6174 SDIO.
+	 * WLAN_EN (TLMM gpio54) is active-low reset: pwrseq de-asserts it
+	 * (drives HIGH) after vmmc rises.  The 200 ms post-power-on delay
+	 * gives the QCA6174 SDIO subsystem time to become ready before the
+	 * host issues CMD5.  Downstream uses an equivalent delay in
+	 * /etc/init.d/wlan.
+	 */
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&tlmm 54 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&sdc1_wlan_gpio_active>;
+		post-power-on-delay-ms = <200>;
+		power-off-delay-us = <10000>;
 	};
 };
 
@@ -215,30 +235,38 @@
 };
 
 /*
- * SDCC1 = SDIO host for FC20 (QCA6174 / AR6320) WiFi.
+ * SDCC1 = SDIO host for FC20 (QCA9377) WiFi on the LTE OPEN EVB.
+ *
+ * Hardware routing: On MDM9607, SDCC1 can route its I/O signals to
+ * either dedicated SDC1 pads (pins 80-82) or GPIO-muxed pads (GPIO
+ * 12-17) via a TLMM selection register at 0x01111000 bit 1.  On the
+ * AG35 EVB, the FC20 module is wired to GPIO 12-17.  The third reg
+ * entry ("tlmm_mem") in the dtsi enables this routing in the driver.
  *
  * Power topology:
  *   vmmc (FC20 VBAT)  -> wifi_pwr_reg  -> PM8019 GPIO 3
- *   vqmmc (SDIO 1.8V) -> mdm9607_l11   (always-on PMIC LDO)
  *   mmc-pwrseq        -> WLAN_EN (TLMM gpio54) released after vmmc
  *
- * The interconnect / OPP / power-domain properties from the dtsi are
- * deleted (same workaround as sdhc_2): the bimc & pcnoc interconnect
- * providers are disabled, so dev_pm_opp_of_find_icc_paths returns
- * -EPROBE_DEFER forever and the host never probes.
+ * max-frequency: Downstream caps SDCC1 at 50 MHz.  GPIO-routed pads
+ * lack the signal integrity for UHS SDR104 (208 MHz).
+ * no-1-8-v: Prevents UHS mode negotiation.  After firmware boots and
+ * reconfigures the chip's PLL, SDR104 signaling on these GPIO pads
+ * produces CRC errors (-84 EILSEQ).  Staying in High Speed mode avoids
+ * the problematic re-negotiation during ath10k's probe→start cycle.
  *
- * cap-power-off-card lets the MMC core fully power off the SDIO card
- * (vmmc disable) when the wifi driver is unbound, dropping the FC20
- * to ~0 mA.
+ * The interconnect / OPP / power-domain properties from the dtsi are
+ * deleted: the bimc & pcnoc interconnect providers are disabled.
  */
 &sdhc_1 {
 	vmmc-supply = <&wifi_pwr_reg>;
-	vqmmc-supply = <&mdm9607_l11>;
 	mmc-pwrseq = <&wifi_pwrseq>;
 
 	bus-width = <4>;
+	max-frequency = <50000000>;
+	no-1-8-v;
 	non-removable;
 	cap-power-off-card;
+	cap-sdio-irq;
 	keep-power-in-suspend;
 	wakeup-source;
 
