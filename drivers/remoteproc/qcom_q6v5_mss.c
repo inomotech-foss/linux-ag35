@@ -26,6 +26,7 @@
 #include <linux/remoteproc.h>
 #include <linux/reset.h>
 #include <linux/soc/qcom/mdt_loader.h>
+#include <linux/soc/qcom/smem.h>
 #include <linux/iopoll.h>
 #include <linux/slab.h>
 
@@ -254,6 +255,7 @@ struct q6v5 {
 };
 
 enum {
+	MSS_MDM9607,
 	MSS_MSM8226,
 	MSS_MSM8909,
 	MSS_MSM8916,
@@ -604,7 +606,7 @@ static int q6v5_rmb_pbl_wait(struct q6v5 *qproc, int ms)
 		if (time_after(jiffies, timeout))
 			return -ETIMEDOUT;
 
-		msleep(1);
+		mdelay(1);
 	}
 
 	return val;
@@ -630,7 +632,7 @@ static int q6v5_rmb_mba_wait(struct q6v5 *qproc, u32 status, int ms)
 		if (time_after(jiffies, timeout))
 			return -ETIMEDOUT;
 
-		msleep(1);
+		mdelay(1);
 	}
 
 	return val;
@@ -745,17 +747,23 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 			return ret;
 		}
 		goto pbl_wait;
-	} else if (qproc->version == MSS_MSM8909 ||
+	} else if (qproc->version == MSS_MDM9607 ||
+		   qproc->version == MSS_MSM8909 ||
 		   qproc->version == MSS_MSM8953 ||
 		   qproc->version == MSS_MSM8996 ||
 		   qproc->version == MSS_MSM8998 ||
 		   qproc->version == MSS_SDM660) {
 
 		if (qproc->version != MSS_MSM8909 &&
-		    qproc->version != MSS_MSM8953)
+		    qproc->version != MSS_MSM8953) {
+			u32 acc_val = QDSP6SS_ACC_OVERRIDE_VAL;
+
+			if (qproc->version == MSS_MDM9607)
+				acc_val = 0x80800000;
 			/* Override the ACC value if required */
-			writel(QDSP6SS_ACC_OVERRIDE_VAL,
+			writel(acc_val,
 			       qproc->reg_base + QDSP6SS_STRAP_ACC);
+		}
 
 		/* Assert resets, stop core */
 		val = readl(qproc->reg_base + QDSP6SS_RESET_REG);
@@ -810,7 +818,8 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 			writel(val, qproc->reg_base + QDSP6SS_PWR_CTL_REG);
 
 			/* Turn on L1, L2, ETB and JU memories 1 at a time */
-			if (qproc->version == MSS_MSM8953 ||
+			if (qproc->version == MSS_MDM9607 ||
+			    qproc->version == MSS_MSM8953 ||
 			    qproc->version == MSS_MSM8996) {
 				mem_pwr_ctl = QDSP6SS_MEM_PWR_CTL;
 				i = 19;
@@ -820,16 +829,37 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 				i = 28;
 			}
 			val = readl(qproc->reg_base + mem_pwr_ctl);
-			for (; i >= 0; i--) {
-				val |= BIT(i);
-				writel(val, qproc->reg_base + mem_pwr_ctl);
+			if (qproc->version == MSS_MDM9607) {
 				/*
-				 * Read back value to ensure the write is done then
-				 * wait for 1us for both memory peripheral and data
-				 * array to turn on.
+				 * MDM9607 uses inrush-current-aware
+				 * sequencing: power bits 19..6 first
+				 * (descending), then 0..5 (ascending)
+				 * to limit current spikes on the L2
+				 * data banks.
 				 */
-				val |= readl(qproc->reg_base + mem_pwr_ctl);
-				udelay(1);
+				for (i = 19; i >= 6; i--) {
+					val |= BIT(i);
+					writel(val, qproc->reg_base + mem_pwr_ctl);
+					udelay(1);
+				}
+				for (i = 0; i <= 5; i++) {
+					val |= BIT(i);
+					writel(val, qproc->reg_base + mem_pwr_ctl);
+					udelay(1);
+				}
+			} else {
+				for (; i >= 0; i--) {
+					val |= BIT(i);
+					writel(val, qproc->reg_base + mem_pwr_ctl);
+					/*
+					 * Read back value to ensure the
+					 * write is done then wait for 1us
+					 * for both memory peripheral and
+					 * data array to turn on.
+					 */
+					val |= readl(qproc->reg_base + mem_pwr_ctl);
+					udelay(1);
+				}
 			}
 		} else {
 			/* Turn on memories */
@@ -880,7 +910,7 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 	val &= ~Q6SS_CLAMP_IO;
 	writel(val, qproc->reg_base + QDSP6SS_PWR_CTL_REG);
 
-	/* Bring core out of reset */
+	/* Bring core out of reset (keep stopped) */
 	val = readl(qproc->reg_base + QDSP6SS_RESET_REG);
 	val &= ~Q6SS_CORE_ARES;
 	writel(val, qproc->reg_base + QDSP6SS_RESET_REG);
@@ -896,18 +926,13 @@ static int q6v5proc_reset(struct q6v5 *qproc)
 	writel(val, qproc->reg_base + QDSP6SS_RESET_REG);
 
 pbl_wait:
-	/* Wait for PBL status */
-	ret = q6v5_rmb_pbl_wait(qproc, 1000);
-	if (ret == -ETIMEDOUT) {
-		dev_err(qproc->dev, "PBL boot timed out\n");
-	} else if (ret != RMB_PBL_SUCCESS) {
-		dev_err(qproc->dev, "PBL returned unexpected status %d\n", ret);
-		ret = -EINVAL;
-	} else {
-		ret = 0;
-	}
-
-	return ret;
+	/*
+	 * PBL wait is performed by the caller (q6v5_mba_load) after the
+	 * MBA image address has been written to RMB_MBA_IMAGE_REG.  On
+	 * MDM9607, PBL samples that register at release time, so the
+	 * address must be in place before we get here.
+	 */
+	return 0;
 }
 
 static int q6v5proc_enable_qchannel(struct q6v5 *qproc, struct regmap *map, u32 offset)
@@ -1214,15 +1239,35 @@ static int q6v5_mba_load(struct q6v5 *qproc)
 	if (qproc->has_mba_logs)
 		qcom_pil_info_store("mba", qproc->mba_phys, MBA_LOG_SIZE);
 
+	/* Write MBA address and DP info BEFORE releasing Q6.
+	 * PBL reads RMB_MBA_IMAGE immediately on boot — it does NOT
+	 * spin waiting for a non-zero value.
+	 */
 	writel(qproc->mba_phys, qproc->rmb_base + RMB_MBA_IMAGE_REG);
 	if (qproc->dp_size) {
 		writel(qproc->mba_phys + SZ_1M, qproc->rmb_base + RMB_PMI_CODE_START_REG);
 		writel(qproc->dp_size, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
+	} else {
+		writel(0, qproc->rmb_base + RMB_PMI_CODE_START_REG);
+		writel(0, qproc->rmb_base + RMB_PMI_CODE_LENGTH_REG);
 	}
+	/* Ensure RMB writes are visible before Q6 core release */
+	mb();
 
 	ret = q6v5proc_reset(qproc);
 	if (ret)
 		goto reclaim_mba;
+
+	/* Poll for PBL completion */
+	ret = q6v5_rmb_pbl_wait(qproc, 1000);
+	if (ret == -ETIMEDOUT) {
+		dev_err(qproc->dev, "PBL boot timed out\n");
+		goto halt_axi_ports;
+	} else if (ret != RMB_PBL_SUCCESS) {
+		dev_err(qproc->dev, "PBL returned unexpected status %d\n", ret);
+		ret = -EINVAL;
+		goto halt_axi_ports;
+	}
 
 	ret = q6v5_rmb_mba_wait(qproc, 0, 5000);
 	if (ret == -ETIMEDOUT) {
@@ -1303,7 +1348,8 @@ static void q6v5_mba_reclaim(struct q6v5 *qproc)
 		q6v5proc_halt_axi_port(qproc, qproc->halt_map, qproc->halt_vq6);
 	q6v5proc_halt_axi_port(qproc, qproc->halt_map, qproc->halt_modem);
 	q6v5proc_halt_axi_port(qproc, qproc->halt_map, qproc->halt_nc);
-	if (qproc->version == MSS_MSM8996) {
+	if (qproc->version == MSS_MDM9607 ||
+	    qproc->version == MSS_MSM8996) {
 		/*
 		 * To avoid high MX current during LPASS/MSS restart.
 		 */
@@ -1635,6 +1681,46 @@ static int q6v5_start(struct rproc *rproc)
 	struct q6v5 *qproc = rproc->priv;
 	int xfermemop_ret;
 	int ret;
+
+	/*
+	 * Make sure the SMSM SMEM items exist and clear the modem's own
+	 * stale state before booting it.
+	 *
+	 * The Quectel modem firmware reads SMEM item 333 (interrupt mask)
+	 * and item 85 (shared SMSM state) very early during its boot.  If
+	 * either is absent the modem skips A2/BAM-DMUX activation.  SMEM
+	 * survives warm reboots, so leftover bits in the modem's entry
+	 * (index 1) from a previous boot can also confuse it; clear them.
+	 *
+	 * APPS SMSM state itself (entry 0) is owned by the SMSM driver
+	 * and set to INIT|SMDINIT|RPCINIT|PROC_AWAKE at smsm probe.
+	 */
+	{
+		u32 *smsm_state;
+		size_t smsm_size;
+		int alloc_ret;
+
+		alloc_ret = qcom_smem_alloc(QCOM_SMEM_HOST_ANY, 333,
+					    8 * 3 * sizeof(u32));
+		if (alloc_ret && alloc_ret != -EEXIST)
+			dev_dbg(qproc->dev,
+				"SMSM intr mask alloc: %d\n", alloc_ret);
+
+		smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85, &smsm_size);
+		if (IS_ERR(smsm_state)) {
+			alloc_ret = qcom_smem_alloc(QCOM_SMEM_HOST_ANY, 85,
+						    8 * sizeof(u32));
+			if (alloc_ret && alloc_ret != -EEXIST)
+				dev_warn(qproc->dev,
+					 "failed to alloc SMSM state: %d\n",
+					 alloc_ret);
+			smsm_state = qcom_smem_get(QCOM_SMEM_HOST_ANY, 85,
+						   &smsm_size);
+		}
+		if (!IS_ERR(smsm_state) &&
+		    smsm_size / sizeof(u32) > 1)
+			writel(0, &smsm_state[1]);
+	}
 
 	ret = q6v5_mba_load(qproc);
 	if (ret)
@@ -2437,6 +2523,41 @@ static const struct rproc_hexagon_res msm8909_mss = {
 	.version = MSS_MSM8909,
 };
 
+static const struct rproc_hexagon_res mdm9607_mss = {
+	.hexagon_mba_image = "mba.mbn",
+	.proxy_supply = (struct qcom_mss_reg_res[]) {
+		{
+			.supply = "pll",
+			.uA = 100000,
+		},
+		{}
+	},
+	.proxy_clk_names = (char*[]){
+		"xo",
+		NULL
+	},
+	.active_clk_names = (char*[]){
+		"iface",
+		"bus",
+		"mem",
+		NULL
+	},
+	.proxy_pd_names = (char*[]){
+		"mx",
+		"cx",
+		NULL
+	},
+	.need_mem_protection = false,
+	.has_alt_reset = false,
+	.has_mba_logs = false,
+	.has_spare_reg = false,
+	.has_qaccept_regs = false,
+	.has_ext_bhs_reg = false,
+	.has_ext_cntl_regs = false,
+	.has_vq6 = false,
+	.version = MSS_MDM9607,
+};
+
 static const struct rproc_hexagon_res msm8916_mss = {
 	.hexagon_mba_image = "mba.mbn",
 	.proxy_supply = (struct qcom_mss_reg_res[]) {
@@ -2661,6 +2782,7 @@ static const struct of_device_id q6v5_of_match[] = {
 	{ .compatible = "qcom,msm8226-mss-pil", .data = &msm8226_mss},
 	{ .compatible = "qcom,msm8909-mss-pil", .data = &msm8909_mss},
 	{ .compatible = "qcom,msm8916-mss-pil", .data = &msm8916_mss},
+	{ .compatible = "qcom,mdm9607-mss-pil", .data = &mdm9607_mss},
 	{ .compatible = "qcom,msm8926-mss-pil", .data = &msm8926_mss},
 	{ .compatible = "qcom,msm8953-mss-pil", .data = &msm8953_mss},
 	{ .compatible = "qcom,msm8974-mss-pil", .data = &msm8974_mss},

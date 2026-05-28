@@ -552,7 +552,7 @@ static void sysmon_stop(struct rproc_subdev *subdev, bool crashed)
 
 	if (sysmon->ssctl_instance) {
 		if (!wait_for_completion_timeout(&sysmon->ssctl_comp, HZ / 2))
-			dev_err(sysmon->dev, "timeout waiting for ssctl service\n");
+			dev_dbg(sysmon->dev, "timeout waiting for ssctl service\n");
 	}
 
 	if (sysmon->ssctl_version)
