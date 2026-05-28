@@ -69,13 +69,14 @@
 	 * for system-idle current targets near the PMIC quiescent floor.
 	 *
 	 * EVB requires switch S0201 set RIGHT to route SDC1 to FC20.
+	 * Note: PM8019 GPIO 2 = BT_EN (separate); GPIO 3 = WiFi power.
 	 */
 	wifi_pwr_reg: regulator-wifi-pwr {
 		compatible = "regulator-fixed";
 		regulator-name = "wifi_vbat";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
-		gpio = <&pm8019_gpios 2 GPIO_ACTIVE_HIGH>;
+		gpio = <&pm8019_gpios 3 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		startup-delay-us = <70000>;
 		pinctrl-names = "default";
@@ -193,7 +194,7 @@
 /* &pm8019_mpps { ... }; */
 
 /*
- * PM8019 GPIO 2 = "PM_ENABLE_WIFI": gates the board-level VBAT rail to
+ * PM8019 GPIO 3 = "PM_ENABLE_WIFI": gates the board-level VBAT rail to
  * the FC20 (QCA6174) WiFi+BT module.  Configured as a normal output,
  * VPH_PWR source, default low so WiFi is OFF at boot (downstream does
  * the same: "do not active PM_ENABLE_WIFI when bootup time").  The
@@ -201,7 +202,7 @@
  */
 &pm8019_gpios {
 	wifi_pwr_en_default: wifi-pwr-en-default {
-		pins = "gpio2";
+		pins = "gpio3";
 		function = "normal";
 		bias-disable;
 		drive-push-pull;
@@ -215,7 +216,7 @@
  * SDCC1 = SDIO host for FC20 (QCA6174 / AR6320) WiFi.
  *
  * Power topology:
- *   vmmc (FC20 VBAT)  -> wifi_pwr_reg  -> PM8019 GPIO 2
+ *   vmmc (FC20 VBAT)  -> wifi_pwr_reg  -> PM8019 GPIO 3
  *   vqmmc (SDIO 1.8V) -> mdm9607_l11   (always-on PMIC LDO)
  *   mmc-pwrseq        -> WLAN_EN (TLMM gpio54) released after vmmc
  *
