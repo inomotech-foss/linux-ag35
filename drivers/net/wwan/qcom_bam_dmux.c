@@ -83,6 +83,8 @@ struct bam_dmux {
 	atomic_long_t tx_deferred_skb;
 	struct work_struct tx_wakeup_work;
 
+	struct delayed_work boot_work;
+
 	DECLARE_BITMAP(remote_channels, BAM_DMUX_NUM_CH);
 	struct work_struct register_netdev_work;
 	struct net_device *netdevs[BAM_DMUX_NUM_CH];
@@ -226,6 +228,116 @@ bam_dmux_tx_queue(struct bam_dmux *dmux, struct sk_buff *skb)
 	return skb_dma;
 }
 
+/*
+ * bam_dmux_inject_tx_callback() - completion callback for boot-time
+ * injected control commands (e.g. proactive CMD_OPEN).
+ *
+ * Unlike bam_dmux_tx_callback() which goes through bam_dmux_tx_done()
+ * and calls pm_runtime_put_autosuspend(), this callback does NOT touch
+ * pm_runtime, because the injection path never took a pm_runtime
+ * reference (the modem is already powered via boot_work's direct
+ * pc_vote() and the subsequent pc_irq handshake).
+ */
+static void bam_dmux_inject_tx_callback(void *data)
+{
+	struct bam_dmux_skb_dma *skb_dma = data;
+	struct bam_dmux *dmux = skb_dma->dmux;
+	struct sk_buff *skb = skb_dma->skb;
+	unsigned long flags;
+
+	if (skb_dma->addr)
+		bam_dmux_skb_dma_unmap(skb_dma, DMA_TO_DEVICE);
+
+	spin_lock_irqsave(&dmux->tx_lock, flags);
+	skb_dma->skb = NULL;
+	if (skb_dma == &dmux->tx_skbs[dmux->tx_next_skb % BAM_DMUX_NUM_SKB])
+		bam_dmux_tx_wake_queues(dmux);
+	spin_unlock_irqrestore(&dmux->tx_lock, flags);
+
+	dev_dbg(dmux->dev, "inject_tx: CMD_OPEN delivered to modem\n");
+	dev_consume_skb_any(skb);
+}
+
+/*
+ * bam_dmux_inject_cmd_open() - send a CMD_OPEN to the modem for channel @ch
+ * directly from the boot/pc_irq path, bypassing pm_runtime.
+ *
+ * Background: the mainline qcom_bam_dmux driver is purely reactive — it
+ * registers a netdev only after the modem sends an unsolicited CMD_OPEN.
+ * The Quectel MDM9607 modem firmware does NOT initiate CMD_OPEN; instead
+ * it waits for APPS to open the channel first (matching the downstream
+ * msm_bam_dmux_open() flow in drivers/soc/qcom/bam_dmux.c).  This causes
+ * a chicken-and-egg deadlock: modem won't push data on pipe 5 because
+ * APPS never opened a channel; APPS can't open a channel because no
+ * netdev exists; no netdev exists because modem never sent CMD_OPEN.
+ *
+ * Break the cycle by sending CMD_OPEN for channel 0 right after the
+ * power-state handshake completes.  If the modem responds with its own
+ * CMD_OPEN (the normal protocol acknowledgement), bam_dmux_cmd_open()
+ * schedules register_netdev_work and the channel becomes usable.
+ *
+ * We use a custom path (not bam_dmux_send_cmd) because send_cmd ties
+ * into pm_runtime, and triggering autosuspend right after this command
+ * would cause us to drop the PC vote and lose the modem connection
+ * before userspace has a chance to take a reference on the netdev.
+ */
+static int bam_dmux_inject_cmd_open(struct bam_dmux *dmux, u8 ch)
+{
+	struct bam_dmux_skb_dma *skb_dma;
+	struct dma_async_tx_descriptor *desc;
+	struct bam_dmux_hdr *hdr;
+	struct sk_buff *skb;
+	unsigned long flags;
+
+	skb = alloc_skb(sizeof(*hdr), GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+
+	hdr = skb_put_zero(skb, sizeof(*hdr));
+	hdr->magic = BAM_DMUX_HDR_MAGIC;
+	hdr->cmd = BAM_DMUX_CMD_OPEN;
+	hdr->ch = ch;
+
+	/* Reserve TX slot without taking a pm_runtime reference */
+	spin_lock_irqsave(&dmux->tx_lock, flags);
+	skb_dma = &dmux->tx_skbs[dmux->tx_next_skb % BAM_DMUX_NUM_SKB];
+	if (skb_dma->skb) {
+		spin_unlock_irqrestore(&dmux->tx_lock, flags);
+		dev_err(dmux->dev, "inject_cmd_open: TX queue full\n");
+		dev_kfree_skb(skb);
+		return -EAGAIN;
+	}
+	skb_dma->skb = skb;
+	dmux->tx_next_skb++;
+	spin_unlock_irqrestore(&dmux->tx_lock, flags);
+
+	if (!bam_dmux_skb_dma_map(skb_dma, DMA_TO_DEVICE))
+		goto fail;
+
+	desc = dmaengine_prep_slave_single(dmux->tx, skb_dma->addr, skb->len,
+					   DMA_MEM_TO_DEV, DMA_PREP_INTERRUPT);
+	if (!desc) {
+		dev_err(dmux->dev, "inject_cmd_open: prep_slave_single failed\n");
+		bam_dmux_skb_dma_unmap(skb_dma, DMA_TO_DEVICE);
+		goto fail;
+	}
+
+	desc->callback = bam_dmux_inject_tx_callback;
+	desc->callback_param = skb_dma;
+	desc->cookie = dmaengine_submit(desc);
+	dma_async_issue_pending(dmux->tx);
+
+	dev_dbg(dmux->dev, "inject_cmd_open: submitted CMD_OPEN for ch %u\n", ch);
+	return 0;
+
+fail:
+	spin_lock_irqsave(&dmux->tx_lock, flags);
+	skb_dma->skb = NULL;
+	spin_unlock_irqrestore(&dmux->tx_lock, flags);
+	dev_kfree_skb(skb);
+	return -EIO;
+}
+
 static int bam_dmux_send_cmd(struct bam_dmux_netdev *bndev, u8 cmd)
 {
 	struct bam_dmux *dmux = bndev->dmux;
@@ -336,6 +448,7 @@ static netdev_tx_t bam_dmux_netdev_start_xmit(struct sk_buff *skb,
 	struct bam_dmux_netdev *bndev = netdev_priv(netdev);
 	struct bam_dmux *dmux = bndev->dmux;
 	struct bam_dmux_skb_dma *skb_dma;
+	unsigned int tx_bytes = skb->len;
 	int active, ret;
 
 	skb_dma = bam_dmux_tx_queue(dmux, skb);
@@ -358,6 +471,7 @@ static netdev_tx_t bam_dmux_netdev_start_xmit(struct sk_buff *skb,
 		if (!atomic_long_fetch_or(BIT(skb_dma - dmux->tx_skbs),
 					  &dmux->tx_deferred_skb))
 			queue_pm_work(&dmux->tx_wakeup_work);
+		dev_sw_netstats_tx_add(netdev, 1, tx_bytes);
 		return NETDEV_TX_OK;
 	}
 
@@ -365,11 +479,13 @@ static netdev_tx_t bam_dmux_netdev_start_xmit(struct sk_buff *skb,
 		goto drop;
 
 	dma_async_issue_pending(dmux->tx);
+	dev_sw_netstats_tx_add(netdev, 1, tx_bytes);
 	return NETDEV_TX_OK;
 
 drop:
 	bam_dmux_tx_done(skb_dma);
 	dev_kfree_skb_any(skb);
+	netdev->stats.tx_dropped++;
 	return NETDEV_TX_OK;
 }
 
@@ -422,45 +538,57 @@ static void bam_dmux_netdev_setup(struct net_device *dev)
 	dev->needed_headroom = sizeof(struct bam_dmux_hdr);
 	dev->needed_tailroom = sizeof(u32); /* word-aligned */
 	dev->tx_queue_len = DEFAULT_TX_QUEUE_LEN;
+	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
 
 	/* This perm addr will be used as interface identifier by IPv6 */
 	dev->addr_assign_type = NET_ADDR_RANDOM;
 	eth_random_addr(dev->perm_addr);
 }
 
+static int bam_dmux_register_netdev(struct bam_dmux *dmux, u8 ch)
+{
+	struct bam_dmux_netdev *bndev;
+	struct net_device *netdev;
+	int ret;
+
+	if (dmux->netdevs[ch])
+		return 0;
+
+	netdev = alloc_netdev(sizeof(*bndev), "wwan%d", NET_NAME_ENUM,
+			      bam_dmux_netdev_setup);
+	if (!netdev)
+		return -ENOMEM;
+
+	SET_NETDEV_DEV(netdev, dmux->dev);
+	netdev->dev_port = ch;
+
+	bndev = netdev_priv(netdev);
+	bndev->dmux = dmux;
+	bndev->ch = ch;
+
+	ret = register_netdev(netdev);
+	if (ret) {
+		dev_err(dmux->dev, "Failed to register netdev for channel %u: %d\n",
+			ch, ret);
+		free_netdev(netdev);
+		return ret;
+	}
+
+	/* Start detached until modem opens the channel */
+	netif_carrier_off(netdev);
+	netif_device_detach(netdev);
+
+	dmux->netdevs[ch] = netdev;
+	return 0;
+}
+
 static void bam_dmux_register_netdev_work(struct work_struct *work)
 {
 	struct bam_dmux *dmux = container_of(work, struct bam_dmux, register_netdev_work);
-	struct bam_dmux_netdev *bndev;
-	struct net_device *netdev;
-	int ch, ret;
+	int ch;
 
-	for_each_set_bit(ch, dmux->remote_channels, BAM_DMUX_NUM_CH) {
-		if (dmux->netdevs[ch])
-			continue;
-
-		netdev = alloc_netdev(sizeof(*bndev), "wwan%d", NET_NAME_ENUM,
-				      bam_dmux_netdev_setup);
-		if (!netdev)
-			return;
-
-		SET_NETDEV_DEV(netdev, dmux->dev);
-		netdev->dev_port = ch;
-
-		bndev = netdev_priv(netdev);
-		bndev->dmux = dmux;
-		bndev->ch = ch;
-
-		ret = register_netdev(netdev);
-		if (ret) {
-			dev_err(dmux->dev, "Failed to register netdev for channel %u: %d\n",
-				ch, ret);
-			free_netdev(netdev);
-			return;
-		}
-
-		dmux->netdevs[ch] = netdev;
-	}
+	for_each_set_bit(ch, dmux->remote_channels, BAM_DMUX_NUM_CH)
+		bam_dmux_register_netdev(dmux, ch);
 }
 
 static void bam_dmux_rx_callback(void *data);
@@ -534,6 +662,7 @@ static void bam_dmux_cmd_data(struct bam_dmux_skb_dma *skb_dma)
 		break;
 	}
 
+	dev_sw_netstats_rx_add(netdev, hdr->len);
 	netif_receive_skb(skb);
 }
 
@@ -550,6 +679,7 @@ static void bam_dmux_cmd_open(struct bam_dmux *dmux, struct bam_dmux_hdr *hdr)
 
 	if (netdev) {
 		netif_device_attach(netdev);
+		netif_carrier_on(netdev);
 	} else {
 		/* Cannot sleep here, schedule work to register the netdev */
 		schedule_work(&dmux->register_netdev_work);
@@ -567,8 +697,10 @@ static void bam_dmux_cmd_close(struct bam_dmux *dmux, struct bam_dmux_hdr *hdr)
 		return;
 	}
 
-	if (netdev)
+	if (netdev) {
+		netif_carrier_off(netdev);
 		netif_device_detach(netdev);
+	}
 }
 
 static void bam_dmux_rx_callback(void *data)
@@ -620,13 +752,29 @@ static bool bam_dmux_power_on(struct bam_dmux *dmux)
 	};
 	int i;
 
-	dmux->rx = dma_request_chan(dev, "rx");
-	if (IS_ERR(dmux->rx)) {
-		dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
-		dmux->rx = NULL;
-		return false;
+	/* Already powered on (e.g. pre-initialized from boot_work) */
+	if (dmux->rx_skbs[0].addr)
+		return true;
+
+	if (!dmux->rx) {
+		dmux->rx = dma_request_chan(dev, "rx");
+		if (IS_ERR(dmux->rx)) {
+			dev_err(dev, "Failed to request RX DMA channel: %pe\n", dmux->rx);
+			dmux->rx = NULL;
+			return false;
+		}
+		dmaengine_slave_config(dmux->rx, &dma_rx_conf);
 	}
-	dmaengine_slave_config(dmux->rx, &dma_rx_conf);
+
+	if (!dmux->tx) {
+		dmux->tx = dma_request_chan(dev, "tx");
+		if (IS_ERR(dmux->tx)) {
+			dev_err(dev, "Failed to request TX DMA channel: %pe\n",
+				dmux->tx);
+			dmux->tx = NULL;
+			return false;
+		}
+	}
 
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		if (!bam_dmux_skb_dma_queue_rx(&dmux->rx_skbs[i], GFP_KERNEL))
@@ -654,19 +802,68 @@ static void bam_dmux_free_skbs(struct bam_dmux_skb_dma skbs[],
 	}
 }
 
+/*
+ * Stop the netdev TX path so no new descriptors get queued onto the
+ * BAM while we are tearing down the data path.  Called from contexts
+ * where the modem peer may already be gone (pc_irq down, modem SSR,
+ * system shutdown), so it must not touch BAM hardware itself.
+ */
+static void bam_dmux_quiesce_netdevs(struct bam_dmux *dmux)
+{
+	int i;
+
+	rtnl_lock();
+	for (i = 0; i < BAM_DMUX_NUM_CH; ++i) {
+		struct net_device *netdev = dmux->netdevs[i];
+
+		if (!netdev)
+			continue;
+		netif_carrier_off(netdev);
+		netif_tx_disable(netdev);
+	}
+	rtnl_unlock();
+}
+
+/*
+ * Tear down the data path in response to a modem-initiated power-down
+ * (pc_irq new_state=0) or modem SSR.  At this point the modem-side A2
+ * BAM peer is in the process of going away, so any register write that
+ * crosses the BAM<->peer link (channel reset, halt, SW_RST) can
+ * provoke an imprecise external abort from the BAM hardware.
+ *
+ * We therefore:
+ *   1. Stop the netdev TX queues so the xmit path stops submitting to
+ *      dmux->tx.
+ *   2. Cancel any pending tx-wake work that could submit after we
+ *      return.
+ *   3. Call dmaengine_terminate_sync() to flush in-flight descriptors
+ *      at the channel level.  NOTE: terminate must NOT touch BAM
+ *      registers here — the A2 BAM is qcom,powered-remotely, so the
+ *      modem has already gated its clock/reset by the time this runs,
+ *      and any pipe-register access (e.g. BAM_P_RST) faults with an
+ *      imprecise external abort.  bam_dma_terminate_all() handles this
+ *      by freeing descriptors in software and deferring the pipe reset
+ *      to the next power-on for powered-remotely BAMs.
+ *   4. Release the RX skbs so the next bam_dmux_power_on() can re-queue
+ *      them.
+ *
+ * We deliberately do NOT call dma_release_channel() here: that would
+ * end up in bam_free_chan() touching BAM_P_HALT / BAM_SW_RST / the
+ * shared FIFO state, which is what causes the abort when the modem
+ * side has just been torn down.  The channel handles are kept open
+ * for the entire lifetime of the driver and reused on the next
+ * power-on cycle; bam_dmux_power_on() already short-circuits the
+ * dma_request_chan() call when dmux->tx / dmux->rx are non-NULL.
+ */
 static void bam_dmux_power_off(struct bam_dmux *dmux)
 {
-	if (dmux->tx) {
-		dmaengine_terminate_sync(dmux->tx);
-		dma_release_channel(dmux->tx);
-		dmux->tx = NULL;
-	}
+	bam_dmux_quiesce_netdevs(dmux);
+	cancel_work_sync(&dmux->tx_wakeup_work);
 
-	if (dmux->rx) {
+	if (dmux->tx)
+		dmaengine_terminate_sync(dmux->tx);
+	if (dmux->rx)
 		dmaengine_terminate_sync(dmux->rx);
-		dma_release_channel(dmux->rx);
-		dmux->rx = NULL;
-	}
 
 	bam_dmux_free_skbs(dmux->rx_skbs, DMA_FROM_DEVICE);
 }
@@ -677,14 +874,39 @@ static irqreturn_t bam_dmux_pc_irq(int irq, void *data)
 	bool new_state = !dmux->pc_state;
 
 	dev_dbg(dmux->dev, "pc: %u\n", new_state);
+	cancel_delayed_work(&dmux->boot_work);
 
 	if (new_state) {
-		if (bam_dmux_power_on(dmux))
+		if (bam_dmux_power_on(dmux)) {
 			bam_dmux_pc_ack(dmux);
-		else
+			/*
+			 * Modem-initiated power-up: the MDM9607 modem firmware
+			 * raises pc to ask apps to bring BAM up, but if apps
+			 * does not also assert its own pc vote, the modem
+			 * powers BAM down again before it ever sends the
+			 * initial CMD_OPEN.  Assert our pc vote so the modem
+			 * keeps BAM up long enough to complete the open
+			 * handshake.  The vote is cleared in the down path
+			 * below when the modem releases its bit.  Runtime PM
+			 * does not manage the vote in modem-driven mode; see
+			 * bam_dmux_runtime_{suspend,resume}().
+			 */
+			bam_dmux_pc_vote(dmux, true);
+			/*
+			 * Kick the modem: send a proactive CMD_OPEN for
+			 * channel 0.  See bam_dmux_inject_cmd_open() for
+			 * rationale.  Failure here is non-fatal — userspace
+			 * can still retry via netdev open once a netdev
+			 * exists.
+			 */
+			bam_dmux_inject_cmd_open(dmux, BAM_DMUX_CH_DATA_0);
+		} else {
+			dev_err(dmux->dev, "power_on failed\n");
 			bam_dmux_power_off(dmux);
+		}
 	} else {
 		bam_dmux_power_off(dmux);
+		bam_dmux_pc_vote(dmux, false);
 		bam_dmux_pc_ack(dmux);
 	}
 
@@ -704,13 +926,19 @@ static irqreturn_t bam_dmux_pc_ack_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * MDM9607 runs in modem-driven mode (the modem firmware owns the A2
+ * power state machine).  The pc vote is asserted/cleared exclusively
+ * by bam_dmux_pc_irq() in response to modem-initiated transitions;
+ * letting the kernel's runtime PM core toggle the vote on its own
+ * autosuspend schedule races against the modem's handshake and leaves
+ * BAM in inconsistent states.  Keep the callbacks as inert hooks so
+ * pm_runtime_get_sync()/pm_runtime_put_autosuspend() in the TX path
+ * keep working without touching the pc vote.  DMA channels are
+ * requested in bam_dmux_power_on() rather than here.
+ */
 static int bam_dmux_runtime_suspend(struct device *dev)
 {
-	struct bam_dmux *dmux = dev_get_drvdata(dev);
-
-	dev_dbg(dev, "runtime suspend\n");
-	bam_dmux_pc_vote(dmux, false);
-
 	return 0;
 }
 
@@ -718,49 +946,65 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 {
 	struct bam_dmux *dmux = dev_get_drvdata(dev);
 
-	dev_dbg(dev, "runtime resume\n");
+	/* TX path needs BAM up; only succeed if pc is currently asserted. */
+	return dmux->pc_state ? 0 : -EAGAIN;
+}
 
-	/* Wait until previous power down was acked */
-	if (!wait_for_completion_timeout(&dmux->pc_ack_completion,
-					 BAM_DMUX_REMOTE_TIMEOUT))
-		return -ETIMEDOUT;
+/**
+ * bam_dmux_boot_work() - kick-start BAM-DMUX on firmwares that need APPS to
+ *                        initiate the power handshake.
+ *
+ * Some modem firmwares (e.g. Quectel OCPU variants) do not assert
+ * A2_POWER_CONTROL until APPS requests first.  This work fires when the
+ * modem signals readiness (SMDINIT via remote-ready IRQ), then triggers the
+ * runtime resume path which sets APPS A2_POWER_CONTROL and waits for
+ * the modem's response.
+ */
+static void bam_dmux_boot_work_fn(struct work_struct *work)
+{
+	struct bam_dmux *dmux = container_of(work, struct bam_dmux, boot_work.work);
+	struct device *dev = dmux->dev;
 
-	/* Vote for power state */
+	/* If the modem already initiated, nothing to do */
+	if (dmux->pc_state)
+		return;
+
+	/*
+	 * Request power-on by asserting APPS A2_POWER_CONTROL (bit 1) FIRST.
+	 *
+	 * Per the modem firmware A2 power state machine (confirmed by
+	 * decompilation of MDM9607 modem fw, see scratch/references/modem-fw/
+	 * decomp/FINDINGS.md): the modem only turns on the A2 hardware AFTER
+	 * APPS sets the SMSM_A2_POWER_CONTROL bit.  The modem then sets its
+	 * own PWR_CTRL bit + the ACK bit, which fires pc_irq.  pc_irq's
+	 * handler calls bam_dmux_power_on() at the correct moment (after A2
+	 * is powered up and the modem has programmed its side of the BAM
+	 * pipes).  Writing BAM/pipe registers before this point hits A2
+	 * hardware that is still powered down, leaving the BAM and pipe
+	 * state inconsistent with what the modem later programs.
+	 *
+	 * Do NOT use pm_runtime here: autosuspend would clear bit 1 after
+	 * 1 second, before the modem has time to send CMD_OPEN.  Vote
+	 * directly; power-down happens only when the modem clears its bit 1.
+	 */
 	bam_dmux_pc_vote(dmux, true);
+}
 
-	/* Wait for ack */
-	if (!wait_for_completion_timeout(&dmux->pc_ack_completion,
-					 BAM_DMUX_REMOTE_TIMEOUT)) {
-		bam_dmux_pc_vote(dmux, false);
-		return -ETIMEDOUT;
-	}
+/**
+ * bam_dmux_remote_ready_irq - Modem has set SMDINIT, indicating it is ready
+ *
+ * This replaces the fixed 30-second delay with a deterministic trigger.
+ * The downstream kernel used smsm_state_cb_register() to watch for this
+ * same transition.
+ */
+static irqreturn_t bam_dmux_remote_ready_irq(int irq, void *data)
+{
+	struct bam_dmux *dmux = data;
 
-	/* Wait until we're up */
-	if (!wait_event_timeout(dmux->pc_wait, dmux->pc_state,
-				BAM_DMUX_REMOTE_TIMEOUT)) {
-		bam_dmux_pc_vote(dmux, false);
-		return -ETIMEDOUT;
-	}
+	/* Use a short delay to let SMD channels finish opening */
+	schedule_delayed_work(&dmux->boot_work, msecs_to_jiffies(500));
 
-	/* Ensure that we actually initialized successfully */
-	if (!dmux->rx) {
-		bam_dmux_pc_vote(dmux, false);
-		return -ENXIO;
-	}
-
-	/* Request TX channel if necessary */
-	if (dmux->tx)
-		return 0;
-
-	dmux->tx = dma_request_chan(dev, "tx");
-	if (IS_ERR(dmux->tx)) {
-		dev_err(dev, "Failed to request TX DMA channel: %pe\n", dmux->tx);
-		dmux->tx = NULL;
-		bam_dmux_runtime_suspend(dev);
-		return -ENXIO;
-	}
-
-	return 0;
+	return IRQ_HANDLED;
 }
 
 static int bam_dmux_probe(struct platform_device *pdev)
@@ -804,11 +1048,20 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	spin_lock_init(&dmux->tx_lock);
 	INIT_WORK(&dmux->tx_wakeup_work, bam_dmux_tx_wakeup_work);
 	INIT_WORK(&dmux->register_netdev_work, bam_dmux_register_netdev_work);
+	INIT_DELAYED_WORK(&dmux->boot_work, bam_dmux_boot_work_fn);
 
 	for (i = 0; i < BAM_DMUX_NUM_SKB; i++) {
 		dmux->rx_skbs[i].dmux = dmux;
 		dmux->tx_skbs[i].dmux = dmux;
 	}
+
+	/* Pre-register channel 0 netdev so userspace (e.g. ModemManager)
+	 * can discover the data interface at probe time.  It starts with
+	 * carrier off and device-detached until the modem opens the channel.
+	 */
+	ret = bam_dmux_register_netdev(dmux, BAM_DMUX_CH_DATA_0);
+	if (ret)
+		return ret;
 
 	/* Runtime PM manages our own power vote.
 	 * Note that the RX path may be active even if we are runtime suspended,
@@ -833,6 +1086,19 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_disable_pm;
 
+	/* Register remote-ready IRQ (modem SMDINIT) for APPS-initiates mode */
+	{
+		int remote_ready_irq = platform_get_irq_byname(pdev, "remote-ready");
+
+		if (remote_ready_irq > 0) {
+			ret = devm_request_threaded_irq(dev, remote_ready_irq, NULL,
+							bam_dmux_remote_ready_irq,
+							IRQF_ONESHOT, NULL, dmux);
+			if (ret)
+				dev_warn(dev, "failed to request remote-ready IRQ: %d\n", ret);
+		}
+	}
+
 	/* Check if remote finished initialization before us */
 	if (dmux->pc_state) {
 		if (bam_dmux_power_on(dmux))
@@ -856,6 +1122,8 @@ static void bam_dmux_remove(struct platform_device *pdev)
 	LIST_HEAD(list);
 	int i;
 
+	cancel_delayed_work_sync(&dmux->boot_work);
+
 	/* Unregister network interfaces */
 	cancel_work_sync(&dmux->register_netdev_work);
 	rtnl_lock();
@@ -873,13 +1141,58 @@ static void bam_dmux_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(dev);
 
 	/* Try to wait for remote side to drop power vote */
-	if (!wait_event_timeout(dmux->pc_wait, !dmux->rx, BAM_DMUX_REMOTE_TIMEOUT))
+	if (!wait_event_timeout(dmux->pc_wait, !dmux->pc_state,
+				BAM_DMUX_REMOTE_TIMEOUT))
 		dev_err(dev, "Timed out waiting for remote side to suspend\n");
 
 	/* Make sure everything is cleaned up before we return */
 	disable_irq(dmux->pc_irq);
 	bam_dmux_power_off(dmux);
 	bam_dmux_free_skbs(dmux->tx_skbs, DMA_TO_DEVICE);
+
+	/*
+	 * Release the DMA channels we kept open across power cycles.  This
+	 * is the only path that calls dma_release_channel(): pc_irq /
+	 * shutdown paths leave the channels allocated to avoid touching the
+	 * BAM peer-facing registers when the modem is in the middle of
+	 * going down.  Driver unbind is user-initiated, so the modem is
+	 * expected to be quiesced (pc_state == 0) by the wait above.
+	 */
+	if (dmux->tx) {
+		dma_release_channel(dmux->tx);
+		dmux->tx = NULL;
+	}
+	if (dmux->rx) {
+		dma_release_channel(dmux->rx);
+		dmux->rx = NULL;
+	}
+}
+
+/*
+ * On system shutdown the modem subsystem is powered down asynchronously by
+ * the firmware. Any in-flight or deferred TX work that runs after that
+ * point would issue BAM DMA descriptors against an MMIO window that is no
+ * longer backed by a powered peripheral, producing an imprecise external
+ * abort from inside the BAM DMA engine. Quiesce the data path here so it
+ * cannot race with modem power-collapse during reboot/poweroff.
+ */
+static void bam_dmux_shutdown(struct platform_device *pdev)
+{
+	struct bam_dmux *dmux = platform_get_drvdata(pdev);
+	int i;
+
+	rtnl_lock();
+	for (i = 0; i < BAM_DMUX_NUM_CH; ++i) {
+		struct net_device *netdev = dmux->netdevs[i];
+
+		if (!netdev)
+			continue;
+		netif_device_detach(netdev);
+		netif_carrier_off(netdev);
+	}
+	rtnl_unlock();
+
+	cancel_work_sync(&dmux->tx_wakeup_work);
 }
 
 static const struct dev_pm_ops bam_dmux_pm_ops = {
@@ -895,6 +1208,7 @@ MODULE_DEVICE_TABLE(of, bam_dmux_of_match);
 static struct platform_driver bam_dmux_driver = {
 	.probe = bam_dmux_probe,
 	.remove = bam_dmux_remove,
+	.shutdown = bam_dmux_shutdown,
 	.driver = {
 		.name = "bam-dmux",
 		.pm = &bam_dmux_pm_ops,
