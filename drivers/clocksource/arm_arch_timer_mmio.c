@@ -251,7 +251,7 @@ static void arch_timer_mmio_setup(struct arch_timer *at, int irq)
 		.features		   = (CLOCK_EVT_FEAT_ONESHOT |
 					      CLOCK_EVT_FEAT_DYNIRQ),
 		.name			   = "arch_mem_timer",
-		.rating			   = 400,
+		.rating			   = 460,
 		.cpumask		   = cpu_possible_mask,
 		.irq 			   = irq,
 		.set_next_event		   = arch_timer_mmio_set_next_event,
