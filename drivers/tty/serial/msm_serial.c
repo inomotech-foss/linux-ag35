@@ -786,8 +786,12 @@ static void msm_handle_rx_dm(struct uart_port *port, unsigned int misr)
 
 	tty_flip_buffer_push(tport);
 
-	if (misr & (MSM_UART_IMR_RXSTALE))
-		msm_write(port, MSM_UART_CR_CMD_RESET_STALE_INT, MSM_UART_CR);
+	/*
+	 * Always clear stale before re-enabling: if RXLEV races with the
+	 * hardware stale timeout the stale logic latches and STALE_EVENT_ENABLE
+	 * is ignored until RESET_STALE_INT is issued.
+	 */
+	msm_write(port, MSM_UART_CR_CMD_RESET_STALE_INT, MSM_UART_CR);
 	msm_write(port, 0xFFFFFF, UARTDM_DMRX);
 	msm_write(port, MSM_UART_CR_CMD_STALE_EVENT_ENABLE, MSM_UART_CR);
 
@@ -1023,6 +1027,9 @@ static void msm_reset(struct uart_port *port)
 	/* Disable DM modes */
 	if (msm_port->is_uartdm)
 		msm_write(port, 0, UARTDM_DMEN);
+
+	/* RESET_RX clears the hardware byte counter; sync software state */
+	msm_port->old_snap_state = 0;
 }
 
 static void msm_set_mctrl(struct uart_port *port, unsigned int mctrl)

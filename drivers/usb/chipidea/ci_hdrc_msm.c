@@ -6,6 +6,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/usb/chipidea.h>
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/reset.h>
 #include <linux/mfd/syscon.h>
 #include <linux/regmap.h>
@@ -15,6 +16,7 @@
 #include <linux/of.h>
 
 #include "ci.h"
+#include "bits.h"
 
 #define HS_PHY_AHB_MODE			0x0098
 
@@ -38,6 +40,7 @@ struct ci_hdrc_msm {
 	struct clk *core_clk;
 	struct clk *iface_clk;
 	struct clk *fs_clk;
+	struct reset_control *rst;
 	struct ci_hdrc_platform_data pdata;
 	struct reset_controller_dev rcdev;
 	bool secondary_phy;
@@ -86,13 +89,14 @@ static int ci_hdrc_msm_notify_event(struct ci_hdrc *ci, unsigned event)
 	case CI_HDRC_CONTROLLER_RESET_EVENT:
 		dev_dbg(dev, "CI_HDRC_CONTROLLER_RESET_EVENT received\n");
 
-		hw_phymode_configure(ci);
-		if (msm_ci->secondary_phy) {
-			u32 val = readl_relaxed(msm_ci->base + HS_PHY_SEC_CTRL);
-			val |= HS_PHY_DIG_CLAMP_N;
-			writel_relaxed(val, msm_ci->base + HS_PHY_SEC_CTRL);
-		}
-
+		/*
+		 * Initialise the PHY first so its clocks are running, then
+		 * assert USB_HS_BCR to reset the controller’s ULPI interface
+		 * hardware.  On MDM9607 the bootloader leaves USB completely
+		 * uninitialised so the ULPI state machine is stuck at power-on;
+		 * BCR is the only way to reset it.  Doing BCR before phy_init
+		 * hangs because the PHY clock is not yet running.
+		 */
 		ret = phy_init(ci->phy);
 		if (ret)
 			return ret;
@@ -101,6 +105,20 @@ static int ci_hdrc_msm_notify_event(struct ci_hdrc *ci, unsigned event)
 		if (ret) {
 			phy_exit(ci->phy);
 			return ret;
+		}
+
+		/* BCR reset — safe now that PHY clocks are running */
+		reset_control_assert(msm_ci->rst);
+		usleep_range(1000, 1200);
+		reset_control_deassert(msm_ci->rst);
+		ndelay(200);
+
+		/* Configure PORTSC for ULPI (BCR just reset it to default) */
+		hw_write(ci, OP_PORTSC, PORTSC_PTS(7), PORTSC_PTS(PTS_ULPI));
+		if (msm_ci->secondary_phy) {
+			u32 val = readl_relaxed(msm_ci->base + HS_PHY_SEC_CTRL);
+			val |= HS_PHY_DIG_CLAMP_N;
+			writel_relaxed(val, msm_ci->base + HS_PHY_SEC_CTRL);
 		}
 
 		/* use AHB transactor, allow posted data writes */
@@ -114,7 +132,8 @@ static int ci_hdrc_msm_notify_event(struct ci_hdrc *ci, unsigned event)
 			hw_write_id_reg(ci, HS_PHY_GENCONFIG_2,
 					HS_PHY_ULPI_TX_PKT_EN_CLR_FIX, 0);
 
-		if (!IS_ERR(ci->platdata->vbus_extcon.edev) || ci->role_switch) {
+		if (!IS_ERR(ci->platdata->vbus_extcon.edev) || ci->role_switch ||
+		    (ci->platdata->flags & CI_HDRC_FORCE_VBUS_ACTIVE_ALWAYS)) {
 			hw_write_id_reg(ci, HS_PHY_GENCONFIG_2,
 					HS_PHY_SESS_VLD_CTRL_EN,
 					HS_PHY_SESS_VLD_CTRL_EN);
@@ -174,11 +193,8 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	struct ci_hdrc_msm *ci;
 	struct platform_device *plat_ci;
 	struct clk *clk;
-	struct reset_control *reset;
 	int ret;
 	struct device_node *ulpi_node, *phy_node;
-
-	dev_dbg(&pdev->dev, "ci_hdrc_msm_probe\n");
 
 	ci = devm_kzalloc(&pdev->dev, sizeof(*ci), GFP_KERNEL);
 	if (!ci)
@@ -189,12 +205,13 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	ci->pdata.capoffset = DEF_CAPOFFSET;
 	ci->pdata.flags	= CI_HDRC_REGS_SHARED | CI_HDRC_DISABLE_STREAMING |
 			  CI_HDRC_OVERRIDE_AHB_BURST |
-			  CI_HDRC_OVERRIDE_PHY_CONTROL;
+			  CI_HDRC_OVERRIDE_PHY_CONTROL |
+			  CI_HDRC_FORCE_VBUS_ACTIVE_ALWAYS;
 	ci->pdata.notify_event = ci_hdrc_msm_notify_event;
 
-	reset = devm_reset_control_get(&pdev->dev, "core");
-	if (IS_ERR(reset))
-		return PTR_ERR(reset);
+	ci->rst = devm_reset_control_get(&pdev->dev, "core");
+	if (IS_ERR(ci->rst))
+		return PTR_ERR(ci->rst);
 
 	ci->core_clk = clk = devm_clk_get(&pdev->dev, "core");
 	if (IS_ERR(clk))
@@ -224,19 +241,22 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	reset_control_assert(reset);
-	usleep_range(10000, 12000);
-	reset_control_deassert(reset);
-
-	clk_disable_unprepare(ci->fs_clk);
-
 	ret = clk_prepare_enable(ci->core_clk);
 	if (ret)
-		return ret;
+		goto err_core;
 
 	ret = clk_prepare_enable(ci->iface_clk);
 	if (ret)
 		goto err_iface;
+
+	/*
+	 * BCR is NOT done here.  On MDM9607 the bootloader leaves USB
+	 * completely uninitialised (PHY clocks off), so asserting BCR at
+	 * this point hangs the bus.  Instead, BCR is performed later in
+	 * the notify_event handler after phy_init has enabled PHY clocks.
+	 */
+
+	clk_disable_unprepare(ci->fs_clk);
 
 	ret = ci_hdrc_msm_mux_phy(ci, pdev);
 	if (ret)
@@ -271,6 +291,8 @@ err_mux:
 	clk_disable_unprepare(ci->iface_clk);
 err_iface:
 	clk_disable_unprepare(ci->core_clk);
+err_core:
+	clk_disable_unprepare(ci->fs_clk);
 	return ret;
 }
 

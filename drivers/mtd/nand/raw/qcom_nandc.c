@@ -1564,10 +1564,20 @@ static int qcom_op_cmd_mapping(struct nand_chip *chip, u8 opcode,
 		cmd = OP_FETCH_ID;
 		break;
 	case NAND_CMD_PARAM:
-		if (nandc->props->qpic_version2)
-			cmd = OP_PAGE_READ_ONFI_READ;
-		else
-			cmd = OP_PAGE_READ;
+		/*
+		 * Use the dedicated OP_PAGE_READ_ONFI_READ (0x5) opcode for
+		 * all QPIC variants.  The hardware natively handles ONFI
+		 * parameter page reads with this opcode, sending the correct
+		 * 0xEC command to the flash chip.  This matches the
+		 * downstream MSM_NAND_CMD_PAGE_READ_ONFI (0x35 with flags).
+		 *
+		 * Previously, non-v2 used OP_PAGE_READ (0x2) and patched
+		 * DEV_CMD1/DEV_CMD_VLD registers to reroute the read command
+		 * through the parameter page opcode.  That workaround added
+		 * unnecessary CMD1/VLD writes and restore operations that the
+		 * downstream driver doesn't perform for ONFI reads.
+		 */
+		cmd = OP_PAGE_READ_ONFI_READ;
 		break;
 	case NAND_CMD_ERASE1:
 	case NAND_CMD_ERASE2:
@@ -1886,10 +1896,19 @@ static int qcom_param_page_type_exec(struct nand_chip *chip,  const struct nand_
 	nandc->regs->addr0 = 0;
 	nandc->regs->addr1 = 0;
 
+	/*
+	 * CFG0 must match the downstream MSM_NAND_CFG0_RAW_ONFI_PARAM_INFO
+	 * value (0x88040000).  Key differences from a normal page read:
+	 *   - NUM_ADDR_CYCLES=1 (ONFI param page needs only 1 address cycle,
+	 *     not the 5 used for normal page reads)
+	 *   - SET_RD_MODE_AFTER_STATUS=1 (downstream always sets this for
+	 *     ONFI reads)
+	 */
 	nandc->regs->cfg0 = cpu_to_le32(FIELD_PREP(CW_PER_PAGE_MASK, 0) |
 					FIELD_PREP(UD_SIZE_BYTES_MASK, 512) |
-					FIELD_PREP(NUM_ADDR_CYCLES_MASK, 5) |
-					FIELD_PREP(SPARE_SIZE_BYTES_MASK, 0));
+					FIELD_PREP(NUM_ADDR_CYCLES_MASK, 1) |
+					FIELD_PREP(SPARE_SIZE_BYTES_MASK, 0) |
+					FIELD_PREP(SET_RD_MODE_AFTER_STATUS, 1));
 
 	nandc->regs->cfg1 = cpu_to_le32(FIELD_PREP(NAND_RECOVERY_CYCLES_MASK, 7) |
 					FIELD_PREP(BAD_BLOCK_BYTE_NUM_MASK, 17) |
@@ -1899,51 +1918,56 @@ static int qcom_param_page_type_exec(struct nand_chip *chip,  const struct nand_
 					FIELD_PREP(WIDE_FLASH, 0) |
 					FIELD_PREP(DEV0_CFG1_ECC_DISABLE, 1));
 
+	/*
+	 * config_nand_page_read() writes 3 contiguous registers starting
+	 * at NAND_DEV0_CFG0: cfg0 (0x20), cfg1 (0x24), ecc_bch_cfg (0x28).
+	 * We must explicitly set ecc_bch_cfg here; otherwise the stale value
+	 * from a previous operation is written to NAND_DEV0_ECC_CFG (0x28),
+	 * which can leave ECC enabled or write garbage to the ECC config.
+	 * Downstream sets this to (1 << ECC_CFG_ECC_DISABLE) = 1.
+	 */
+	nandc->regs->ecc_bch_cfg = cpu_to_le32(ECC_CFG_ECC_DISABLE);
+
 	if (!nandc->props->qpic_version2)
 		nandc->regs->ecc_buf_cfg = cpu_to_le32(ECC_CFG_ECC_DISABLE);
 
-	/* configure CMD1 and VLD for ONFI param probing in QPIC v1 */
-	if (!nandc->props->qpic_version2) {
-		nandc->regs->vld = cpu_to_le32((nandc->vld & ~READ_START_VLD));
-		nandc->regs->cmd1 = cpu_to_le32((nandc->cmd1 & ~READ_ADDR_MASK) |
-						FIELD_PREP(READ_ADDR_MASK, NAND_CMD_PARAM));
-	}
+	/*
+	 * CMD1/VLD patching is only needed on QPIC v1 when using
+	 * OP_PAGE_READ (0x2) as the flash command.  With the dedicated
+	 * OP_PAGE_READ_ONFI_READ (0x5) opcode, the hardware natively
+	 * sends 0xEC to the flash chip, so CMD1/VLD modification is
+	 * unnecessary.  Skip it to match downstream behavior (which
+	 * never touches CMD1/VLD for ONFI reads) and reduce the number
+	 * of BAM command descriptors.
+	 */
 
 	nandc->regs->exec = cpu_to_le32(1);
-
-	if (!nandc->props->qpic_version2) {
-		nandc->regs->orig_cmd1 = cpu_to_le32(nandc->cmd1);
-		nandc->regs->orig_vld = cpu_to_le32(nandc->vld);
-	}
 
 	instr = q_op.data_instr;
 	op_id = q_op.data_instr_idx;
 	len = nand_subop_get_data_len(subop, op_id);
 
-	if (nandc->props->qpic_version2)
-		nandc_set_read_loc_last(chip, reg_base, 0, len, 1);
-	else
-		nandc_set_read_loc_first(chip, reg_base, 0, len, 1);
-
-	if (!nandc->props->qpic_version2) {
-		qcom_write_reg_dma(nandc, &nandc->regs->vld, NAND_DEV_CMD_VLD, 1, 0);
-		qcom_write_reg_dma(nandc, &nandc->regs->cmd1, NAND_DEV_CMD1, 1, NAND_BAM_NEXT_SGL);
-	}
-
 	nandc->buf_count = 512;
 	memset(nandc->data_buffer, 0xff, nandc->buf_count);
+
+	/*
+	 * READ_LOCATION size must match the data pipe DMA descriptor size
+	 * (buf_count), not the ONFI param page size (len).  The NAND
+	 * controller reads UD_SIZE_BYTES (512) from flash into its buffer;
+	 * READ_LOCATION tells it how many bytes to push into the BAM data
+	 * pipe.  Values are copied into BAM command elements at
+	 * qcom_write_reg_dma() call time, so this must be set BEFORE
+	 * config_nand_single_cw_page_read().
+	 */
+	if (nandc->props->qpic_version2)
+		nandc_set_read_loc_last(chip, reg_base, 0, nandc->buf_count, 1);
+	else
+		nandc_set_read_loc_first(chip, reg_base, 0, nandc->buf_count, 1);
 
 	config_nand_single_cw_page_read(chip, false, 0);
 
 	qcom_read_data_dma(nandc, FLASH_BUF_ACC, nandc->data_buffer,
 			   nandc->buf_count, 0);
-
-	/* restore CMD1 and VLD regs */
-	if (!nandc->props->qpic_version2) {
-		qcom_write_reg_dma(nandc, &nandc->regs->orig_cmd1, NAND_DEV_CMD1_RESTORE, 1, 0);
-		qcom_write_reg_dma(nandc, &nandc->regs->orig_vld, NAND_DEV_CMD_VLD_RESTORE, 1,
-				   NAND_BAM_NEXT_SGL);
-	}
 
 	ret = qcom_submit_descs(nandc);
 	if (ret) {
@@ -2029,10 +2053,37 @@ static const struct nand_controller_ops qcom_nandc_ops = {
 	.exec_op = qcom_nand_exec_op,
 };
 
+/**
+ * qcom_nandc_enable_bam_mode() - enable BAM mode via DMA command descriptor
+ * @nandc: qpic nand controller
+ *
+ * On TZ-protected platforms (e.g. MDM9607), NAND_CTRL is an operational
+ * register that the CPU cannot write directly in non-BAM mode.  Use the
+ * BAM command pipe to write BAM_MODE_EN to NAND_CTRL.
+ */
+static int qcom_nandc_enable_bam_mode(struct qcom_nand_controller *nandc)
+{
+	int ret;
+
+	qcom_clear_read_regs(nandc);
+	qcom_clear_bam_transaction(nandc);
+
+	nandc->regs->nand_ctrl = cpu_to_le32(BAM_MODE_EN);
+	qcom_write_reg_dma(nandc, &nandc->regs->nand_ctrl, NAND_CTRL, 1,
+			   NAND_BAM_NEXT_SGL);
+
+	ret = qcom_submit_descs(nandc);
+	if (ret)
+		dev_err(nandc->dev, "failed to enable BAM mode via DMA\n");
+
+	return ret;
+}
+
 /* one time setup of a few nand controller registers */
 static int qcom_nandc_setup(struct qcom_nand_controller *nandc)
 {
 	u32 nand_ctrl;
+	int ret;
 
 	nand_controller_init(nandc->controller);
 	nandc->controller->ops = &qcom_nandc_ops;
@@ -2041,7 +2092,19 @@ static int qcom_nandc_setup(struct qcom_nand_controller *nandc)
 	if (!nandc->props->nandc_part_of_qpic)
 		nandc_write(nandc, SFLASHC_BURST_CFG, 0);
 
-	if (!nandc->props->qpic_version2)
+	/*
+	 * On MDM9607, TZ owns the QPIC BAM global config and may restrict
+	 * direct CPU writes to certain NAND controller registers.  The
+	 * bootloader (LK/TZ) already programmed NAND_DEV_CMD_VLD and
+	 * enabled BAM mode, so skip those writes and assume BAM mode.
+	 * NAND_DEV_CMD1 may also be inaccessible; use known defaults.
+	 */
+	if (nandc->props->tz_protected_regs) {
+		nandc->cmd1 = NAND_DEV_CMD1_DEFAULT;
+		nandc->vld = NAND_DEV_CMD_VLD_VAL;
+	}
+
+	if (!nandc->props->tz_protected_regs && !nandc->props->qpic_version2)
 		nandc_write(nandc, dev_cmd_reg_addr(nandc, NAND_DEV_CMD_VLD),
 			    NAND_DEV_CMD_VLD_VAL);
 
@@ -2049,21 +2112,22 @@ static int qcom_nandc_setup(struct qcom_nand_controller *nandc)
 	if (nandc->props->supports_bam) {
 		nand_ctrl = nandc_read(nandc, NAND_CTRL);
 
-		/*
-		 *NAND_CTRL is an operational registers, and CPU
-		 * access to operational registers are read only
-		 * in BAM mode. So update the NAND_CTRL register
-		 * only if it is not in BAM mode. In most cases BAM
-		 * mode will be enabled in bootloader
-		 */
-		if (!(nand_ctrl & BAM_MODE_EN))
-			nandc_write(nandc, NAND_CTRL, nand_ctrl | BAM_MODE_EN);
+		if (!(nand_ctrl & BAM_MODE_EN)) {
+			if (nandc->props->tz_protected_regs) {
+				ret = qcom_nandc_enable_bam_mode(nandc);
+				if (ret)
+					return ret;
+			} else {
+				nandc_write(nandc, NAND_CTRL,
+					    nand_ctrl | BAM_MODE_EN);
+			}
+		}
 	} else {
 		nandc_write(nandc, NAND_FLASH_CHIP_SELECT, DM_EN);
 	}
 
 	/* save the original values of these registers */
-	if (!nandc->props->qpic_version2) {
+	if (!nandc->props->tz_protected_regs && !nandc->props->qpic_version2) {
 		nandc->cmd1 = nandc_read(nandc, dev_cmd_reg_addr(nandc, NAND_DEV_CMD1));
 		nandc->vld = NAND_DEV_CMD_VLD_VAL;
 	}
@@ -2377,6 +2441,15 @@ static const struct qcom_nandc_props ipq4019_nandc_props = {
 	.bam_offset = 0x30000,
 };
 
+static const struct qcom_nandc_props mdm9607_nandc_props = {
+	.ecc_modes = (ECC_BCH_4BIT | ECC_BCH_8BIT),
+	.supports_bam = true,
+	.nandc_part_of_qpic = true,
+	.dev_cmd_reg_start = 0x0,
+	.bam_offset = 0x30000,
+	.tz_protected_regs = true,
+};
+
 static const struct qcom_nandc_props ipq8074_nandc_props = {
 	.ecc_modes = (ECC_BCH_4BIT | ECC_BCH_8BIT),
 	.supports_bam = true,
@@ -2402,6 +2475,10 @@ static const struct of_device_id qcom_nandc_of_match[] = {
 	{
 		.compatible = "qcom,ipq806x-nand",
 		.data = &ipq806x_nandc_props,
+	},
+	{
+		.compatible = "qcom,mdm9607-nand",
+		.data = &mdm9607_nandc_props,
 	},
 	{
 		.compatible = "qcom,ipq4019-nand",

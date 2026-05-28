@@ -591,9 +591,40 @@ int qcom_submit_descs(struct qcom_nand_controller *nandc)
 		dma_async_issue_pending(nandc->rx_chan);
 		dma_async_issue_pending(nandc->cmd_chan);
 
-		if (!wait_for_completion_timeout(&bam_txn->txn_done,
-						 QPIC_NAND_COMPLETION_TIMEOUT))
-			ret = -ETIMEDOUT;
+		/*
+		 * Synchronous polling: call dma_async_is_tx_complete()
+		 * which triggers bam_tx_status() to process hardware
+		 * completions in polling mode.  This bypasses the
+		 * hrtimer/tasklet/callback chain which doesn't work on
+		 * platforms where timer interrupts are not available
+		 * during early boot (controlled-remotely BAMs).
+		 */
+		{
+			enum dma_status dma_st;
+			int poll_ms;
+
+			for (poll_ms = 0; poll_ms < 2000; poll_ms++) {
+				dma_st = dma_async_is_tx_complete(
+						nandc->cmd_chan, cookie,
+						NULL, NULL);
+				if (dma_st == DMA_COMPLETE)
+					break;
+				udelay(100);
+			}
+
+			if (dma_st != DMA_COMPLETE) {
+				dev_err(nandc->dev,
+					"BAM DMA timeout! cookie=%d tx=%d rx=%d cmd=%d\n",
+					cookie,
+					bam_txn->tx_sgl_pos -
+						bam_txn->tx_sgl_start,
+					bam_txn->rx_sgl_pos -
+						bam_txn->rx_sgl_start,
+					bam_txn->cmd_sgl_pos -
+						bam_txn->cmd_sgl_start);
+				ret = -ETIMEDOUT;
+			}
+		}
 	} else {
 		if (dma_sync_wait(nandc->chan, cookie) != DMA_COMPLETE)
 			ret = -ETIMEDOUT;

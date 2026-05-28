@@ -575,6 +575,9 @@ static const struct of_device_id emac_dt_match[] = {
 	{
 		.compatible = "qcom,fsm9900-emac",
 	},
+	{
+		.compatible = "qcom,mdm9607-emac",
+	},
 	{}
 };
 MODULE_DEVICE_TABLE(of, emac_dt_match);
