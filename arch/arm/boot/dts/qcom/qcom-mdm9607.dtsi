@@ -670,6 +670,15 @@
 				output-low;
 			};
 
+			/* FC20/QCA6174 WAKE_WLAN out-of-band wake IRQ (gpio59) */
+			wlan_wake_default: wlan-wake-default {
+				pins = "gpio59";
+				function = "gpio";
+				drive-strength = <2>;
+				bias-pull-down;
+				input-enable;
+			};
+
 			pmx_sec_mi2s_active: sec-mi2s-active {
 				din {
 					pins = "gpio76";

@@ -58,6 +58,42 @@
 		regulator-always-on;
 		regulator-boot-on;
 	};
+
+	/*
+	 * Main VBAT enable for the FC20 (QCA6174) WiFi+BT module on the
+	 * LTE OPEN EVB.  PM8019 GPIO 2 gates the board-level rail that
+	 * powers the entire FC20 module.  Modeled as a regulator-fixed
+	 * so MMC core (vmmc-supply) drives it on/off via the gpio.
+	 * Default off: WiFi is enabled by user action (rfkill / mmc
+	 * power-cycle).  When disabled the FC20 is completely unpowered,
+	 * for system-idle current targets near the PMIC quiescent floor.
+	 *
+	 * EVB requires switch S0201 set RIGHT to route SDC1 to FC20.
+	 */
+	wifi_pwr_reg: regulator-wifi-pwr {
+		compatible = "regulator-fixed";
+		regulator-name = "wifi_vbat";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&pm8019_gpios 2 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <70000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_pwr_en_default>;
+	};
+
+	/*
+	 * MMC power sequencer for QCA6174 SDIO.
+	 * WLAN_EN (TLMM gpio54) is asserted after vmmc rises so the chip
+	 * comes out of reset only once supplies are stable.
+	 */
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&tlmm 54 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&sdc1_wlan_gpio_active>;
+		post-power-on-delay-ms = <20>;
+	};
 };
 
 /* BLSP1 UART2 (gpio4/5): debug console */
@@ -155,3 +191,72 @@
 &qpic_nand { status = "okay"; };
 
 /* &pm8019_mpps { ... }; */
+
+/*
+ * PM8019 GPIO 2 = "PM_ENABLE_WIFI": gates the board-level VBAT rail to
+ * the FC20 (QCA6174) WiFi+BT module.  Configured as a normal output,
+ * VPH_PWR source, default low so WiFi is OFF at boot (downstream does
+ * the same: "do not active PM_ENABLE_WIFI when bootup time").  The
+ * wifi_pwr_reg regulator-fixed in / drives it via gpiolib.
+ */
+&pm8019_gpios {
+	wifi_pwr_en_default: wifi-pwr-en-default {
+		pins = "gpio2";
+		function = "normal";
+		bias-disable;
+		drive-push-pull;
+		power-source = <3>;	/* VPH_PWR */
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_HIGH>;
+		output-low;
+	};
+};
+
+/*
+ * SDCC1 = SDIO host for FC20 (QCA6174 / AR6320) WiFi.
+ *
+ * Power topology:
+ *   vmmc (FC20 VBAT)  -> wifi_pwr_reg  -> PM8019 GPIO 2
+ *   vqmmc (SDIO 1.8V) -> mdm9607_l11   (always-on PMIC LDO)
+ *   mmc-pwrseq        -> WLAN_EN (TLMM gpio54) released after vmmc
+ *
+ * The interconnect / OPP / power-domain properties from the dtsi are
+ * deleted (same workaround as sdhc_2): the bimc & pcnoc interconnect
+ * providers are disabled, so dev_pm_opp_of_find_icc_paths returns
+ * -EPROBE_DEFER forever and the host never probes.
+ *
+ * cap-power-off-card lets the MMC core fully power off the SDIO card
+ * (vmmc disable) when the wifi driver is unbound, dropping the FC20
+ * to ~0 mA.
+ */
+&sdhc_1 {
+	vmmc-supply = <&wifi_pwr_reg>;
+	vqmmc-supply = <&mdm9607_l11>;
+	mmc-pwrseq = <&wifi_pwrseq>;
+
+	bus-width = <4>;
+	non-removable;
+	cap-power-off-card;
+	keep-power-in-suspend;
+	wakeup-source;
+
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&sdhci1_pins_active &wlan_wake_default>;
+	pinctrl-1 = <&sdhci1_pins_sleep  &wlan_wake_default>;
+
+	status = "okay";
+
+	/delete-property/ interconnects;
+	/delete-property/ operating-points-v2;
+	/delete-property/ power-domains;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	wifi@1 {
+		compatible = "qcom,ath10k";
+		reg = <1>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <59 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "wow";
+	};
+};
