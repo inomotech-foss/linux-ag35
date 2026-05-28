@@ -861,19 +861,64 @@ static void bam_dmux_free_skbs(struct bam_dmux_skb_dma skbs[],
 	}
 }
 
+/*
+ * Stop the netdev TX path so no new descriptors get queued onto the
+ * BAM while we are tearing down the data path.  Called from contexts
+ * where the modem peer may already be gone (pc_irq down, modem SSR,
+ * system shutdown), so it must not touch BAM hardware itself.
+ */
+static void bam_dmux_quiesce_netdevs(struct bam_dmux *dmux)
+{
+	int i;
+
+	rtnl_lock();
+	for (i = 0; i < BAM_DMUX_NUM_CH; ++i) {
+		struct net_device *netdev = dmux->netdevs[i];
+
+		if (!netdev)
+			continue;
+		netif_carrier_off(netdev);
+		netif_tx_disable(netdev);
+	}
+	rtnl_unlock();
+}
+
+/*
+ * Tear down the data path in response to a modem-initiated power-down
+ * (pc_irq new_state=0) or modem SSR.  At this point the modem-side A2
+ * BAM peer is in the process of going away, so any register write that
+ * crosses the BAM<->peer link (channel reset, halt, SW_RST) can
+ * provoke an imprecise external abort from the BAM hardware.
+ *
+ * We therefore:
+ *   1. Stop the netdev TX queues so the xmit path stops submitting to
+ *      dmux->tx.
+ *   2. Cancel any pending tx-wake work that could submit after we
+ *      return.
+ *   3. Call dmaengine_terminate_sync() to flush in-flight descriptors
+ *      at the channel level — this stays inside the per-pipe state
+ *      machine and does not touch the cross-peer registers that
+ *      bam_free_chan() touches.
+ *   4. Release the RX skbs so the next bam_dmux_power_on() can re-queue
+ *      them.
+ *
+ * We deliberately do NOT call dma_release_channel() here: that would
+ * end up in bam_free_chan() touching BAM_P_HALT / BAM_SW_RST / the
+ * shared FIFO state, which is what causes the abort when the modem
+ * side has just been torn down.  The channel handles are kept open
+ * for the entire lifetime of the driver and reused on the next
+ * power-on cycle; bam_dmux_power_on() already short-circuits the
+ * dma_request_chan() call when dmux->tx / dmux->rx are non-NULL.
+ */
 static void bam_dmux_power_off(struct bam_dmux *dmux)
 {
-	if (dmux->tx) {
-		dmaengine_terminate_sync(dmux->tx);
-		dma_release_channel(dmux->tx);
-		dmux->tx = NULL;
-	}
+	bam_dmux_quiesce_netdevs(dmux);
+	cancel_work_sync(&dmux->tx_wakeup_work);
 
-	if (dmux->rx) {
+	if (dmux->tx)
+		dmaengine_terminate_sync(dmux->tx);
+	if (dmux->rx)
 		dmaengine_terminate_sync(dmux->rx);
-		dma_release_channel(dmux->rx);
-		dmux->rx = NULL;
-	}
 
 	bam_dmux_free_skbs(dmux->rx_skbs, DMA_FROM_DEVICE);
 }
@@ -1169,13 +1214,31 @@ static void bam_dmux_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(dev);
 
 	/* Try to wait for remote side to drop power vote */
-	if (!wait_event_timeout(dmux->pc_wait, !dmux->rx, BAM_DMUX_REMOTE_TIMEOUT))
+	if (!wait_event_timeout(dmux->pc_wait, !dmux->pc_state,
+				BAM_DMUX_REMOTE_TIMEOUT))
 		dev_err(dev, "Timed out waiting for remote side to suspend\n");
 
 	/* Make sure everything is cleaned up before we return */
 	disable_irq(dmux->pc_irq);
 	bam_dmux_power_off(dmux);
 	bam_dmux_free_skbs(dmux->tx_skbs, DMA_TO_DEVICE);
+
+	/*
+	 * Release the DMA channels we kept open across power cycles.  This
+	 * is the only path that calls dma_release_channel(): pc_irq /
+	 * shutdown paths leave the channels allocated to avoid touching the
+	 * BAM peer-facing registers when the modem is in the middle of
+	 * going down.  Driver unbind is user-initiated, so the modem is
+	 * expected to be quiesced (pc_state == 0) by the wait above.
+	 */
+	if (dmux->tx) {
+		dma_release_channel(dmux->tx);
+		dmux->tx = NULL;
+	}
+	if (dmux->rx) {
+		dma_release_channel(dmux->rx);
+		dmux->rx = NULL;
+	}
 }
 
 /*
