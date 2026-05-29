@@ -154,6 +154,17 @@ config POWER_RESET_QCOM_PON
 	  power-on and reboot reason, Say Y.
 	  If unsure, Say N.
 
+config POWER_RESET_QCOM_EDL
+	tristate "Qualcomm Emergency Download (EDL) reboot handler"
+	depends on ARCH_QCOM
+	depends on MFD_SYSCON
+	select QCOM_SCM
+	help
+	  Adds a 'reboot edl' command that tells TrustZone to enter
+	  Emergency Download / Sahara mode on the next warm reset,
+	  without needing to short the USB_BOOT pin.
+	  If unsure, Say N.
+
 config POWER_RESET_OCELOT_RESET
 	bool "Microsemi Ocelot reset driver"
 	depends on MSCC_OCELOT || ARCH_SPARX5 || COMPILE_TEST

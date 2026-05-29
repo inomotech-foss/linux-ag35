@@ -1199,6 +1199,12 @@
 				compatible = "qcom,pil-reloc-info";
 				reg = <0x94c 0xc8>;
 			};
+
+			edl-reboot {
+				compatible = "qcom,edl-reboot";
+				qcom,edload-offset = <0xfe0>;
+				qcom,tcsr-boot-misc = /bits/ 64 <0x0193d100>;
+			};
 		};
 
 		intc: interrupt-controller@b000000 {
