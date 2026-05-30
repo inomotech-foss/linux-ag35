@@ -187,6 +187,33 @@
 		};
 	};
 
+	mpm: interrupt-controller {
+		compatible = "qcom,mpm";
+		qcom,rpm-msg-ram = <&apss_mpm>;
+		interrupts = <GIC_SPI 171 IRQ_TYPE_EDGE_RISING>;
+		mboxes = <&apcs 1>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		#power-domain-cells = <0>;
+		interrupt-parent = <&intc>;
+
+		/*
+		 * MDM9607 supports 64 MPM wakeup pins.  Most of them are
+		 * internal RPM signals (rpm_ipc, wdog, etc.) that are not
+		 * routed to the GIC at all and so are omitted from the
+		 * pin-map below; only the pins that have a corresponding
+		 * GIC SPI on the AP side are listed.  The mapping is taken
+		 * from downstream mdm9607-pm.dtsi (qcom,gic-map).
+		 */
+		qcom,mpm-pin-count = <64>;
+		qcom,mpm-pin-map = <2 216>,  /* tsens_upper_lower_int */
+				   <49 172>, /* usb1_hs_async_wakeup_irq */
+				   <51 174>, /* usb2_hs_async_wakeup_irq */
+				   <53 104>, /* mdss_irq */
+				   <58 166>, /* usb_hs_irq */
+				   <62 222>; /* ee0_apps_hlos_spmi_periph_irq */
+	};
+
 	smd {
 		compatible = "qcom,smd";
 
@@ -300,9 +327,24 @@
 			clock-names = "core";
 		};
 
-		rpm_msg_ram: memory@60000 {
-			compatible = "qcom,rpm-msg-ram";
+		rpm_msg_ram: sram@60000 {
+			compatible = "qcom,rpm-msg-ram", "mmio-sram";
 			reg = <0x00060000 0x8000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0 0x00060000 0x8000>;
+
+			/*
+			 * Slice of the RPM message RAM that the AP and the RPM
+			 * share for the virtual MPM (vMPM) register file.  The
+			 * AP writes ENABLE/POLARITY/EDGE here while awake; the
+			 * RPM dumps it into the real MPM block at sleep entry
+			 * and copies STATUS back on wake.  Offset and size match
+			 * the downstream qcom,mpm@601d0 'vmpm' region.
+			 */
+			apss_mpm: sram@1d0 {
+				reg = <0x1d0 0x1000>;
+			};
 		};
 
 		usb_hs_phy: phy@6c000 {
