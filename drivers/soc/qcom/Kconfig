@@ -236,6 +236,19 @@ config QCOM_SPM
 	  to manage cores, L2 low power modes and to configure the internal
 	  Adaptive Voltage Scaler parameters, where supported.
 
+config QCOM_PM
+	tristate "Qualcomm MSM platform suspend"
+	depends on ARM && ARCH_QCOM
+	depends on SUSPEND
+	depends on QCOM_SPM
+	help
+	  Enable PM_SUSPEND_MEM ("deep" / "mem") for older Qualcomm SoCs
+	  that have an SPM/SAW2 power controller but no PSCI firmware (e.g.
+	  MDM9607).  During suspend the SAW2 is armed in PC mode with the
+	  SLP_CMD bit set; the resulting RPM sleep handshake applies the
+	  aggregated sleep set (PMIC sleep voltages, XO off, sleep clock
+	  only) before clock-gating the APSS at WFI.
+
 config QCOM_STATS
 	tristate "Qualcomm Technologies, Inc. (QTI) Sleep stats driver"
 	depends on (ARCH_QCOM && DEBUG_FS) || COMPILE_TEST
