@@ -60,6 +60,30 @@
 			device_type = "cpu";
 			compatible = "arm,cortex-a7";
 			reg = <0x0>;
+			qcom,saw = <&saw0>;
+			/*
+			 * SPC (CPU power-collapse via SAW2) is wired up in
+			 * the SPM driver and the saw0 node above, but kept
+			 * disabled at the cpuidle layer for now: enabling
+			 * &CPU_SPC causes the core to power-collapse during
+			 * boot (e.g. while VADC waits for the PMIC) without
+			 * ever waking, triggering the watchdog reset.  Wake
+			 * routing through MPM is needed first.  Leaving the
+			 * SAW driver bound is intentional so that future
+			 * suspend_ops work can drive SPC directly.
+			 */
+			/* cpu-idle-states = <&CPU_SPC>; */
+		};
+
+		idle-states {
+			CPU_SPC: cpu-spc {
+				compatible = "qcom,idle-state-spc",
+					     "arm,idle-state";
+				entry-latency-us = <240>;
+				exit-latency-us = <420>;
+				min-residency-us = <2000>;
+				status = "disabled";
+			};
 		};
 	};
 
@@ -1222,6 +1246,12 @@
 			#interrupt-cells = <3>;
 			reg = <0x0b000000 0x1000>,
 			      <0x0b002000 0x1000>;
+		};
+
+		saw0: power-manager@b009000 {
+			compatible = "qcom,mdm9607-saw2-v2.1-cpu",
+				     "qcom,saw2";
+			reg = <0x0b009000 0x1000>;
 		};
 
 		apcs_cpu: mailbox@b010000 {

@@ -71,6 +71,7 @@ struct spm_reg_data {
 	u32 avs_limit;
 	u8 seq[MAX_SEQ_DATA];
 	u8 start_index[PM_SLEEP_MODE_NR];
+	u32 mode_ctl_bits[PM_SLEEP_MODE_NR];
 
 	smp_call_func_t set_vdd;
 	/* for now we support only a single range */
@@ -218,6 +219,43 @@ static const struct spm_reg_data spm_reg_8226_cpu  = {
 	.start_index[PM_SLEEP_MODE_SPC] = 5,
 };
 
+/*
+ * SPM register data for MDM9607 CPU0.
+ *
+ * Sequences and SAW2_CFG/SPM_DLY values taken verbatim from the downstream
+ * Quectel kernel (arch/arm/boot/dts/qcom/mdm9607-pm.dtsi, qcom,spm@b009000).
+ * MDM9607 has a single Cortex-A7 with SAW2 v2.1 register layout and does not
+ * drive any PMIC ops from the SPM (PM8019 is managed via SMD-RPM, not SAW).
+ *
+ * mode_ctl_bits[SPC] sets PC_MODE (bit 16) in SAW_SPM_CTL: this is required
+ * for the SAW state machine to actually toggle the CPU power-gate during
+ * the sequence.  Without it the SCM TERMINATE_PC call never returns.
+ * Downstream encodes this via the qcom,pc_mode DT property.
+ *
+ * mode_ctl_bits[PC] adds SLP_CMD_MODE (bit 17): when the SAW2 sequence runs
+ * with this bit set, it issues an IPC to the RPM ("APSS entering sleep")
+ * and waits for ACK before clock-gating the core.  On wake, the SAW2 issues
+ * the matching "APSS exiting sleep" IPC.  This is what causes the RPM to
+ * apply its sleep set (PMIC sleep voltages, XO off, etc.) -- the only path
+ * to single-digit mW system suspend on this SoC.  The PC sequence itself is
+ * taken verbatim from downstream qcom,saw2-spm-cmd-pc.
+ */
+static const struct spm_reg_data spm_reg_mdm9607_cpu = {
+	.reg_offset = spm_reg_offset_v2_1,
+	.spm_cfg = 0x1,
+	.spm_dly = 0x3C102800,
+	.seq = { 0x04, 0x03, 0x04, 0x0F,
+		 0x1F, 0x34, 0x04, 0x44, 0x24, 0x54, 0x03, 0x54, 0x44, 0x04,
+		 0x24, 0x34, 0x0F,
+		 0x1F, 0x34, 0x04, 0x44, 0x14, 0x24, 0x54, 0x03, 0x54, 0x44,
+		 0x14, 0x04, 0x04, 0x24, 0x04, 0x34, 0x0F },
+	.start_index[PM_SLEEP_MODE_STBY] = 0,
+	.start_index[PM_SLEEP_MODE_SPC] = 4,
+	.start_index[PM_SLEEP_MODE_PC] = 17,
+	.mode_ctl_bits[PM_SLEEP_MODE_SPC] = BIT(16),
+	.mode_ctl_bits[PM_SLEEP_MODE_PC] = BIT(16) | BIT(17),
+};
+
 static const u16 spm_reg_offset_v1_1[SPM_REG_NR] = {
 	[SPM_REG_CFG]		= 0x08,
 	[SPM_REG_STS0]		= 0x0c,
@@ -265,20 +303,32 @@ static inline void spm_register_write(struct spm_driver_data *drv,
 static inline void spm_register_write_sync(struct spm_driver_data *drv,
 					enum spm_reg reg, u32 val)
 {
+	void __iomem *addr;
 	u32 ret;
+	int i;
 
 	if (!drv->reg_data->reg_offset[reg])
 		return;
 
-	do {
-		writel_relaxed(val, drv->reg_base +
-				drv->reg_data->reg_offset[reg]);
-		ret = readl_relaxed(drv->reg_base +
-				drv->reg_data->reg_offset[reg]);
+	addr = drv->reg_base + drv->reg_data->reg_offset[reg];
+
+	/*
+	 * Some SAW2 register bits (e.g. status / reserved bits in SPM_CTL on
+	 * MDM9607) are not under our control: a plain write followed by an
+	 * equality read-back may never converge.  Bound the poll and warn
+	 * instead of hanging the kernel forever.
+	 */
+	for (i = 0; i < 1000; i++) {
+		writel_relaxed(val, addr);
+		ret = readl_relaxed(addr);
 		if (ret == val)
-			break;
+			return;
 		cpu_relax();
-	} while (1);
+	}
+
+	dev_warn_once(drv->dev,
+		"SPM reg %d write 0x%x did not read back (got 0x%x)\n",
+		reg, val, ret);
 }
 
 static inline u32 spm_register_read(struct spm_driver_data *drv,
@@ -298,6 +348,7 @@ void spm_set_low_power_mode(struct spm_driver_data *drv,
 	ctl_val = spm_register_read(drv, SPM_REG_SPM_CTL);
 	ctl_val &= ~(SPM_CTL_INDEX << SPM_CTL_INDEX_SHIFT);
 	ctl_val |= start_index << SPM_CTL_INDEX_SHIFT;
+	ctl_val |= drv->reg_data->mode_ctl_bits[mode];
 	ctl_val |= SPM_CTL_EN;
 	spm_register_write_sync(drv, SPM_REG_SPM_CTL, ctl_val);
 }
@@ -481,6 +532,8 @@ static const struct of_device_id spm_match_table[] = {
 	  .data = &spm_reg_660_silver_l2 },
 	{ .compatible = "qcom,msm8226-saw2-v2.1-cpu",
 	  .data = &spm_reg_8226_cpu },
+	{ .compatible = "qcom,mdm9607-saw2-v2.1-cpu",
+	  .data = &spm_reg_mdm9607_cpu },
 	{ .compatible = "qcom,msm8909-saw2-v3.0-cpu",
 	  .data = &spm_reg_8909_cpu },
 	{ .compatible = "qcom,msm8916-saw2-v3.0-cpu",
